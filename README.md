@@ -2,8 +2,6 @@
 
 Open-source peer-to-peer virtual LAN for Linux, Windows and macOS, in the spirit of Hamachi and Radmin VPN.
 
-> Status: design stage, no code yet.
-
 ## Goals
 
 - Join friends' machines into one virtual network with a name and a password.
