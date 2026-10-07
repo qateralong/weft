@@ -28,7 +28,7 @@ value-nickname = NICKNAME
 value-name = NAME
 value-password = PASSWORD
 error-daemon-missing = weftd is not running ({ $path })
-error-daemon-permission = No access to weftd ({ $path }); run as root
+error-daemon-permission = No access to weftd ({ $path }); run as root or administrator
 
 prompt-password = Password:
 prompt-password-repeat = Repeat password:

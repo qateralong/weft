@@ -1349,7 +1349,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "loom"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "argon2",
  "clap",
@@ -2211,6 +2211,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sys-locale"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "system-configuration-sys"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2708,7 +2717,7 @@ dependencies = [
 
 [[package]]
 name = "weft"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "clap",
  "rpassword",
@@ -2719,15 +2728,16 @@ dependencies = [
 
 [[package]]
 name = "weft-i18n"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "fluent-bundle",
+ "sys-locale",
  "unic-langid",
 ]
 
 [[package]]
 name = "weft-ipc"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -2736,7 +2746,7 @@ dependencies = [
 
 [[package]]
 name = "weft-mesh"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "blake2 0.11.0",
  "chacha20poly1305 0.11.0",
@@ -2752,7 +2762,7 @@ dependencies = [
 
 [[package]]
 name = "weft-portmap"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "crab_nat",
  "igd-next",
@@ -2763,7 +2773,7 @@ dependencies = [
 
 [[package]]
 name = "weft-proto"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "blake2 0.11.0",
  "chacha20 0.10.2",
@@ -2774,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "weft-session"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "blake2 0.11.0",
  "getrandom 0.4.3",
@@ -2790,7 +2800,7 @@ dependencies = [
 
 [[package]]
 name = "weft-sim"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "rand",
  "weft-proto",
@@ -2799,14 +2809,15 @@ dependencies = [
 
 [[package]]
 name = "weft-tun"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
+ "tracing",
  "tun-rs",
 ]
 
 [[package]]
 name = "weftd"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "clap",
  "serde",
@@ -2821,6 +2832,7 @@ dependencies = [
  "weft-proto",
  "weft-session",
  "weft-tun",
+ "windows-service",
 ]
 
 [[package]]
@@ -2957,6 +2969,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56f42bd332cc6c8eac5af113fc0c1fd6a8fd2aa08a0119358686e5160d0586c6"
 dependencies = [
  "windows-link 0.1.3",
+]
+
+[[package]]
+name = "windows-service"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "857224b3b211c6f3616921f081ee54721ee3ad2ace2fac6a6337e032f7b4dcf2"
+dependencies = [
+ "bitflags",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

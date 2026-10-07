@@ -7,7 +7,12 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const SOCKET_ENV: &str = "WEFT_SOCKET";
+#[cfg(target_os = "macos")]
+pub const DEFAULT_SOCKET: &str = "/var/run/weft/weftd.sock";
+#[cfg(all(unix, not(target_os = "macos")))]
 pub const DEFAULT_SOCKET: &str = "/run/weft/weftd.sock";
+#[cfg(windows)]
+pub const DEFAULT_SOCKET: &str = r"\\.\pipe\weftd";
 const MAX_LINE: u64 = 1 << 20;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -121,17 +126,29 @@ pub async fn receive<T: DeserializeOwned, R: AsyncBufRead + Unpin>(reader: &mut 
     serde_json::from_str(&line).map(Some).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-#[cfg(unix)]
 pub async fn request(path: &Path, request: &Request) -> io::Result<Response> {
-    let stream = tokio::net::UnixStream::connect(path).await?;
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(connect(path).await?);
     send(&mut writer, request).await?;
     receive(&mut tokio::io::BufReader::new(reader)).await?.ok_or_else(|| io::ErrorKind::UnexpectedEof.into())
 }
 
-#[cfg(not(unix))]
-pub async fn request(_path: &Path, _request: &Request) -> io::Result<Response> {
-    Err(io::ErrorKind::Unsupported.into())
+#[cfg(unix)]
+async fn connect(path: &Path) -> io::Result<tokio::net::UnixStream> {
+    tokio::net::UnixStream::connect(path).await
+}
+
+#[cfg(windows)]
+async fn connect(path: &Path) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    const ERROR_PIPE_BUSY: i32 = 231;
+    for _ in 0..50 {
+        match tokio::net::windows::named_pipe::ClientOptions::new().open(path) {
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            result => return result,
+        }
+    }
+    Err(io::ErrorKind::TimedOut.into())
 }
 
 #[cfg(test)]

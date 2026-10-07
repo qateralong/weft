@@ -46,6 +46,10 @@ pub fn default_nickname() -> String {
         .or_else(|_| std::fs::read_to_string("/etc/hostname"))
         .ok()
         .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .or_else(|| {
+            let output = std::process::Command::new("hostname").output().ok()?;
+            String::from_utf8(output.stdout).ok()
+        })
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "weft".to_string());

@@ -17,6 +17,7 @@ impl Language {
             .into_iter()
             .filter_map(|name| std::env::var(name).ok())
             .find(|value| !value.is_empty())
+            .or_else(sys_locale::get_locale)
             .map_or(Language::English, |locale| Self::from_locale(&locale))
     }
 
@@ -104,5 +105,6 @@ mod tests {
         assert_eq!(Language::from_locale("ru_RU.UTF-8"), Language::Russian);
         assert_eq!(Language::from_locale("en_US.UTF-8"), Language::English);
         assert_eq!(Language::from_locale("C"), Language::English);
+        assert_eq!(Language::from_locale("ru-RU"), Language::Russian);
     }
 }

@@ -24,3 +24,6 @@ weft-portmap.workspace = true
 weft-proto.workspace = true
 weft-session = { workspace = true, features = ["tokio"] }
 weft-tun.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service.workspace = true

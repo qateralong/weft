@@ -12,4 +12,5 @@ workspace = true
 
 [dependencies]
 fluent-bundle.workspace = true
+sys-locale.workspace = true
 unic-langid.workspace = true

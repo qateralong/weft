@@ -26,8 +26,15 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const CANDIDATES_INTERVAL: Duration = Duration::from_secs(60);
 const IDLE_TICK: Duration = Duration::from_secs(3600);
 
+pub struct Options {
+    pub tun_name: String,
+    pub port: Option<u16>,
+    pub echo: bool,
+}
+
 pub struct Daemon {
     keypair: Arc<StaticKeypair>,
+    echo: bool,
     settings: Settings,
     settings_file: SettingsFile,
     tun_name: String,
@@ -68,12 +75,11 @@ impl Daemon {
     pub async fn new(
         keypair: StaticKeypair,
         settings_file: SettingsFile,
-        tun_name: String,
-        port: Option<u16>,
+        options: Options,
         commands: mpsc::Receiver<Command>,
     ) -> std::io::Result<Self> {
         let settings = settings_file.load()?;
-        let port = port.or(settings.port).unwrap_or(0);
+        let port = options.port.or(settings.port).unwrap_or(0);
         let udp = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?;
         let udp_port = udp.local_addr()?.port();
         tracing::info!(port = udp_port, key = %keypair.public(), "weftd started");
@@ -88,9 +94,10 @@ impl Daemon {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let mut daemon = Self {
             keypair: Arc::new(keypair),
+            echo: options.echo,
             settings,
             settings_file,
-            tun_name,
+            tun_name: options.tun_name,
             mesh,
             udp,
             udp_port,
@@ -143,7 +150,7 @@ impl Daemon {
                 Wake::Control(_) => {}
                 Wake::Udp(Ok((len, from))) => {
                     if let Some(delivered) = self.mesh.receive_udp(now, from, &udp_buf[..len]) {
-                        self.write_tun(&delivered.packet).await;
+                        self.deliver(&delivered.packet).await;
                     }
                 }
                 Wake::Udp(Err(error)) => tracing::debug!(%error, "udp receive failed"),
@@ -323,7 +330,7 @@ impl Daemon {
         tracing::info!(%server, %address, "connected to the server");
         self.connection = Connection::Connected;
         self.backoff = MIN_BACKOFF;
-        if self.tun.is_none() || self.tun_address != Some(address) {
+        if !self.echo && (self.tun.is_none() || self.tun_address != Some(address)) {
             self.tun = None;
             self.tun_address = None;
             let config = TunConfig {
@@ -380,7 +387,7 @@ impl Daemon {
             }
             Some(ServerKind::Relay(RelayPacket { address, packet })) => {
                 if let Some(delivered) = self.mesh.receive_tcp_relay(now, Ipv4Addr::from(address), &packet) {
-                    self.write_tun(&delivered.packet).await;
+                    self.deliver(&delivered.packet).await;
                 }
             }
             _ => {}
@@ -444,7 +451,14 @@ impl Daemon {
         }
     }
 
-    async fn write_tun(&self, packet: &[u8]) {
+    async fn deliver(&mut self, packet: &[u8]) {
+        if self.echo {
+            let own = self.welcome.as_ref().map(|welcome| Ipv4Addr::from(welcome.address));
+            if let Some(reply) = own.and_then(|own| crate::echo::reply(packet, own)) {
+                let _ = self.mesh.send(std::time::Instant::now(), &reply);
+            }
+            return;
+        }
         if let Some(tun) = &self.tun
             && let Err(error) = tun.send(packet).await
         {

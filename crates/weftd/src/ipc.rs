@@ -1,10 +1,8 @@
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-use tokio::io::BufReader;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use weft_ipc::{Failure, Request, Response};
 
@@ -15,7 +13,12 @@ pub struct Command {
     pub reply: oneshot::Sender<Response>,
 }
 
-pub fn bind(path: &Path) -> io::Result<UnixListener> {
+#[cfg(unix)]
+pub struct Listener(tokio::net::UnixListener);
+
+#[cfg(unix)]
+pub fn bind(path: &Path) -> io::Result<Listener> {
+    use std::os::unix::fs::PermissionsExt;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -23,14 +26,15 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
-    let listener = UnixListener::bind(path)?;
+    let listener = tokio::net::UnixListener::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
-    Ok(listener)
+    Ok(Listener(listener))
 }
 
-pub async fn serve(listener: UnixListener, commands: mpsc::Sender<Command>) {
+#[cfg(unix)]
+pub async fn serve(listener: Listener, commands: mpsc::Sender<Command>) {
     loop {
-        match listener.accept().await {
+        match listener.0.accept().await {
             Ok((stream, _)) => {
                 tokio::spawn(client(stream, commands.clone()));
             }
@@ -42,8 +46,49 @@ pub async fn serve(listener: UnixListener, commands: mpsc::Sender<Command>) {
     }
 }
 
-async fn client(stream: UnixStream, commands: mpsc::Sender<Command>) {
-    let (reader, mut writer) = stream.into_split();
+#[cfg(unix)]
+pub fn cleanup(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+#[cfg(windows)]
+pub struct Listener {
+    path: std::ffi::OsString,
+    first: tokio::net::windows::named_pipe::NamedPipeServer,
+}
+
+#[cfg(windows)]
+pub fn bind(path: &Path) -> io::Result<Listener> {
+    let first = tokio::net::windows::named_pipe::ServerOptions::new().first_pipe_instance(true).create(path)?;
+    Ok(Listener { path: path.as_os_str().to_owned(), first })
+}
+
+#[cfg(windows)]
+pub async fn serve(listener: Listener, commands: mpsc::Sender<Command>) {
+    use tokio::net::windows::named_pipe::ServerOptions;
+    let Listener { path, mut first } = listener;
+    loop {
+        if let Err(error) = first.connect().await {
+            tracing::warn!(%error, "ipc accept failed");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        let next = match ServerOptions::new().create(&path) {
+            Ok(next) => next,
+            Err(error) => {
+                tracing::error!(%error, "cannot create the next pipe instance");
+                return;
+            }
+        };
+        tokio::spawn(client(std::mem::replace(&mut first, next), commands.clone()));
+    }
+}
+
+#[cfg(windows)]
+pub fn cleanup(_path: &Path) {}
+
+async fn client<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, commands: mpsc::Sender<Command>) {
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     while let Ok(Some(request)) = weft_ipc::receive::<Request, _>(&mut reader).await {
         let (reply, response) = oneshot::channel();

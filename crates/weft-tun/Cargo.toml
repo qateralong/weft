@@ -12,3 +12,4 @@ workspace = true
 
 [dependencies]
 tun-rs.workspace = true
+tracing.workspace = true

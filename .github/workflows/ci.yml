@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  CARGO_TERM_COLOR: always
+  WINTUN_VERSION: 0.14.1
+
 jobs:
   check:
     strategy:
@@ -19,6 +23,59 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
+      - if: runner.os == 'Linux'
+        run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile wintun.zip
+          Expand-Archive wintun.zip -DestinationPath wintun
+          Copy-Item wintun/wintun/bin/amd64/wintun.dll target/debug/
+      - name: End-to-end ping through a TUN interface
+        shell: bash
+        env:
+          SUDO: ${{ runner.os != 'Windows' && 'sudo' || '' }}
+          SHOW_LOGS: 1
+        run: tools/e2e.sh
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory weft-windows | Out-Null
+          Copy-Item target/debug/weftd.exe, target/debug/weft.exe, target/debug/loom.exe, target/debug/wintun.dll weft-windows/
+          Copy-Item tools/windows-check.ps1 weft-windows/
+      - if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: weft-windows
+          path: weft-windows
+
+  lab:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Flat network
+        run: tools/netns-lab.sh
+      - name: Linux NAT, cone to cone
+        run: NAT_A=cone NAT_B=cone EXPECT=direct tools/nat-lab.sh
+      - name: Linux NAT, symmetric to symmetric
+        run: NAT_A=symmetric NAT_B=symmetric EXPECT=relay tools/nat-lab.sh
+      - name: Linux NAT, UDP to loom blocked
+        run: NAT_A=symmetric NAT_B=symmetric BLOCK_LOOM_UDP_A=1 EXPECT=relay tools/nat-lab.sh

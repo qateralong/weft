@@ -28,7 +28,7 @@ value-nickname = НИК
 value-name = НАЗВАНИЕ
 value-password = ПАРОЛЬ
 error-daemon-missing = weftd не запущен ({ $path })
-error-daemon-permission = Нет доступа к weftd ({ $path }); запустите от root
+error-daemon-permission = Нет доступа к weftd ({ $path }); запустите от root или администратора
 
 prompt-password = Пароль:
 prompt-password-repeat = Повторите пароль:
