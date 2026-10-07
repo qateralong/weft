@@ -2,6 +2,7 @@ use std::io;
 
 #[cfg(windows)]
 pub const NAME: &str = "weftd";
+#[cfg(any(target_os = "linux", windows))]
 const DESCRIPTION: &str = "Weft peer-to-peer virtual LAN";
 
 #[cfg(unix)]
