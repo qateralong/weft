@@ -1,0 +1,11 @@
+[package]
+name = "weft-i18n"
+description = "Weft user interface strings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

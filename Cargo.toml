@@ -1,0 +1,34 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/qateralong/weft"
+publish = false
+
+[workspace.dependencies]
+weft-proto = { path = "crates/weft-proto" }
+weft-session = { path = "crates/weft-session" }
+weft-mesh = { path = "crates/weft-mesh" }
+weft-tun = { path = "crates/weft-tun" }
+weft-portmap = { path = "crates/weft-portmap" }
+weft-ipc = { path = "crates/weft-ipc" }
+weft-i18n = { path = "crates/weft-i18n" }
+weft-sim = { path = "crates/weft-sim" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

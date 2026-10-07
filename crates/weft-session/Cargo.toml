@@ -1,0 +1,11 @@
+[package]
+name = "weft-session"
+description = "Weft Noise sessions: handshakes, transport keys, replay window, timers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

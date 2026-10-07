@@ -1,0 +1,11 @@
+[package]
+name = "weft-ipc"
+description = "Weft local API between the daemon and its clients"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
