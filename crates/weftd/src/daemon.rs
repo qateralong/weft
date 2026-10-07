@@ -6,12 +6,15 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, sleep_until};
-use weft_ipc::{Connection, Failure, MemberStatus, NetworkStatus, PeerLink, Request, Response, Status};
+use weft_ipc::{
+    BanInfo, Connection, Failure, InviteInfo, MemberStatus, NetworkStatus, PeerLink, Request, Response, Status,
+};
 use weft_mesh::{Mesh, Output, PeerConfig};
 use weft_portmap::{Mapped, PortMapper};
 use weft_proto::control::{
-    Candidates, ClientKind, ClientMessage, Endpoint, ErrorCode, NetworkCredentials, NetworkName, PeerCandidates,
-    PeerKey, RelayPacket, Role, ServerKind, ServerMessage, State, Welcome,
+    Candidates, ClientKind, ClientMessage, Endpoint, ErrorCode, Invite, InviteCode, InviteRequest, MemberAction,
+    NetworkCredentials, NetworkName, PeerCandidates, PeerKey, RelayPacket, Role, ServerKind, ServerMessage, State,
+    Welcome,
 };
 use weft_proto::{Link, PublicKey};
 use weft_session::StaticKeypair;
@@ -54,6 +57,7 @@ pub struct Daemon {
     candidates_at: Option<Instant>,
     pending: HashMap<u32, oneshot::Sender<Response>>,
     up_waiters: Vec<oneshot::Sender<Response>>,
+    redeem_waiters: Vec<(String, oneshot::Sender<Response>)>,
     next_id: u32,
     backoff: Duration,
     reconnect_at: Option<Instant>,
@@ -114,6 +118,7 @@ impl Daemon {
             candidates_at: None,
             pending: HashMap::new(),
             up_waiters: Vec::new(),
+            redeem_waiters: Vec::new(),
             next_id: 1,
             backoff: MIN_BACKOFF,
             reconnect_at: None,
@@ -199,6 +204,45 @@ impl Daemon {
                 self.request(ClientKind::JoinNetwork(NetworkCredentials { name, password }), reply)
             }
             Request::Leave { name } => self.request(ClientKind::LeaveNetwork(NetworkName { name }), reply),
+            Request::Redeem { link } => self.redeem(link, reply),
+            Request::CreateInvite { network, uses, expires_in } => {
+                let request =
+                    InviteRequest { network, max_uses: uses.unwrap_or(0), expires_in: expires_in.unwrap_or(0) };
+                self.request(ClientKind::CreateInvite(request), reply)
+            }
+            Request::Invites { network } => self.request(ClientKind::ListInvites(NetworkName { name: network }), reply),
+            Request::RevokeInvite { code } => self.request(ClientKind::RevokeInvite(InviteCode { code }), reply),
+            Request::Kick { network, member } => {
+                self.request(ClientKind::Kick(MemberAction { network, member }), reply)
+            }
+            Request::Ban { network, member } => self.request(ClientKind::Ban(MemberAction { network, member }), reply),
+            Request::Unban { network, member } => {
+                self.request(ClientKind::Unban(MemberAction { network, member }), reply)
+            }
+            Request::Bans { network } => self.request(ClientKind::ListBans(NetworkName { name: network }), reply),
+        }
+    }
+
+    fn redeem(&mut self, link: String, reply: oneshot::Sender<Response>) {
+        let Some((link, code)) = link.parse::<Link>().ok().and_then(|link| Some((link.server(), link.invite?))) else {
+            let _ = reply.send(Response::Error(Failure::InvalidLink));
+            return;
+        };
+        let server = link.to_string();
+        if self.settings.server.as_ref() != Some(&server) || self.control.is_none() {
+            self.settings.server = Some(server);
+            self.settings.up = true;
+            self.save_settings();
+            self.disconnect();
+            self.connect();
+        } else if !self.settings.up {
+            self.settings.up = true;
+            self.save_settings();
+        }
+        if self.connection == Connection::Connected {
+            self.request(ClientKind::RedeemInvite(InviteCode { code }), reply);
+        } else {
+            self.redeem_waiters.push((code, reply));
         }
     }
 
@@ -294,6 +338,9 @@ impl Daemon {
         for reply in self.up_waiters.drain(..) {
             let _ = reply.send(Response::Error(failure));
         }
+        for (_, reply) in self.redeem_waiters.drain(..) {
+            let _ = reply.send(Response::Error(failure));
+        }
     }
 
     async fn on_control(&mut self, event: ControlEvent) {
@@ -359,6 +406,9 @@ impl Daemon {
         for reply in self.up_waiters.drain(..) {
             let _ = reply.send(Response::Ok);
         }
+        for (code, reply) in std::mem::take(&mut self.redeem_waiters) {
+            self.request(ClientKind::RedeemInvite(InviteCode { code }), reply);
+        }
     }
 
     async fn on_message(&mut self, message: ServerMessage) {
@@ -368,6 +418,21 @@ impl Daemon {
             let response = match message.kind {
                 Some(ServerKind::Ack(_)) => Response::Ok,
                 Some(ServerKind::Failure(f)) => Response::Error(failure(f.code())),
+                Some(ServerKind::Joined(network)) => Response::Joined(network.name),
+                Some(ServerKind::Invite(invite)) => Response::Invite(self.invite_info(invite)),
+                Some(ServerKind::Invites(list)) => {
+                    Response::Invites(list.invites.into_iter().map(|invite| self.invite_info(invite)).collect())
+                }
+                Some(ServerKind::Bans(list)) => Response::Bans(
+                    list.bans
+                        .into_iter()
+                        .map(|ban| BanInfo {
+                            nickname: ban.nickname,
+                            address: Ipv4Addr::from(ban.address),
+                            public_key: PublicKey::from_slice(&ban.key).map(|key| key.to_string()).unwrap_or_default(),
+                        })
+                        .collect(),
+                ),
                 _ => Response::Error(Failure::Internal),
             };
             let _ = reply.send(response);
@@ -517,6 +582,19 @@ impl Daemon {
         }
     }
 
+    fn invite_info(&self, invite: Invite) -> InviteInfo {
+        let link = self.server_link().map(|link| Link { invite: Some(invite.code.clone()), ..link }.to_string());
+        InviteInfo {
+            code: invite.code,
+            link,
+            network: invite.network,
+            max_uses: (invite.max_uses > 0).then_some(invite.max_uses),
+            uses: invite.uses,
+            expires: (invite.expires > 0).then_some(invite.expires),
+            creator: invite.creator,
+        }
+    }
+
     fn save_settings(&self) {
         if let Err(error) = self.settings_file.save(&self.settings) {
             tracing::error!(path = %self.settings_file.path().display(), %error, "cannot save settings");
@@ -558,6 +636,12 @@ fn failure(code: ErrorCode) -> Failure {
         ErrorCode::NotMember => Failure::NotMember,
         ErrorCode::PoolExhausted => Failure::PoolExhausted,
         ErrorCode::InvalidRequest => Failure::InvalidRequest,
+        ErrorCode::Forbidden => Failure::Forbidden,
+        ErrorCode::InviteNotFound => Failure::InviteNotFound,
+        ErrorCode::Banned => Failure::Banned,
+        ErrorCode::MemberNotFound => Failure::MemberNotFound,
+        ErrorCode::AmbiguousMember => Failure::AmbiguousMember,
+        ErrorCode::TooManyInvites => Failure::TooManyInvites,
         ErrorCode::Unspecified | ErrorCode::Internal => Failure::Internal,
     }
 }

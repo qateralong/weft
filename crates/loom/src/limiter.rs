@@ -53,8 +53,16 @@ impl Limiter {
     }
 
     pub fn failed(&mut self, ip: IpAddr, network: &str, now: Instant) {
-        self.ips.record(&ip, now);
         self.networks.record(&network.to_string(), now);
+        self.ip_failed(ip, now);
+    }
+
+    pub fn ip_allowed(&mut self, ip: IpAddr, now: Instant) -> bool {
+        self.ips.count(&ip, now) < PER_IP
+    }
+
+    pub fn ip_failed(&mut self, ip: IpAddr, now: Instant) {
+        self.ips.record(&ip, now);
         if self.ips.entries.len() > 10_000 {
             self.ips.prune(now);
         }

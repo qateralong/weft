@@ -3,25 +3,31 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
+use rand::RngExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use weft_proto::control::{
-    self, Candidates, ClientKind, ClientMessage, DecodeError, Empty, ErrorCode, NetworkCredentials, NetworkName,
-    PROTOCOL_VERSION, PeerKey, RelayPacket, Role, ServerKind, ServerMessage, Welcome,
+    self, Ban, BanList, Candidates, ClientKind, ClientMessage, DecodeError, Empty, ErrorCode, Invite, InviteCode,
+    InviteList, InviteRequest, MemberAction, NetworkCredentials, NetworkName, PROTOCOL_VERSION, PeerKey, RelayPacket,
+    Role, ServerKind, ServerMessage, Welcome,
 };
 use weft_proto::{MIN_PACKET_LEN, ObfsKey, PublicKey};
 use weft_session::StaticKeypair;
 use weft_session::stream::{self, io};
 
-use crate::db::{DbError, name_key};
-use crate::hub::{MAX_CANDIDATES, SharedHub, lock};
+use crate::db::{DbError, Device, InviteRow, NetworkRow, name_key, unix_now};
+use crate::hub::{Hub, MAX_CANDIDATES, SharedHub, lock};
 use crate::udp;
 use crate::validate;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const MAX_INVITES: usize = 100;
+const MAX_INVITE_LIFETIME: u64 = 365 * 24 * 3600;
+const MAX_INVITE_LEN: usize = 64;
+const INVITE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 #[derive(Debug, thiserror::Error)]
 enum ConnError {
@@ -188,11 +194,20 @@ async fn handle(
     ip: IpAddr,
     message: ClientMessage,
 ) -> Option<ServerMessage> {
+    let ack = |result: Result<(), ErrorCode>| result.map(|()| ServerKind::Ack(Empty {}));
     let result = match message.kind {
-        Some(ClientKind::CreateNetwork(request)) => create(hub, key, request).await,
-        Some(ClientKind::JoinNetwork(request)) => join(hub, key, ip, request).await,
-        Some(ClientKind::LeaveNetwork(request)) => leave(hub, key, request),
-        Some(ClientKind::Ping(_)) => Ok(()),
+        Some(ClientKind::CreateNetwork(request)) => ack(create(hub, key, request).await),
+        Some(ClientKind::JoinNetwork(request)) => ack(join(hub, key, ip, request).await),
+        Some(ClientKind::LeaveNetwork(request)) => ack(leave(hub, key, request)),
+        Some(ClientKind::Ping(_)) => ack(Ok(())),
+        Some(ClientKind::CreateInvite(request)) => create_invite(&mut lock(hub), key, request),
+        Some(ClientKind::ListInvites(request)) => list_invites(&mut lock(hub), key, request),
+        Some(ClientKind::RevokeInvite(request)) => ack(revoke_invite(&mut lock(hub), key, request)),
+        Some(ClientKind::RedeemInvite(request)) => redeem_invite(&mut lock(hub), key, ip, request),
+        Some(ClientKind::Kick(request)) => ack(remove(&mut lock(hub), key, request, false)),
+        Some(ClientKind::Ban(request)) => ack(remove(&mut lock(hub), key, request, true)),
+        Some(ClientKind::Unban(request)) => ack(unban(&mut lock(hub), key, request)),
+        Some(ClientKind::ListBans(request)) => list_bans(&lock(hub), key, request),
         Some(ClientKind::Candidates(candidates)) => {
             set_candidates(hub, key, candidates);
             return None;
@@ -208,7 +223,7 @@ async fn handle(
         Some(ClientKind::Hello(_)) | None => Err(ErrorCode::InvalidRequest),
     };
     Some(match result {
-        Ok(()) => ServerMessage::reply(message.id, ServerKind::Ack(Empty {})),
+        Ok(kind) => ServerMessage::reply(message.id, kind),
         Err(code) => ServerMessage::failure(message.id, code),
     })
 }
@@ -281,6 +296,9 @@ async fn join(hub: &SharedHub, key: PublicKey, ip: IpAddr, request: NetworkCrede
         if hub.db.is_member(network.id, &key).map_err(internal)? {
             return Err(ErrorCode::AlreadyMember);
         }
+        if hub.db.is_banned(network.id, &key).map_err(internal)? {
+            return Err(ErrorCode::Banned);
+        }
         if hub.db.member_count(network.id).map_err(internal)? >= hub.config.max_members {
             return Err(ErrorCode::NetworkFull);
         }
@@ -317,6 +335,167 @@ fn leave(hub: &SharedHub, key: PublicKey, request: NetworkName) -> Result<(), Er
     hub.memberships_changed();
     hub.notify(&before);
     Ok(())
+}
+
+fn create_invite(hub: &mut Hub, key: PublicKey, request: InviteRequest) -> Result<ServerKind, ErrorCode> {
+    if request.expires_in > MAX_INVITE_LIFETIME {
+        return Err(ErrorCode::InvalidRequest);
+    }
+    let network = manage(hub, &request.network, &key)?.0;
+    if hub.db.invites(network.id).map_err(internal)?.len() >= MAX_INVITES {
+        return Err(ErrorCode::TooManyInvites);
+    }
+    let expires = (request.expires_in > 0).then(|| unix_now() + request.expires_in as i64);
+    for _ in 0..4 {
+        let code = invite_code();
+        match hub.db.create_invite(&code, network.id, &key, request.max_uses, expires) {
+            Ok(()) => {
+                let invite = hub.db.invite(&code).map_err(internal)?.ok_or(ErrorCode::Internal)?;
+                return Ok(ServerKind::Invite(invite_message(invite)));
+            }
+            Err(DbError::InviteExists) => continue,
+            Err(error) => return Err(internal(error)),
+        }
+    }
+    Err(ErrorCode::Internal)
+}
+
+fn list_invites(hub: &mut Hub, key: PublicKey, request: NetworkName) -> Result<ServerKind, ErrorCode> {
+    let network = manage(hub, &request.name, &key)?.0;
+    let invites = hub.db.invites(network.id).map_err(internal)?.into_iter().map(invite_message).collect();
+    Ok(ServerKind::Invites(InviteList { invites }))
+}
+
+fn revoke_invite(hub: &mut Hub, key: PublicKey, request: InviteCode) -> Result<(), ErrorCode> {
+    let invite = find_invite(hub, &request.code)?.ok_or(ErrorCode::InviteNotFound)?;
+    manage(hub, &invite.network_name, &key)?;
+    hub.db.revoke_invite(&invite.code).map_err(internal)?;
+    Ok(())
+}
+
+fn redeem_invite(hub: &mut Hub, key: PublicKey, ip: IpAddr, request: InviteCode) -> Result<ServerKind, ErrorCode> {
+    let now = Instant::now();
+    if !hub.limiter.ip_allowed(ip, now) {
+        return Err(ErrorCode::RateLimited);
+    }
+    let Some(invite) = find_invite(hub, &request.code)? else {
+        hub.limiter.ip_failed(ip, now);
+        return Err(ErrorCode::InviteNotFound);
+    };
+    if hub.db.is_member(invite.network, &key).map_err(internal)? {
+        return Err(ErrorCode::AlreadyMember);
+    }
+    if hub.db.is_banned(invite.network, &key).map_err(internal)? {
+        return Err(ErrorCode::Banned);
+    }
+    if hub.db.member_count(invite.network).map_err(internal)? >= hub.config.max_members {
+        return Err(ErrorCode::NetworkFull);
+    }
+    hub.db.add_member(invite.network, &key, Role::Member).map_err(internal)?;
+    hub.db.use_invite(&invite.code).map_err(internal)?;
+    hub.memberships_changed();
+    hub.notify_related(&key);
+    Ok(ServerKind::Joined(NetworkName { name: invite.network_name }))
+}
+
+fn remove(hub: &mut Hub, key: PublicKey, request: MemberAction, ban: bool) -> Result<(), ErrorCode> {
+    let (network, role) = manage(hub, &request.network, &key)?;
+    let members = hub.db.members(network.id).map_err(internal)?;
+    let index = resolve(members.iter().map(|(device, _)| device), &request.member)?;
+    let (target, target_role) = &members[index];
+    if *target_role >= role {
+        return Err(ErrorCode::Forbidden);
+    }
+    let before = hub.db.related(&target.key).map_err(internal)?;
+    if ban {
+        hub.db.ban(network.id, &target.key).map_err(internal)?;
+    } else {
+        hub.db.remove_member(network.id, &target.key).map_err(internal)?;
+    }
+    tracing::info!(network = network.name, target = ?target.key, by = ?key, ban, "member removed");
+    hub.memberships_changed();
+    hub.notify(&before);
+    Ok(())
+}
+
+fn unban(hub: &mut Hub, key: PublicKey, request: MemberAction) -> Result<(), ErrorCode> {
+    let network = manage(hub, &request.network, &key)?.0;
+    let bans = hub.db.bans(network.id).map_err(internal)?;
+    let index = resolve(bans.iter(), &request.member)?;
+    hub.db.unban(network.id, &bans[index].key).map_err(internal)?;
+    Ok(())
+}
+
+fn list_bans(hub: &Hub, key: PublicKey, request: NetworkName) -> Result<ServerKind, ErrorCode> {
+    let network = manage(hub, &request.name, &key)?.0;
+    let bans = hub
+        .db
+        .bans(network.id)
+        .map_err(internal)?
+        .into_iter()
+        .map(|device| Ban {
+            key: device.key.as_bytes().to_vec(),
+            nickname: device.nickname,
+            address: u32::from(device.address),
+        })
+        .collect();
+    Ok(ServerKind::Bans(BanList { bans }))
+}
+
+fn manage(hub: &Hub, name: &str, key: &PublicKey) -> Result<(NetworkRow, Role), ErrorCode> {
+    let network = hub.db.network_by_name(name).map_err(internal)?.ok_or(ErrorCode::NetworkNotFound)?;
+    match hub.db.role(network.id, key).map_err(internal)? {
+        None => Err(ErrorCode::NotMember),
+        Some(Role::Member) => Err(ErrorCode::Forbidden),
+        Some(role) => Ok((network, role)),
+    }
+}
+
+fn find_invite(hub: &mut Hub, code: &str) -> Result<Option<InviteRow>, ErrorCode> {
+    let code = code.trim().to_ascii_uppercase();
+    if code.is_empty() || code.len() > MAX_INVITE_LEN {
+        return Ok(None);
+    }
+    hub.db.invite(&code).map_err(internal)
+}
+
+fn resolve<'a>(devices: impl Iterator<Item = &'a Device>, query: &str) -> Result<usize, ErrorCode> {
+    let query = query.trim();
+    let matches: Vec<usize> = if let Ok(key) = query.parse::<PublicKey>() {
+        devices.enumerate().filter(|(_, device)| device.key == key).map(|(index, _)| index).collect()
+    } else if let Ok(address) = query.parse::<Ipv4Addr>() {
+        devices.enumerate().filter(|(_, device)| device.address == address).map(|(index, _)| index).collect()
+    } else {
+        let query = query.to_lowercase();
+        devices
+            .enumerate()
+            .filter(|(_, device)| device.nickname.to_lowercase() == query)
+            .map(|(index, _)| index)
+            .collect()
+    };
+    match matches[..] {
+        [] => Err(ErrorCode::MemberNotFound),
+        [index] => Ok(index),
+        _ => Err(ErrorCode::AmbiguousMember),
+    }
+}
+
+fn invite_code() -> String {
+    let mut rng = rand::rng();
+    let chars: Vec<char> =
+        (0..12).map(|_| char::from(INVITE_ALPHABET[rng.random_range(0..INVITE_ALPHABET.len())])).collect();
+    chars.chunks(4).map(|chunk| chunk.iter().collect::<String>()).collect::<Vec<_>>().join("-")
+}
+
+fn invite_message(invite: InviteRow) -> Invite {
+    Invite {
+        code: invite.code,
+        network: invite.network_name,
+        max_uses: invite.max_uses,
+        uses: invite.uses,
+        expires: invite.expires.map_or(0, |expires| expires.max(0) as u64),
+        creator: invite.creator,
+    }
 }
 
 fn internal(error: impl std::fmt::Display) -> ErrorCode {

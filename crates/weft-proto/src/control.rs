@@ -11,7 +11,7 @@ pub const DISCOVERY_TOKEN_LEN: usize = 16;
 pub struct ClientMessage {
     #[prost(uint32, tag = "1")]
     pub id: u32,
-    #[prost(oneof = "ClientKind", tags = "2, 3, 4, 5, 6, 7, 8, 9")]
+    #[prost(oneof = "ClientKind", tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17")]
     pub kind: Option<ClientKind>,
 }
 
@@ -33,6 +33,84 @@ pub enum ClientKind {
     CallMeMaybe(PeerKey),
     #[prost(message, tag = "9")]
     Relay(RelayPacket),
+    #[prost(message, tag = "10")]
+    CreateInvite(InviteRequest),
+    #[prost(message, tag = "11")]
+    ListInvites(NetworkName),
+    #[prost(message, tag = "12")]
+    RevokeInvite(InviteCode),
+    #[prost(message, tag = "13")]
+    RedeemInvite(InviteCode),
+    #[prost(message, tag = "14")]
+    Kick(MemberAction),
+    #[prost(message, tag = "15")]
+    Ban(MemberAction),
+    #[prost(message, tag = "16")]
+    Unban(MemberAction),
+    #[prost(message, tag = "17")]
+    ListBans(NetworkName),
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct InviteRequest {
+    #[prost(string, tag = "1")]
+    pub network: String,
+    #[prost(uint32, tag = "2")]
+    pub max_uses: u32,
+    #[prost(uint64, tag = "3")]
+    pub expires_in: u64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct InviteCode {
+    #[prost(string, tag = "1")]
+    pub code: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct MemberAction {
+    #[prost(string, tag = "1")]
+    pub network: String,
+    #[prost(string, tag = "2")]
+    pub member: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct Invite {
+    #[prost(string, tag = "1")]
+    pub code: String,
+    #[prost(string, tag = "2")]
+    pub network: String,
+    #[prost(uint32, tag = "3")]
+    pub max_uses: u32,
+    #[prost(uint32, tag = "4")]
+    pub uses: u32,
+    #[prost(uint64, tag = "5")]
+    pub expires: u64,
+    #[prost(string, tag = "6")]
+    pub creator: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct InviteList {
+    #[prost(message, repeated, tag = "1")]
+    pub invites: Vec<Invite>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct Ban {
+    #[prost(bytes = "vec", tag = "1")]
+    pub key: Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub nickname: String,
+    #[prost(fixed32, tag = "3")]
+    pub address: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct BanList {
+    #[prost(message, repeated, tag = "1")]
+    pub bans: Vec<Ban>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -84,7 +162,7 @@ pub struct Empty {}
 pub struct ServerMessage {
     #[prost(uint32, tag = "1")]
     pub reply_to: u32,
-    #[prost(oneof = "ServerKind", tags = "2, 3, 4, 5, 6, 7")]
+    #[prost(oneof = "ServerKind", tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
     pub kind: Option<ServerKind>,
 }
 
@@ -102,6 +180,14 @@ pub enum ServerKind {
     CallMeMaybe(PeerCandidates),
     #[prost(message, tag = "7")]
     Relay(RelayPacket),
+    #[prost(message, tag = "8")]
+    Invite(Invite),
+    #[prost(message, tag = "9")]
+    Invites(InviteList),
+    #[prost(message, tag = "10")]
+    Joined(NetworkName),
+    #[prost(message, tag = "11")]
+    Bans(BanList),
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -148,6 +234,12 @@ pub enum ErrorCode {
     NotMember = 12,
     PoolExhausted = 13,
     Internal = 14,
+    Forbidden = 15,
+    InviteNotFound = 16,
+    Banned = 17,
+    MemberNotFound = 18,
+    AmbiguousMember = 19,
+    TooManyInvites = 20,
 }
 
 #[derive(Clone, PartialEq, Message)]

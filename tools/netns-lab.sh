@@ -63,7 +63,11 @@ weft b up "$LINK" --nickname bob
 weft a create lan --password secret
 weft b join wrong-name --password secret || true
 weft b join lan --password wrong || true
-weft b join lan --password secret
+echo "--- join by a one-time invite while disconnected"
+invite=$(weft a invite create lan --uses 1 --expires 1h | grep '^weft://')
+weft b down
+weft b join "$invite"
+weft b join "$invite" && exit 1
 sleep 3
 
 echo "--- status a"
@@ -90,6 +94,19 @@ for _ in $(seq 20); do
     sleep 1
 done
 weft a status | grep '^Status'
+ping_b 2
+echo "--- kick, ban and unban"
+weft a invite list lan
+weft b invite create lan && exit 1
+weft a kick lan bob
+weft b status | grep -q 'No networks'
+weft b join lan --password secret
+weft a ban lan "$addr_b"
+weft a bans lan | grep -q bob
+weft b join lan --password secret && exit 1
+weft a unban lan bob
+weft b join lan --password secret
+sleep 3
 ping_b 2
 echo "--- all checks passed"
 if [ -n "${SHOW_LOGS:-}" ]; then

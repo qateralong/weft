@@ -8,8 +8,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, UdpSocket};
 use weft_proto::control::{
-    self, Candidates, ClientKind, ClientMessage, ErrorCode, Hello, NetworkCredentials, NetworkName, PROTOCOL_VERSION,
-    PeerKey, RelayPacket, Role, ServerKind, ServerMessage, State, Welcome,
+    self, Candidates, ClientKind, ClientMessage, ErrorCode, Hello, InviteCode, InviteRequest, MemberAction,
+    NetworkCredentials, NetworkName, PROTOCOL_VERSION, PeerKey, RelayPacket, Role, ServerKind, ServerMessage, State,
+    Welcome,
 };
 use weft_proto::loom::{parse_observed, parse_relayed, relay_packet};
 use weft_proto::obfs::discover_packet;
@@ -83,10 +84,31 @@ impl Client {
     }
 
     async fn request(&mut self, kind: ClientKind) -> Result<(), ErrorCode> {
+        match self.ask(kind).await? {
+            ServerKind::Ack(_) => Ok(()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    async fn ask(&mut self, kind: ClientKind) -> Result<ServerKind, ErrorCode> {
         let id = self.send(kind).await;
         match self.reply(id).await {
-            ServerKind::Ack(_) => Ok(()),
             ServerKind::Failure(failure) => Err(failure.code()),
+            other => Ok(other),
+        }
+    }
+
+    async fn invite(&mut self, network: &str, max_uses: u32) -> Result<String, ErrorCode> {
+        let request = InviteRequest { network: network.into(), max_uses, expires_in: 3600 };
+        match self.ask(ClientKind::CreateInvite(request)).await? {
+            ServerKind::Invite(invite) => Ok(invite.code),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    async fn redeem(&mut self, code: &str) -> Result<String, ErrorCode> {
+        match self.ask(ClientKind::RedeemInvite(InviteCode { code: code.into() })).await? {
+            ServerKind::Joined(network) => Ok(network.name),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -94,6 +116,10 @@ impl Client {
 
 fn credentials(name: &str, password: &str) -> NetworkCredentials {
     NetworkCredentials { name: name.into(), password: password.into() }
+}
+
+fn member(network: &str, member: &str) -> MemberAction {
+    MemberAction { network: network.into(), member: member.into() }
 }
 
 async fn start() -> Server {
@@ -287,4 +313,57 @@ async fn relay_candidates_and_call_me_maybe() {
         }
     }
     assert!(tokio::time::timeout(Duration::from_millis(300), udp_a.recv_from(&mut buf)).await.is_err());
+}
+
+#[tokio::test]
+async fn invites_kicks_and_bans() {
+    let server = start().await;
+    let mut a = Client::connect(&server, 1).await;
+    let mut b = Client::connect(&server, 2).await;
+    let mut c = Client::connect(&server, 3).await;
+    a.hello("alice").await;
+    let welcome_b = b.hello("bob").await;
+    c.hello("carol").await;
+    a.request(ClientKind::CreateNetwork(credentials("lan", "secret"))).await.unwrap();
+
+    assert_eq!(b.invite("lan", 0).await, Err(ErrorCode::NotMember));
+    let once = a.invite("lan", 1).await.unwrap();
+    assert_eq!(once.len(), 14);
+    assert_eq!(b.redeem(&once.to_lowercase()).await.as_deref(), Ok("lan"));
+    assert_eq!(c.redeem(&once).await, Err(ErrorCode::InviteNotFound));
+    assert_eq!(b.redeem("NOPE").await, Err(ErrorCode::InviteNotFound));
+    assert_eq!(b.invite("lan", 0).await, Err(ErrorCode::Forbidden));
+    assert_eq!(b.request(ClientKind::Kick(member("lan", "alice"))).await, Err(ErrorCode::Forbidden));
+
+    let open = a.invite("lan", 0).await.unwrap();
+    let Ok(ServerKind::Invites(list)) = a.ask(ClientKind::ListInvites(NetworkName { name: "lan".into() })).await else {
+        panic!()
+    };
+    assert_eq!(list.invites.len(), 1);
+    assert_eq!((list.invites[0].code.as_str(), list.invites[0].creator.as_str()), (open.as_str(), "alice"));
+    assert!(list.invites[0].expires > 0);
+
+    assert_eq!(a.request(ClientKind::Kick(member("lan", "nobody"))).await, Err(ErrorCode::MemberNotFound));
+    assert_eq!(a.request(ClientKind::Kick(member("lan", "alice"))).await, Err(ErrorCode::Forbidden));
+    a.request(ClientKind::Kick(member("lan", "BOB"))).await.unwrap();
+    b.state_where(|state| state.networks.is_empty()).await;
+    assert_eq!(b.redeem(&open).await.as_deref(), Ok("lan"));
+
+    let address = Ipv4Addr::from(welcome_b.address).to_string();
+    a.request(ClientKind::Ban(member("lan", &address))).await.unwrap();
+    b.state_where(|state| state.networks.is_empty()).await;
+    assert_eq!(b.request(ClientKind::JoinNetwork(credentials("lan", "secret"))).await, Err(ErrorCode::Banned));
+    assert_eq!(b.redeem(&open).await, Err(ErrorCode::Banned));
+    let Ok(ServerKind::Bans(bans)) = a.ask(ClientKind::ListBans(NetworkName { name: "lan".into() })).await else {
+        panic!()
+    };
+    assert_eq!(bans.bans.len(), 1);
+    assert_eq!(bans.bans[0].nickname, "bob");
+
+    a.request(ClientKind::Unban(member("lan", "bob"))).await.unwrap();
+    assert_eq!(a.request(ClientKind::Unban(member("lan", "bob"))).await, Err(ErrorCode::MemberNotFound));
+    b.request(ClientKind::JoinNetwork(credentials("lan", "secret"))).await.unwrap();
+
+    a.request(ClientKind::RevokeInvite(InviteCode { code: open.to_lowercase() })).await.unwrap();
+    assert_eq!(c.redeem(&open).await, Err(ErrorCode::InviteNotFound));
 }

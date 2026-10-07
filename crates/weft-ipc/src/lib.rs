@@ -24,6 +24,14 @@ pub enum Request {
     Join { name: String, password: String },
     Leave { name: String },
     Status,
+    Redeem { link: String },
+    CreateInvite { network: String, uses: Option<u32>, expires_in: Option<u64> },
+    Invites { network: String },
+    RevokeInvite { code: String },
+    Kick { network: String, member: String },
+    Ban { network: String, member: String },
+    Unban { network: String, member: String },
+    Bans { network: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -31,7 +39,29 @@ pub enum Request {
 pub enum Response {
     Ok,
     Status(Status),
+    Joined(String),
+    Invite(InviteInfo),
+    Invites(Vec<InviteInfo>),
+    Bans(Vec<BanInfo>),
     Error(Failure),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct InviteInfo {
+    pub code: String,
+    pub link: Option<String>,
+    pub network: String,
+    pub max_uses: Option<u32>,
+    pub uses: u32,
+    pub expires: Option<u64>,
+    pub creator: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct BanInfo {
+    pub nickname: String,
+    pub address: Ipv4Addr,
+    pub public_key: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +84,12 @@ pub enum Failure {
     AlreadyMember,
     NotMember,
     PoolExhausted,
+    Forbidden,
+    InviteNotFound,
+    Banned,
+    MemberNotFound,
+    AmbiguousMember,
+    TooManyInvites,
     Internal,
 }
 

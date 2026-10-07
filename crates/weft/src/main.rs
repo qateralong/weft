@@ -1,8 +1,11 @@
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use weft_i18n::Localizer;
-use weft_ipc::{Connection, Failure, PeerLink, Request, Response, Role, Status};
+use weft_ipc::{BanInfo, Connection, Failure, InviteInfo, PeerLink, Request, Response, Role, Status};
+
+const MAX_EXPIRY: u64 = 365 * 24 * 3600;
 
 fn main() -> ExitCode {
     let l = Localizer::from_env();
@@ -19,6 +22,8 @@ fn main() -> ExitCode {
 fn cli(l: &Localizer) -> Command {
     let name = || positional(l, "name", "arg-name").required(true);
     let password = || option(l, "password", 'p', "arg-password");
+    let network = || positional(l, "network", "arg-network").required(true);
+    let member = || positional(l, "member", "arg-member").required(true);
     command(l, "weft", "app-about", vec![])
         .version(env!("CARGO_PKG_VERSION"))
         .disable_version_flag(true)
@@ -41,9 +46,39 @@ fn cli(l: &Localizer) -> Command {
         ))
         .subcommand(command(l, "down", "cmd-down", vec![]))
         .subcommand(command(l, "create", "cmd-create", vec![name(), password()]))
-        .subcommand(command(l, "join", "cmd-join", vec![name(), password()]))
+        .subcommand(command(
+            l,
+            "join",
+            "cmd-join",
+            vec![positional(l, "target", "arg-target").required(true), password()],
+        ))
         .subcommand(command(l, "leave", "cmd-leave", vec![name()]))
         .subcommand(command(l, "status", "cmd-status", vec![]))
+        .subcommand(
+            command(l, "invite", "cmd-invite", vec![])
+                .subcommand_required(true)
+                .subcommand_help_heading(l.tr("help-commands"))
+                .subcommand(
+                    command(
+                        l,
+                        "create",
+                        "cmd-invite-create",
+                        vec![network(), option(l, "uses", 'u', "arg-uses"), option(l, "expires", 'e', "arg-expires")],
+                    )
+                    .override_usage(l.tr("usage-invite-create")),
+                )
+                .subcommand(
+                    command(l, "list", "cmd-invite-list", vec![network()]).override_usage(l.tr("usage-invite-list")),
+                )
+                .subcommand(
+                    command(l, "revoke", "cmd-invite-revoke", vec![positional(l, "code", "arg-code").required(true)])
+                        .override_usage(l.tr("usage-invite-revoke")),
+                ),
+        )
+        .subcommand(command(l, "kick", "cmd-kick", vec![network(), member()]))
+        .subcommand(command(l, "ban", "cmd-ban", vec![network(), member()]))
+        .subcommand(command(l, "unban", "cmd-unban", vec![network(), member()]))
+        .subcommand(command(l, "bans", "cmd-bans", vec![network()]))
 }
 
 fn command(l: &Localizer, name: &'static str, about: &str, args: Vec<Arg>) -> Command {
@@ -88,16 +123,52 @@ fn run(l: &Localizer, matches: &ArgMatches) -> Result<(), String> {
             (Request::Create { name, password }, Some(done))
         }
         Some(("join", m)) => {
-            let name = arg(m, "name").unwrap_or_default();
-            let password = password(l, arg(m, "password"), false)?;
-            let done = l.tr_args("done-join", &[("name", &name)]);
-            (Request::Join { name, password }, Some(done))
+            let target = arg(m, "target").unwrap_or_default();
+            if target.trim_start().to_ascii_lowercase().starts_with("weft://") {
+                (Request::Redeem { link: target.trim().to_string() }, None)
+            } else {
+                let password = password(l, arg(m, "password"), false)?;
+                let done = l.tr_args("done-join", &[("name", &target)]);
+                (Request::Join { name: target, password }, Some(done))
+            }
         }
         Some(("leave", m)) => {
             let name = arg(m, "name").unwrap_or_default();
             let done = l.tr_args("done-leave", &[("name", &name)]);
             (Request::Leave { name }, Some(done))
         }
+        Some(("invite", m)) => match m.subcommand() {
+            Some(("create", m)) => {
+                let uses = arg(m, "uses")
+                    .map(|uses| {
+                        uses.trim().parse::<u32>().ok().filter(|&uses| uses > 0).ok_or(l.tr("error-invalid-uses"))
+                    })
+                    .transpose()?;
+                let expires_in = arg(m, "expires")
+                    .map(|text| parse_duration(&text).ok_or(l.tr("error-invalid-duration")))
+                    .transpose()?;
+                (Request::CreateInvite { network: arg(m, "network").unwrap_or_default(), uses, expires_in }, None)
+            }
+            Some(("list", m)) => (Request::Invites { network: arg(m, "network").unwrap_or_default() }, None),
+            Some(("revoke", m)) => {
+                let code = arg(m, "code").unwrap_or_default();
+                let done = l.tr_args("done-revoke", &[("code", &code.to_uppercase())]);
+                (Request::RevokeInvite { code }, Some(done))
+            }
+            _ => (Request::Status, None),
+        },
+        Some((action @ ("kick" | "ban" | "unban"), m)) => {
+            let network = arg(m, "network").unwrap_or_default();
+            let member = arg(m, "member").unwrap_or_default();
+            let done = l.tr_args(&format!("done-{action}"), &[("name", &network), ("member", &member)]);
+            let request = match action {
+                "kick" => Request::Kick { network, member },
+                "ban" => Request::Ban { network, member },
+                _ => Request::Unban { network, member },
+            };
+            (request, Some(done))
+        }
+        Some(("bans", m)) => (Request::Bans { network: arg(m, "network").unwrap_or_default() }, None),
         _ => (Request::Status, None),
     };
 
@@ -124,7 +195,95 @@ fn run(l: &Localizer, matches: &ArgMatches) -> Result<(), String> {
             print_status(l, &status);
             Ok(())
         }
+        Response::Joined(name) => {
+            println!("{}", l.tr_args("done-join", &[("name", &name)]));
+            Ok(())
+        }
+        Response::Invite(invite) => {
+            println!("{}", l.tr_args("done-invite", &[("name", &invite.network)]));
+            println!("{}", invite.link.as_deref().unwrap_or(&invite.code));
+            println!("{}", invite_details(l, &invite));
+            Ok(())
+        }
+        Response::Invites(invites) => {
+            print_invites(l, &request, &invites);
+            Ok(())
+        }
+        Response::Bans(bans) => {
+            print_bans(l, &request, &bans);
+            Ok(())
+        }
         Response::Error(failure) => Err(l.tr(failure_id(failure))),
+    }
+}
+
+fn parse_duration(text: &str) -> Option<u64> {
+    let text = text.trim().to_ascii_lowercase();
+    let unit = match text.chars().last()? {
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86_400,
+        _ => return None,
+    };
+    let value: u64 = text[..text.len() - 1].parse().ok()?;
+    Some(value.checked_mul(unit)?).filter(|&seconds| (1..=MAX_EXPIRY).contains(&seconds))
+}
+
+fn format_remaining(l: &Localizer, seconds: u64) -> String {
+    let minutes = seconds.div_ceil(60).max(1);
+    let (days, hours, minutes) = (minutes / 1440, minutes / 60 % 24, minutes % 60);
+    let text = |n: u64| n.to_string();
+    if days > 0 {
+        l.tr_args("time-days", &[("days", &text(days)), ("hours", &text(hours))])
+    } else if hours > 0 {
+        l.tr_args("time-hours", &[("hours", &text(hours)), ("minutes", &text(minutes))])
+    } else {
+        l.tr_args("time-minutes", &[("minutes", &text(minutes))])
+    }
+}
+
+fn invite_details(l: &Localizer, invite: &InviteInfo) -> String {
+    let uses = invite.uses.to_string();
+    let uses = match invite.max_uses {
+        Some(max) => l.tr_args("invite-uses", &[("uses", &uses), ("max", &max.to_string())]),
+        None => l.tr_args("invite-uses-unlimited", &[("uses", &uses)]),
+    };
+    let expires = match invite.expires {
+        Some(expires) => {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            l.tr_args("invite-expires", &[("time", &format_remaining(l, expires.saturating_sub(now)))])
+        }
+        None => l.tr("invite-no-expiry"),
+    };
+    let by = l.tr_args("invite-by", &[("nickname", &invite.creator)]);
+    format!("{uses} · {expires} · {by}")
+}
+
+fn print_invites(l: &Localizer, request: &Request, invites: &[InviteInfo]) {
+    let Request::Invites { network } = request else { return };
+    if invites.is_empty() {
+        println!("{}", l.tr_args("invites-empty", &[("name", network)]));
+        return;
+    }
+    println!("{}", l.tr_args("invites-title", &[("name", network)]));
+    for invite in invites {
+        println!("\n  {}  {}", invite.code, invite_details(l, invite));
+        if let Some(link) = &invite.link {
+            println!("  {link}");
+        }
+    }
+}
+
+fn print_bans(l: &Localizer, request: &Request, bans: &[BanInfo]) {
+    let Request::Bans { network } = request else { return };
+    if bans.is_empty() {
+        println!("{}", l.tr_args("bans-empty", &[("name", network)]));
+        return;
+    }
+    println!("{}", l.tr_args("bans-title", &[("name", network)]));
+    let width = bans.iter().map(|ban| ban.nickname.chars().count()).max().unwrap_or(0);
+    for ban in bans {
+        println!("  {:<width$}  {:<15}  {}", ban.nickname, ban.address.to_string(), ban.public_key);
     }
 }
 
@@ -208,6 +367,41 @@ fn failure_id(failure: Failure) -> &'static str {
         Failure::AlreadyMember => "error-already-member",
         Failure::NotMember => "error-not-member",
         Failure::PoolExhausted => "error-pool-exhausted",
+        Failure::Forbidden => "error-forbidden",
+        Failure::InviteNotFound => "error-invite-not-found",
+        Failure::Banned => "error-banned",
+        Failure::MemberNotFound => "error-member-not-found",
+        Failure::AmbiguousMember => "error-ambiguous-member",
+        Failure::TooManyInvites => "error-too-many-invites",
         Failure::Internal => "error-internal",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations() {
+        assert_eq!(parse_duration("30m"), Some(1800));
+        assert_eq!(parse_duration(" 12H "), Some(43_200));
+        assert_eq!(parse_duration("365d"), Some(MAX_EXPIRY));
+        for invalid in ["", "d", "7", "0h", "366d", "-1d", "1.5h", "7w"] {
+            assert_eq!(parse_duration(invalid), None, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn remaining_time() {
+        let l = Localizer::new(weft_i18n::Language::English);
+        assert_eq!(format_remaining(&l, 7 * 86_400 - 30), "7 d 0 h");
+        assert_eq!(format_remaining(&l, 3 * 3600 + 120), "3 h 2 min");
+        assert_eq!(format_remaining(&l, 5), "1 min");
+    }
+
+    #[test]
+    fn command_line_is_valid() {
+        cli(&Localizer::new(weft_i18n::Language::Russian)).debug_assert();
+        cli(&Localizer::new(weft_i18n::Language::English)).debug_assert();
     }
 }
