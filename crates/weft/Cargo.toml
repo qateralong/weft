@@ -9,3 +9,10 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+clap = { workspace = true, features = ["string"] }
+rpassword.workspace = true
+tokio.workspace = true
+weft-i18n.workspace = true
+weft-ipc.workspace = true

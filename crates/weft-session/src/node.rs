@@ -4,19 +4,16 @@ use std::time::{Duration, Instant, SystemTime};
 
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
-use snow::params::NoiseParams;
-use snow::{Builder, HandshakeState, StatelessTransportState};
+use snow::{HandshakeState, StatelessTransportState};
 use weft_proto::padding::{BLOCK, ip_packet_len, padded_len};
 use weft_proto::{HEADER_LEN, Header, ObfsKey, PacketError, PublicKey, TAG_LEN};
 
+use crate::error::Error;
 use crate::keys::StaticKeypair;
+use crate::noise::{self, MAX_HANDSHAKE_LEN, MAX_HANDSHAKE_PADDING};
 use crate::replay::{REJECT_AFTER_MESSAGES, ReplayWindow};
 use crate::tai64n::{TAI64N_LEN, Tai64N};
 use crate::timers::*;
-
-const NOISE_PARAMS: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
-const PROLOGUE: &[u8] = b"weft v1";
-const MAX_HANDSHAKE_LEN: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PeerId(u64);
@@ -39,26 +36,6 @@ pub enum Event {
     Unreachable(PeerId),
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error(transparent)]
-    Packet(#[from] PacketError),
-    #[error("noise: {0}")]
-    Noise(#[from] snow::Error),
-    #[error("unknown peer")]
-    UnknownPeer,
-    #[error("unknown receiver index")]
-    UnknownIndex,
-    #[error("stale handshake")]
-    StaleHandshake,
-    #[error("replayed packet")]
-    Replay,
-    #[error("session expired")]
-    Expired,
-    #[error("invalid handshake payload")]
-    InvalidPayload,
-}
-
 pub struct Node {
     shared: Shared,
     peers: HashMap<PeerId, Peer>,
@@ -69,7 +46,6 @@ pub struct Node {
 struct Shared {
     keypair: StaticKeypair,
     obfs: ObfsKey,
-    params: NoiseParams,
     indices: HashMap<u32, PeerId>,
     rng: StdRng,
     epoch: Instant,
@@ -132,7 +108,6 @@ impl Node {
         let shared = Shared {
             obfs: ObfsKey::for_receiver(&keypair.public()),
             keypair,
-            params: NOISE_PARAMS.parse().expect("valid noise params"),
             indices: HashMap::new(),
             rng,
             epoch: now,
@@ -202,6 +177,14 @@ impl Node {
         self.peers.get(&id).is_some_and(|peer| peer.current.is_some())
     }
 
+    pub fn reconnect(&mut self, now: Instant, id: PeerId) {
+        if let Some(peer) = self.peers.get_mut(&id).filter(|peer| peer.current.is_none())
+            && let Err(error) = start_handshake(&mut self.shared, id, peer, now)
+        {
+            tracing::warn!(?id, %error, "handshake start failed");
+        }
+    }
+
     pub fn send(&mut self, now: Instant, id: PeerId, packet: &[u8]) -> Result<(), Error> {
         if ip_packet_len(packet)? != Some(packet.len()) {
             return Err(PacketError::InvalidPayload.into());
@@ -238,6 +221,7 @@ impl Node {
             Header::HandshakeInit { sender } => self.on_init(now, sender, body),
             Header::HandshakeResp { sender, receiver } => self.on_resp(now, sender, receiver, body),
             Header::Data { receiver, counter } => self.on_data(now, receiver, counter, body),
+            Header::Discover => Err(PacketError::InvalidHeader.into()),
         }
     }
 
@@ -263,7 +247,7 @@ impl Node {
 
     fn on_init(&mut self, now: Instant, sender: u32, body: &[u8]) -> Result<Received, Error> {
         let shared = &mut self.shared;
-        let mut state = shared.builder().build_responder()?;
+        let mut state = noise::builder(&shared.keypair).build_responder()?;
         let mut payload = vec![0; body.len()];
         let len = state.read_message(body, &mut payload)?;
         let key =
@@ -342,13 +326,6 @@ impl Node {
 }
 
 impl Shared {
-    fn builder(&self) -> Builder<'_> {
-        Builder::new(self.params.clone())
-            .local_private_key(self.keypair.secret())
-            .and_then(|builder| builder.prologue(PROLOGUE))
-            .expect("valid noise configuration")
-    }
-
     fn alloc_index(&mut self, id: PeerId) -> u32 {
         loop {
             if let Entry::Vacant(entry) = self.indices.entry(self.rng.random()) {
@@ -368,7 +345,7 @@ impl Shared {
     }
 
     fn handshake_padding(&mut self) -> usize {
-        self.rng.random_range(0..=HANDSHAKE_MAX_PADDING)
+        self.rng.random_range(0..=MAX_HANDSHAKE_PADDING)
     }
 
     fn keepalive_interval(&mut self) -> Duration {
@@ -485,7 +462,7 @@ fn start_handshake(shared: &mut Shared, id: PeerId, peer: &mut Peer, now: Instan
     if let Some(old) = peer.handshake.take() {
         shared.release_index(old.local_index);
     }
-    let mut state = shared.builder().remote_public_key(peer.key.as_bytes())?.build_initiator()?;
+    let mut state = noise::builder(&shared.keypair).remote_public_key(peer.key.as_bytes())?.build_initiator()?;
     let mut payload = vec![0; TAI64N_LEN + shared.handshake_padding()];
     payload[..TAI64N_LEN].copy_from_slice(shared.timestamp(now).as_bytes());
     let mut out = vec![0; HEADER_LEN + MAX_HANDSHAKE_LEN];

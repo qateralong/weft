@@ -7,6 +7,7 @@ use crate::key::PublicKey;
 use crate::packet::{HEADER_LEN, Header, MIN_PACKET_LEN, PacketError, TAG_LEN};
 
 const LABEL: &[u8] = b"weft-obfs-v1";
+const HANDSHAKE_LENGTH_NONCE: [u8; 12] = *b"weft-tcp-len";
 
 #[derive(Clone)]
 pub struct ObfsKey([u8; 32]);
@@ -42,11 +43,37 @@ impl ObfsKey {
         Ok(header)
     }
 
+    pub fn handshake_length_mask(&self) -> [u8; 2] {
+        let mut mask = [0; 2];
+        ChaCha20::new(&self.0.into(), &HANDSHAKE_LENGTH_NONCE.into()).apply_keystream(&mut mask);
+        mask
+    }
+
     fn cipher(&self, packet: &[u8]) -> ChaCha20 {
         let sample = &packet[packet.len() - TAG_LEN..];
         let nonce: [u8; 12] = sample[..12].try_into().unwrap();
         ChaCha20::new(&self.0.into(), &nonce.into())
     }
+}
+
+pub struct LengthMask(ChaCha20);
+
+impl LengthMask {
+    pub fn new(key: [u8; 32]) -> Self {
+        Self(ChaCha20::new(&key.into(), &[0; 12].into()))
+    }
+
+    pub fn apply(&mut self, length: &mut [u8; 2]) {
+        self.0.apply_keystream(length);
+    }
+}
+
+pub fn discover_packet(token: &[u8; 16], padding: usize, trailer: [u8; TAG_LEN]) -> Vec<u8> {
+    let mut packet = Header::Discover.encode().to_vec();
+    packet.extend_from_slice(token);
+    packet.resize(packet.len() + padding, 0);
+    packet.extend_from_slice(&trailer);
+    packet
 }
 
 #[cfg(test)]
@@ -107,6 +134,32 @@ mod tests {
         receiver().seal(&mut wire).unwrap();
         let other = ObfsKey::for_receiver(&PublicKey::from_bytes([2; 32]));
         assert_eq!(other.open(&mut wire), Err(PacketError::InvalidHeader));
+    }
+
+    #[test]
+    fn discover_roundtrip() {
+        let token = [9; 16];
+        let mut wire = discover_packet(&token, 5, [3; TAG_LEN]);
+        receiver().seal(&mut wire).unwrap();
+        assert!(!wire.windows(16).any(|w| w == token));
+        assert_eq!(receiver().open(&mut wire), Ok(Header::Discover));
+        assert_eq!(wire[HEADER_LEN..HEADER_LEN + 16], token);
+    }
+
+    #[test]
+    fn length_masks() {
+        let mut a = LengthMask::new([5; 32]);
+        let mut b = LengthMask::new([5; 32]);
+        let mut first = 300u16.to_be_bytes();
+        let mut second = 300u16.to_be_bytes();
+        a.apply(&mut first);
+        a.apply(&mut second);
+        assert_ne!(first, second);
+        b.apply(&mut first);
+        b.apply(&mut second);
+        assert_eq!(u16::from_be_bytes(first), 300);
+        assert_eq!(u16::from_be_bytes(second), 300);
+        assert_ne!(receiver().handshake_length_mask(), [0; 2]);
     }
 
     #[test]

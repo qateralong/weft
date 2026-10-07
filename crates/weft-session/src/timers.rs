@@ -10,5 +10,4 @@ pub const UNREACHABLE_AFTER: Duration = Duration::from_secs(90);
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(25);
 pub const KEEPALIVE_JITTER_MS: u64 = 5000;
 pub const KEEPALIVE_MAX_BLOCKS: usize = 7;
-pub const HANDSHAKE_MAX_PADDING: usize = 200;
 pub const MAX_QUEUED_PACKETS: usize = 128;

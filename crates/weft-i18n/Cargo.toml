@@ -9,3 +9,7 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+fluent-bundle.workspace = true
+unic-langid.workspace = true

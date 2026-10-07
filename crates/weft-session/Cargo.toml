@@ -10,11 +10,16 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+tokio = ["dep:tokio"]
+
 [dependencies]
+blake2.workspace = true
 getrandom.workspace = true
 rand.workspace = true
 snow.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, optional = true }
 tracing.workspace = true
 weft-proto.workspace = true
 x25519-dalek.workspace = true

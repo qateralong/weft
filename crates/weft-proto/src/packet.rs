@@ -5,12 +5,14 @@ pub const MIN_PACKET_LEN: usize = HEADER_LEN + TAG_LEN;
 const TYPE_HANDSHAKE_INIT: u8 = 1;
 const TYPE_HANDSHAKE_RESP: u8 = 2;
 const TYPE_DATA: u8 = 3;
+const TYPE_DISCOVER: u8 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Header {
     HandshakeInit { sender: u32 },
     HandshakeResp { sender: u32, receiver: u32 },
     Data { receiver: u32, counter: u64 },
+    Discover,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -29,6 +31,7 @@ impl Header {
             Header::HandshakeInit { sender } => (TYPE_HANDSHAKE_INIT, sender, 0),
             Header::HandshakeResp { sender, receiver } => (TYPE_HANDSHAKE_RESP, sender, u64::from(receiver)),
             Header::Data { receiver, counter } => (TYPE_DATA, receiver, counter),
+            Header::Discover => (TYPE_DISCOVER, 0, 0),
         };
         let mut out = [0; HEADER_LEN];
         out[0] = kind;
@@ -50,6 +53,7 @@ impl Header {
                 Ok(Header::HandshakeResp { sender: a, receiver })
             }
             TYPE_DATA => Ok(Header::Data { receiver: a, counter: b }),
+            TYPE_DISCOVER if a == 0 && b == 0 => Ok(Header::Discover),
             _ => Err(PacketError::InvalidHeader),
         }
     }
@@ -69,6 +73,7 @@ mod tests {
             Header::HandshakeInit { sender: 0xdead_beef },
             Header::HandshakeResp { sender: 1, receiver: u32::MAX },
             Header::Data { receiver: 7, counter: u64::MAX },
+            Header::Discover,
         ] {
             assert_eq!(Header::decode(&header.encode()), Ok(header));
         }
