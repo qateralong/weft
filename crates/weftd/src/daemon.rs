@@ -1,30 +1,29 @@
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rand::RngExt;
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, sleep_until};
 use weft_ipc::{Connection, Failure, MemberStatus, NetworkStatus, PeerLink, Request, Response, Status};
+use weft_mesh::{Mesh, Output, PeerConfig};
+use weft_portmap::{Mapped, PortMapper};
 use weft_proto::control::{
-    ClientKind, ClientMessage, ErrorCode, NetworkCredentials, NetworkName, Role, ServerKind, ServerMessage, State,
-    Welcome,
+    Candidates, ClientKind, ClientMessage, Endpoint, ErrorCode, NetworkCredentials, NetworkName, PeerCandidates,
+    PeerKey, RelayPacket, Role, ServerKind, ServerMessage, State, Welcome,
 };
-use weft_proto::obfs::discover_packet;
-use weft_proto::{Link, ObfsKey, PublicKey};
-use weft_session::{Event, Node, PeerId, StaticKeypair};
+use weft_proto::{Link, PublicKey};
+use weft_session::StaticKeypair;
 use weft_tun::{DEFAULT_MTU, Tun, TunConfig};
 
 use crate::control::{Control, ControlEvent};
 use crate::ipc::Command;
 use crate::settings::{Settings, SettingsFile, default_nickname};
 
-const DISCOVER_INTERVAL_MS: u64 = 20_000;
-const DISCOVER_JITTER_MS: u64 = 5_000;
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+const CANDIDATES_INTERVAL: Duration = Duration::from_secs(60);
 const IDLE_TICK: Duration = Duration::from_secs(3600);
 
 pub struct Daemon {
@@ -32,41 +31,28 @@ pub struct Daemon {
     settings: Settings,
     settings_file: SettingsFile,
     tun_name: String,
-    node: Node,
+    mesh: Mesh,
     udp: UdpSocket,
+    udp_port: u16,
+    mapper: PortMapper,
+    mapped: watch::Receiver<Option<Mapped>>,
     tun: Option<Tun>,
     tun_address: Option<Ipv4Addr>,
     control: Option<Control>,
     generation: u64,
     connection: Connection,
-    session: Option<ServerSession>,
+    welcome: Option<Welcome>,
     state: State,
-    peers: HashMap<PublicKey, PeerInfo>,
-    by_id: HashMap<PeerId, PublicKey>,
-    by_address: HashMap<Ipv4Addr, PublicKey>,
+    candidates: Vec<SocketAddr>,
+    candidates_at: Option<Instant>,
     pending: HashMap<u32, oneshot::Sender<Response>>,
     up_waiters: Vec<oneshot::Sender<Response>>,
     next_id: u32,
     backoff: Duration,
     reconnect_at: Option<Instant>,
-    discover_at: Option<Instant>,
     control_tx: mpsc::UnboundedSender<(u64, ControlEvent)>,
     control_rx: mpsc::UnboundedReceiver<(u64, ControlEvent)>,
     commands: mpsc::Receiver<Command>,
-}
-
-struct ServerSession {
-    welcome: Welcome,
-    udp: SocketAddr,
-    obfs: ObfsKey,
-}
-
-struct PeerInfo {
-    id: PeerId,
-    online: bool,
-    address: Ipv4Addr,
-    endpoint: Option<SocketAddr>,
-    announced: Option<SocketAddr>,
 }
 
 enum Wake {
@@ -74,6 +60,7 @@ enum Wake {
     Control(Option<(u64, ControlEvent)>),
     Udp(std::io::Result<(usize, SocketAddr)>),
     Tun(std::io::Result<usize>),
+    Mapped,
     Timer,
 }
 
@@ -88,34 +75,41 @@ impl Daemon {
         let settings = settings_file.load()?;
         let port = port.or(settings.port).unwrap_or(0);
         let udp = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?;
-        tracing::info!(addr = %udp.local_addr()?, key = %keypair.public(), "weftd started");
-        let now = std::time::Instant::now();
-        let node = Node::new(StaticKeypair::from_secret(keypair.secret()), now, std::time::SystemTime::now())
-            .map_err(std::io::Error::other)?;
+        let udp_port = udp.local_addr()?.port();
+        tracing::info!(port = udp_port, key = %keypair.public(), "weftd started");
+        let mesh = Mesh::new(
+            StaticKeypair::from_secret(keypair.secret()),
+            std::time::Instant::now(),
+            std::time::SystemTime::now(),
+        )
+        .map_err(std::io::Error::other)?;
+        let mapper = PortMapper::spawn(udp_port);
+        let mapped = mapper.subscribe();
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let mut daemon = Self {
             keypair: Arc::new(keypair),
             settings,
             settings_file,
             tun_name,
-            node,
+            mesh,
             udp,
+            udp_port,
+            mapper,
+            mapped,
             tun: None,
             tun_address: None,
             control: None,
             generation: 0,
             connection: Connection::Disconnected,
-            session: None,
+            welcome: None,
             state: State::default(),
-            peers: HashMap::new(),
-            by_id: HashMap::new(),
-            by_address: HashMap::new(),
+            candidates: Vec::new(),
+            candidates_at: None,
             pending: HashMap::new(),
             up_waiters: Vec::new(),
             next_id: 1,
             backoff: MIN_BACKOFF,
             reconnect_at: None,
-            discover_at: None,
             control_tx,
             control_rx,
             commands,
@@ -136,29 +130,42 @@ impl Daemon {
                 event = self.control_rx.recv() => Wake::Control(event),
                 received = self.udp.recv_from(&mut udp_buf) => Wake::Udp(received),
                 received = recv_tun(self.tun.as_ref(), &mut tun_buf) => Wake::Tun(received),
+                Ok(()) = self.mapped.changed() => Wake::Mapped,
                 _ = sleep_until(deadline) => Wake::Timer,
             };
+            let now = std::time::Instant::now();
             match wake {
                 Wake::Command(None) => return,
                 Wake::Command(Some(command)) => self.on_command(command),
-                Wake::Control(Some((generation, event))) if generation == self.generation => self.on_control(event),
+                Wake::Control(Some((generation, event))) if generation == self.generation => {
+                    self.on_control(event).await
+                }
                 Wake::Control(_) => {}
-                Wake::Udp(Ok((len, from))) => self.on_udp(&udp_buf[..len], from).await,
+                Wake::Udp(Ok((len, from))) => {
+                    if let Some(delivered) = self.mesh.receive_udp(now, from, &udp_buf[..len]) {
+                        self.write_tun(&delivered.packet).await;
+                    }
+                }
                 Wake::Udp(Err(error)) => tracing::debug!(%error, "udp receive failed"),
-                Wake::Tun(Ok(len)) => self.on_tun(&tun_buf[..len]),
+                Wake::Tun(Ok(len)) => {
+                    if let Err(error) = self.mesh.send(now, &tun_buf[..len]) {
+                        tracing::trace!(%error, "packet not sent");
+                    }
+                }
                 Wake::Tun(Err(error)) => {
                     tracing::warn!(%error, "tun receive failed");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                Wake::Timer => self.on_timer().await,
+                Wake::Mapped => self.candidates_at = Some(Instant::now()),
+                Wake::Timer => self.on_timer(),
             }
             self.flush().await;
         }
     }
 
     fn deadline(&self) -> Instant {
-        let node = self.node.next_timeout().map(Instant::from_std);
-        [node, self.reconnect_at, self.discover_at]
+        let mesh = self.mesh.next_timeout().map(Instant::from_std);
+        [mesh, self.reconnect_at, self.candidates_at]
             .into_iter()
             .flatten()
             .min()
@@ -226,23 +233,25 @@ impl Daemon {
     }
 
     fn request(&mut self, kind: ClientKind, reply: oneshot::Sender<Response>) {
-        let Some(control) = self.control.as_ref().filter(|_| self.connection == Connection::Connected) else {
+        if self.connection != Connection::Connected {
             let _ = reply.send(Response::Error(Failure::NotConnected));
             return;
-        };
+        }
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
-        if control.send(ClientMessage { id, kind: Some(kind) }) {
+        if self.send_control(ClientMessage { id, kind: Some(kind) }) {
             self.pending.insert(id, reply);
         } else {
             let _ = reply.send(Response::Error(Failure::NotConnected));
         }
     }
 
+    fn send_control(&self, message: ClientMessage) -> bool {
+        self.control.as_ref().is_some_and(|control| control.send(message))
+    }
+
     fn connect(&mut self) {
-        let Some(link) = self.settings.server.as_deref().and_then(|link| link.parse::<Link>().ok()) else {
-            return;
-        };
+        let Some(link) = self.server_link() else { return };
         let nickname = self.settings.nickname.clone().unwrap_or_else(default_nickname);
         self.generation += 1;
         self.control =
@@ -255,14 +264,20 @@ impl Daemon {
         self.generation += 1;
         self.control = None;
         self.connection = Connection::Disconnected;
-        self.session = None;
+        self.welcome = None;
         self.reconnect_at = None;
-        self.discover_at = None;
+        self.candidates_at = None;
+        self.candidates.clear();
         self.state = State::default();
-        self.sync_peers();
+        self.mesh.clear_server();
+        self.mesh.update_peers(std::time::Instant::now(), Vec::new());
         self.tun = None;
         self.tun_address = None;
         self.fail_pending(Failure::NotConnected);
+    }
+
+    fn server_link(&self) -> Option<Link> {
+        self.settings.server.as_deref().and_then(|link| link.parse().ok())
     }
 
     fn fail_pending(&mut self, failure: Failure) {
@@ -274,7 +289,7 @@ impl Daemon {
         }
     }
 
-    fn on_control(&mut self, event: ControlEvent) {
+    async fn on_control(&mut self, event: ControlEvent) {
         match event {
             ControlEvent::Connected { welcome, server } => self.on_connected(welcome, server),
             ControlEvent::Refused(code) => {
@@ -283,12 +298,14 @@ impl Daemon {
                 self.connection = Connection::Disconnected;
                 self.fail_pending(failure(code));
             }
-            ControlEvent::Message(message) => self.on_message(message),
+            ControlEvent::Message(message) => self.on_message(message).await,
             ControlEvent::Closed(reason) => {
                 tracing::warn!(%reason, "server connection closed");
                 self.control = None;
-                self.session = None;
-                self.discover_at = None;
+                self.welcome = None;
+                self.candidates_at = None;
+                self.candidates.clear();
+                self.mesh.clear_server();
                 self.fail_pending(Failure::NotConnected);
                 if self.settings.up {
                     self.connection = Connection::Connecting;
@@ -306,15 +323,15 @@ impl Daemon {
         tracing::info!(%server, %address, "connected to the server");
         self.connection = Connection::Connected;
         self.backoff = MIN_BACKOFF;
-        let config = TunConfig {
-            name: self.tun_name.clone(),
-            address,
-            prefix: welcome.prefix_len.min(32) as u8,
-            mtu: DEFAULT_MTU,
-        };
         if self.tun.is_none() || self.tun_address != Some(address) {
             self.tun = None;
             self.tun_address = None;
+            let config = TunConfig {
+                name: self.tun_name.clone(),
+                address,
+                prefix: welcome.prefix_len.min(32) as u8,
+                mtu: DEFAULT_MTU,
+            };
             match Tun::create(&config) {
                 Ok(tun) => {
                     tracing::info!(name = tun.name(), %address, "tun interface is up");
@@ -324,20 +341,19 @@ impl Daemon {
                 Err(error) => tracing::error!(%error, "cannot create tun interface"),
             }
         }
-        let server_key =
-            self.settings.server.as_deref().and_then(|link| link.parse::<Link>().ok()).map(|l| l.server_key);
-        self.session = server_key.map(|key| ServerSession {
-            udp: SocketAddr::new(server.ip(), welcome.udp_port as u16),
-            obfs: ObfsKey::for_receiver(&key),
-            welcome,
-        });
-        self.discover_at = Some(Instant::now());
+        if let (Some(link), Ok(token)) = (self.server_link(), welcome.discovery_token.as_slice().try_into()) {
+            let udp = SocketAddr::new(server.ip(), welcome.udp_port as u16);
+            self.mesh.set_server(std::time::Instant::now(), udp, link.server_key, token);
+        }
+        self.welcome = Some(welcome);
+        self.candidates.clear();
+        self.candidates_at = Some(Instant::now());
         for reply in self.up_waiters.drain(..) {
             let _ = reply.send(Response::Ok);
         }
     }
 
-    fn on_message(&mut self, message: ServerMessage) {
+    async fn on_message(&mut self, message: ServerMessage) {
         if message.reply_to != 0
             && let Some(reply) = self.pending.remove(&message.reply_to)
         {
@@ -349,161 +365,97 @@ impl Daemon {
             let _ = reply.send(response);
             return;
         }
-        if let Some(ServerKind::State(state)) = message.kind {
-            self.state = state;
-            self.sync_peers();
+        let now = std::time::Instant::now();
+        match message.kind {
+            Some(ServerKind::State(state)) => {
+                self.state = state;
+                let configs = peer_configs(&self.state);
+                self.mesh.update_peers(now, configs);
+            }
+            Some(ServerKind::CallMeMaybe(PeerCandidates { key, endpoints })) => {
+                if let Ok(key) = PublicKey::from_slice(&key) {
+                    let candidates = endpoints.iter().filter_map(|e| e.to_socket_addr()).collect();
+                    self.mesh.call_me_maybe(now, &key, candidates);
+                }
+            }
+            Some(ServerKind::Relay(RelayPacket { address, packet })) => {
+                if let Some(delivered) = self.mesh.receive_tcp_relay(now, Ipv4Addr::from(address), &packet) {
+                    self.write_tun(&delivered.packet).await;
+                }
+            }
+            _ => {}
         }
     }
 
-    fn sync_peers(&mut self) {
-        let now = std::time::Instant::now();
-        let own = self.keypair.public();
-        let listed: HashMap<PublicKey, (bool, Ipv4Addr, Option<SocketAddr>)> = self
-            .state
-            .peers
-            .iter()
-            .filter_map(|peer| {
-                let key = PublicKey::from_slice(&peer.key).ok().filter(|key| *key != own)?;
-                let endpoint = peer.endpoint.as_ref().and_then(|e| e.to_socket_addr());
-                Some((key, (peer.online, Ipv4Addr::from(peer.address), endpoint)))
-            })
-            .collect();
-
-        let gone: Vec<PublicKey> = self
-            .peers
-            .iter()
-            .filter(|(key, peer)| match listed.get(key) {
-                None => true,
-                Some(&(online, _, _)) => !online && !self.node.is_established(peer.id),
-            })
-            .map(|(key, _)| *key)
-            .collect();
-        for key in gone {
-            self.remove_peer(&key);
+    fn on_timer(&mut self) {
+        let now = Instant::now();
+        self.mesh.tick(now.into_std());
+        if self.reconnect_at.is_some_and(|at| now >= at) {
+            self.connect();
         }
+        if self.candidates_at.is_some_and(|at| now >= at) {
+            self.candidates_at = Some(now + CANDIDATES_INTERVAL);
+            self.publish_candidates();
+        }
+    }
 
-        for (key, (online, address, announced)) in listed {
-            if !online && !self.peers.contains_key(&key) {
-                continue;
+    fn publish_candidates(&mut self) {
+        if self.connection != Connection::Connected {
+            return;
+        }
+        let tun = self.tun.as_ref().map(|tun| tun.name().to_string()).unwrap_or_else(|| self.tun_name.clone());
+        let mut candidates: Vec<SocketAddr> = weft_portmap::local_addresses(Some(&tun))
+            .into_iter()
+            .filter(|ip| Some(*ip) != self.tun_address.map(IpAddr::V4))
+            .map(|ip| SocketAddr::new(ip, self.udp_port))
+            .collect();
+        let observed = self.mesh.observed().map(|addr| addr.ip());
+        if let Some(mapped) = self.mapper.current().and_then(|mapped| mapped.endpoint(observed)) {
+            candidates.insert(0, mapped);
+        }
+        candidates.dedup();
+        if candidates != self.candidates {
+            tracing::debug!(?candidates, "publishing candidates");
+            let endpoints = candidates.iter().map(|&addr| Endpoint::from(addr)).collect();
+            let message = ClientMessage { id: 0, kind: Some(ClientKind::Candidates(Candidates { endpoints })) };
+            if self.send_control(message) {
+                self.candidates = candidates;
             }
-            let peer = self.peers.entry(key).or_insert_with(|| {
-                let id = self.node.add_peer(now, key);
-                self.by_id.insert(id, key);
-                PeerInfo { id, online, address, endpoint: None, announced: None }
-            });
-            peer.online = online;
-            if peer.address != address {
-                self.by_address.remove(&peer.address);
-                peer.address = address;
-            }
-            self.by_address.insert(address, key);
-            if announced.is_some() && peer.announced != announced {
-                let first = peer.endpoint.is_none();
-                peer.announced = announced;
-                peer.endpoint = announced;
-                if first {
-                    self.node.reconnect(now, peer.id);
+        }
+    }
+
+    async fn flush(&mut self) {
+        while let Some(output) = self.mesh.poll_output() {
+            match output {
+                Output::Udp { to, datagram } => {
+                    if let Err(error) = self.udp.send_to(&datagram, to).await {
+                        tracing::trace!(%to, %error, "udp send failed");
+                    }
+                }
+                Output::TcpRelay { to, packet } => {
+                    let relay = RelayPacket { address: u32::from(to), packet };
+                    self.send_control(ClientMessage { id: 0, kind: Some(ClientKind::Relay(relay)) });
+                }
+                Output::CallMeMaybe { peer } => {
+                    let key = PeerKey { key: peer.as_bytes().to_vec() };
+                    self.send_control(ClientMessage { id: 0, kind: Some(ClientKind::CallMeMaybe(key)) });
                 }
             }
         }
     }
 
-    fn remove_peer(&mut self, key: &PublicKey) {
-        if let Some(peer) = self.peers.remove(key) {
-            self.node.remove_peer(peer.id);
-            self.by_id.remove(&peer.id);
-            if self.by_address.get(&peer.address) == Some(key) {
-                self.by_address.remove(&peer.address);
-            }
-        }
-    }
-
-    async fn on_udp(&mut self, datagram: &[u8], from: SocketAddr) {
-        if self.session.as_ref().is_some_and(|session| session.udp == from) {
-            return;
-        }
-        let received = match self.node.receive(std::time::Instant::now(), datagram) {
-            Ok(received) => received,
-            Err(error) => {
-                tracing::trace!(%from, %error, "dropped datagram");
-                return;
-            }
-        };
-        let Some(key) = self.by_id.get(&received.peer) else { return };
-        let Some(peer) = self.peers.get_mut(key) else { return };
-        peer.endpoint = Some(from);
-        let Some(packet) = received.packet else { return };
-        if ipv4_source(&packet) != Some(peer.address) {
-            tracing::debug!(peer = %peer.address, "dropped packet with a foreign source address");
-            return;
-        }
+    async fn write_tun(&self, packet: &[u8]) {
         if let Some(tun) = &self.tun
-            && let Err(error) = tun.send(&packet).await
+            && let Err(error) = tun.send(packet).await
         {
             tracing::debug!(%error, "tun send failed");
         }
     }
 
-    fn on_tun(&mut self, packet: &[u8]) {
-        let Some(destination) = ipv4_destination(packet) else { return };
-        let Some(peer) = self.by_address.get(&destination).and_then(|key| self.peers.get(key)) else { return };
-        if let Err(error) = self.node.send(std::time::Instant::now(), peer.id, packet) {
-            tracing::debug!(%error, "cannot send packet");
-        }
-    }
-
-    async fn on_timer(&mut self) {
-        let now = Instant::now();
-        self.node.tick(now.into_std());
-        if self.reconnect_at.is_some_and(|at| now >= at) {
-            self.connect();
-        }
-        if self.discover_at.is_some_and(|at| now >= at) {
-            self.discover().await;
-            let jitter = rand::rng().random_range(0..=2 * DISCOVER_JITTER_MS);
-            self.discover_at = Some(now + Duration::from_millis(DISCOVER_INTERVAL_MS - DISCOVER_JITTER_MS + jitter));
-        }
-    }
-
-    async fn discover(&self) {
-        let Some(session) = &self.session else { return };
-        let Ok(token) = <[u8; 16]>::try_from(session.welcome.discovery_token.as_slice()) else { return };
-        let mut rng = rand::rng();
-        let mut packet = discover_packet(&token, rng.random_range(0..=64), rng.random());
-        if session.obfs.seal(&mut packet).is_ok()
-            && let Err(error) = self.udp.send_to(&packet, session.udp).await
-        {
-            tracing::debug!(%error, "discover send failed");
-        }
-    }
-
-    async fn flush(&mut self) {
-        while let Some(event) = self.node.poll_event() {
-            match event {
-                Event::Established(id) => tracing::debug!(?id, "session established"),
-                Event::Unreachable(id) => {
-                    tracing::info!(?id, "peer is unreachable");
-                    let offline = self.by_id.get(&id).filter(|key| self.peers.get(key).is_some_and(|p| !p.online));
-                    if let Some(key) = offline.copied() {
-                        self.remove_peer(&key);
-                    }
-                }
-            }
-        }
-        while let Some(transmit) = self.node.poll_transmit() {
-            let endpoint = self.by_id.get(&transmit.peer).and_then(|key| self.peers.get(key)).and_then(|p| p.endpoint);
-            if let Some(endpoint) = endpoint
-                && let Err(error) = self.udp.send_to(&transmit.datagram, endpoint).await
-            {
-                tracing::debug!(%endpoint, %error, "udp send failed");
-            }
-        }
-    }
-
     fn status(&self) -> Status {
         let own = self.keypair.public();
-        let peers: HashMap<Vec<u8>, &weft_proto::control::Peer> =
-            self.state.peers.iter().map(|peer| (peer.key.clone(), peer)).collect();
+        let peers: HashMap<&[u8], &weft_proto::control::Peer> =
+            self.state.peers.iter().map(|peer| (peer.key.as_slice(), peer)).collect();
         let networks = self
             .state
             .networks
@@ -519,12 +471,8 @@ impl Daemon {
                     .members
                     .iter()
                     .filter(|key| key.as_slice() != own.as_bytes())
-                    .filter_map(|key| peers.get(key))
-                    .map(|peer| MemberStatus {
-                        nickname: peer.nickname.clone(),
-                        address: Ipv4Addr::from(peer.address),
-                        link: self.link_state(peer),
-                    })
+                    .filter_map(|key| peers.get(key.as_slice()))
+                    .map(|peer| self.member_status(peer))
                     .collect(),
             })
             .collect();
@@ -533,20 +481,25 @@ impl Daemon {
             server: self.settings.server.clone(),
             nickname: self.settings.nickname.clone().unwrap_or_else(default_nickname),
             public_key: own.to_string(),
-            address: self.session.as_ref().map(|s| Ipv4Addr::from(s.welcome.address)),
+            address: self.welcome.as_ref().map(|welcome| Ipv4Addr::from(welcome.address)),
             networks,
         }
     }
 
-    fn link_state(&self, peer: &weft_proto::control::Peer) -> PeerLink {
-        if !peer.online {
-            return PeerLink::Offline;
+    fn member_status(&self, peer: &weft_proto::control::Peer) -> MemberStatus {
+        let link = PublicKey::from_slice(&peer.key).ok().and_then(|key| self.mesh.link(&key));
+        let (link, latency) = match link {
+            None if !peer.online => (PeerLink::Offline, None),
+            None | Some(weft_mesh::PeerLink::Connecting) => (PeerLink::Connecting, None),
+            Some(weft_mesh::PeerLink::Relay) => (PeerLink::Relay, None),
+            Some(weft_mesh::PeerLink::Direct { latency, .. }) => (PeerLink::Direct, latency),
+        };
+        MemberStatus {
+            nickname: peer.nickname.clone(),
+            address: Ipv4Addr::from(peer.address),
+            link,
+            latency_ms: latency.map(|latency| latency.as_millis().min(u128::from(u32::MAX)) as u32),
         }
-        let established = PublicKey::from_slice(&peer.key)
-            .ok()
-            .and_then(|key| self.peers.get(&key))
-            .is_some_and(|info| self.node.is_established(info.id));
-        if established { PeerLink::Direct } else { PeerLink::Connecting }
     }
 
     fn save_settings(&self) {
@@ -556,19 +509,23 @@ impl Daemon {
     }
 }
 
+fn peer_configs(state: &State) -> Vec<PeerConfig> {
+    state
+        .peers
+        .iter()
+        .filter_map(|peer| {
+            let key = PublicKey::from_slice(&peer.key).ok()?;
+            let candidates = peer.endpoint.iter().chain(&peer.candidates).filter_map(|e| e.to_socket_addr()).collect();
+            Some(PeerConfig { key, address: Ipv4Addr::from(peer.address), online: peer.online, candidates })
+        })
+        .collect()
+}
+
 async fn recv_tun(tun: Option<&Tun>, buf: &mut [u8]) -> std::io::Result<usize> {
     match tun {
         Some(tun) => tun.recv(buf).await,
         None => std::future::pending().await,
     }
-}
-
-fn ipv4_destination(packet: &[u8]) -> Option<Ipv4Addr> {
-    (packet.len() >= 20 && packet[0] >> 4 == 4).then(|| Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]))
-}
-
-fn ipv4_source(packet: &[u8]) -> Option<Ipv4Addr> {
-    (packet.len() >= 20 && packet[0] >> 4 == 4).then(|| Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]))
 }
 
 fn failure(code: ErrorCode) -> Failure {

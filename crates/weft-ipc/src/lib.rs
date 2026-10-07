@@ -90,6 +90,7 @@ pub struct MemberStatus {
     pub nickname: String,
     pub address: Ipv4Addr,
     pub link: PeerLink,
+    pub latency_ms: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +98,7 @@ pub struct MemberStatus {
 pub enum PeerLink {
     Offline,
     Connecting,
+    Relay,
     Direct,
 }
 

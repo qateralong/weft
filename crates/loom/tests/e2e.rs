@@ -8,11 +8,12 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, UdpSocket};
 use weft_proto::control::{
-    self, ClientKind, ClientMessage, ErrorCode, Hello, NetworkCredentials, NetworkName, PROTOCOL_VERSION, Role,
-    ServerKind, ServerMessage, State, Welcome,
+    self, Candidates, ClientKind, ClientMessage, ErrorCode, Hello, NetworkCredentials, NetworkName, PROTOCOL_VERSION,
+    PeerKey, RelayPacket, Role, ServerKind, ServerMessage, State, Welcome,
 };
+use weft_proto::loom::{parse_observed, parse_relayed, relay_packet};
 use weft_proto::obfs::discover_packet;
-use weft_proto::{ObfsKey, PublicKey};
+use weft_proto::{Header, ObfsKey, PublicKey};
 use weft_session::StaticKeypair;
 use weft_session::stream::{self, Receiver, Sender, io};
 
@@ -201,4 +202,87 @@ async fn reconnect_replaces_old_session() {
     .await;
     assert!(closed.is_ok());
     new.request(ClientKind::Ping(control::Empty {})).await.unwrap();
+}
+
+async fn discover(server: &Server, udp: &UdpSocket, welcome: &Welcome, own: &ObfsKey) {
+    let token: [u8; 16] = welcome.discovery_token.as_slice().try_into().unwrap();
+    let mut packet = discover_packet(&token, 0, [5; 16]);
+    ObfsKey::for_receiver(&server.public_key).seal(&mut packet).unwrap();
+    udp.send_to(&packet, server.udp_addr).await.unwrap();
+    let mut buf = vec![0; 2048];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), udp.recv_from(&mut buf)).await.unwrap().unwrap();
+    assert_eq!(own.open(&mut buf[..len]), Ok(Header::Observed));
+    assert_eq!(parse_observed(&buf[..len]), Some((token, udp.local_addr().unwrap())));
+}
+
+#[tokio::test]
+async fn relay_candidates_and_call_me_maybe() {
+    let server = start().await;
+    let mut a = Client::connect(&server, 1).await;
+    let mut b = Client::connect(&server, 2).await;
+    let mut c = Client::connect(&server, 3).await;
+    let welcome_a = a.hello("alice").await;
+    let welcome_b = b.hello("bob").await;
+    let welcome_c = c.hello("carol").await;
+    a.request(ClientKind::CreateNetwork(credentials("lan", "pw"))).await.unwrap();
+    b.request(ClientKind::JoinNetwork(credentials("lan", "pw"))).await.unwrap();
+
+    let udp_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let udp_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let obfs_a = ObfsKey::for_receiver(&a.key);
+    let obfs_b = ObfsKey::for_receiver(&b.key);
+    discover(&server, &udp_a, &welcome_a, &obfs_a).await;
+    discover(&server, &udp_b, &welcome_b, &obfs_b).await;
+
+    let local: SocketAddr = "192.168.1.20:4000".parse().unwrap();
+    a.send(ClientKind::Candidates(Candidates { endpoints: vec![local.into()] })).await;
+    let state = b.state_where(|s| s.peers.first().is_some_and(|p| !p.candidates.is_empty())).await;
+    assert_eq!(state.peers[0].candidates[0].to_socket_addr(), Some(local));
+    assert_eq!(state.peers[0].endpoint.as_ref().unwrap().to_socket_addr(), Some(udp_a.local_addr().unwrap()));
+
+    a.send(ClientKind::CallMeMaybe(PeerKey { key: b.key.as_bytes().to_vec() })).await;
+    loop {
+        if let Some(ServerKind::CallMeMaybe(from)) = b.recv().await.kind {
+            assert_eq!(from.key, a.key.as_bytes().to_vec());
+            let endpoints: Vec<_> = from.endpoints.iter().filter_map(|e| e.to_socket_addr()).collect();
+            assert_eq!(endpoints, vec![udp_a.local_addr().unwrap(), local]);
+            break;
+        }
+    }
+    loop {
+        if let Some(ServerKind::CallMeMaybe(echo)) = a.recv().await.kind {
+            assert_eq!(echo.key, b.key.as_bytes().to_vec());
+            let endpoints: Vec<_> = echo.endpoints.iter().filter_map(|e| e.to_socket_addr()).collect();
+            assert_eq!(endpoints, vec![udp_b.local_addr().unwrap()]);
+            break;
+        }
+    }
+
+    let inner: Vec<u8> = (0..64).collect();
+    let token_a: [u8; 16] = welcome_a.discovery_token.as_slice().try_into().unwrap();
+    let mut packet = relay_packet(&token_a, Ipv4Addr::from(welcome_b.address), &inner);
+    ObfsKey::for_receiver(&server.public_key).seal(&mut packet).unwrap();
+    udp_a.send_to(&packet, server.udp_addr).await.unwrap();
+    let mut buf = vec![0; 2048];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), udp_b.recv_from(&mut buf)).await.unwrap().unwrap();
+    assert_eq!(obfs_b.open(&mut buf[..len]), Ok(Header::Relayed));
+    assert_eq!(parse_relayed(&buf[..len]), Some((Ipv4Addr::from(welcome_a.address), inner.as_slice())));
+
+    b.send(ClientKind::Relay(RelayPacket { address: welcome_a.address, packet: inner.clone() })).await;
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), udp_a.recv_from(&mut buf)).await.unwrap().unwrap();
+    assert_eq!(obfs_a.open(&mut buf[..len]), Ok(Header::Relayed));
+    assert_eq!(parse_relayed(&buf[..len]), Some((Ipv4Addr::from(welcome_b.address), inner.as_slice())));
+
+    a.send(ClientKind::Relay(RelayPacket { address: welcome_c.address, packet: inner.clone() })).await;
+    a.send(ClientKind::CallMeMaybe(PeerKey { key: c.key.as_bytes().to_vec() })).await;
+    c.send(ClientKind::Relay(RelayPacket { address: welcome_a.address, packet: inner.clone() })).await;
+    let id = c.send(ClientKind::Ping(control::Empty {})).await;
+    loop {
+        let message = c.recv().await;
+        assert!(!matches!(message.kind, Some(ServerKind::Relay(_) | ServerKind::CallMeMaybe(_))));
+        if message.reply_to == id {
+            break;
+        }
+    }
+    assert!(tokio::time::timeout(Duration::from_millis(300), udp_a.recv_from(&mut buf)).await.is_err());
 }

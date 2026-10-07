@@ -6,6 +6,10 @@ const TYPE_HANDSHAKE_INIT: u8 = 1;
 const TYPE_HANDSHAKE_RESP: u8 = 2;
 const TYPE_DATA: u8 = 3;
 const TYPE_DISCOVER: u8 = 4;
+const TYPE_DISCO: u8 = 5;
+const TYPE_RELAY: u8 = 6;
+const TYPE_RELAYED: u8 = 7;
+const TYPE_OBSERVED: u8 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Header {
@@ -13,6 +17,10 @@ pub enum Header {
     HandshakeResp { sender: u32, receiver: u32 },
     Data { receiver: u32, counter: u64 },
     Discover,
+    Disco,
+    Relay,
+    Relayed,
+    Observed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -32,6 +40,10 @@ impl Header {
             Header::HandshakeResp { sender, receiver } => (TYPE_HANDSHAKE_RESP, sender, u64::from(receiver)),
             Header::Data { receiver, counter } => (TYPE_DATA, receiver, counter),
             Header::Discover => (TYPE_DISCOVER, 0, 0),
+            Header::Disco => (TYPE_DISCO, 0, 0),
+            Header::Relay => (TYPE_RELAY, 0, 0),
+            Header::Relayed => (TYPE_RELAYED, 0, 0),
+            Header::Observed => (TYPE_OBSERVED, 0, 0),
         };
         let mut out = [0; HEADER_LEN];
         out[0] = kind;
@@ -54,6 +66,10 @@ impl Header {
             }
             TYPE_DATA => Ok(Header::Data { receiver: a, counter: b }),
             TYPE_DISCOVER if a == 0 && b == 0 => Ok(Header::Discover),
+            TYPE_DISCO if a == 0 && b == 0 => Ok(Header::Disco),
+            TYPE_RELAY if a == 0 && b == 0 => Ok(Header::Relay),
+            TYPE_RELAYED if a == 0 && b == 0 => Ok(Header::Relayed),
+            TYPE_OBSERVED if a == 0 && b == 0 => Ok(Header::Observed),
             _ => Err(PacketError::InvalidHeader),
         }
     }
@@ -74,6 +90,10 @@ mod tests {
             Header::HandshakeResp { sender: 1, receiver: u32::MAX },
             Header::Data { receiver: 7, counter: u64::MAX },
             Header::Discover,
+            Header::Disco,
+            Header::Relay,
+            Header::Relayed,
+            Header::Observed,
         ] {
             assert_eq!(Header::decode(&header.encode()), Ok(header));
         }

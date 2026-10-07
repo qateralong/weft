@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/qateralong/weft"
@@ -22,10 +22,14 @@ weft-sim = { path = "crates/weft-sim" }
 argon2 = "0.6"
 blake2 = "0.11"
 chacha20 = "0.10"
+chacha20poly1305 = "0.11"
 clap = "4.6"
+crab_nat = "0.8"
 data-encoding = "2.11"
 fluent-bundle = "0.16"
 getrandom = "0.4"
+igd-next = { version = "0.18", default-features = false, features = ["aio_tokio"] }
+netdev = "0.46"
 prost = "0.14"
 rand = { version = "0.10", default-features = false, features = ["std", "std_rng", "thread_rng"] }
 rpassword = "7.5"

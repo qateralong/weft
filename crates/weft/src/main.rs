@@ -177,12 +177,14 @@ fn print_status(l: &Localizer, status: &Status) {
         }
         let width = network.members.iter().map(|m| m.nickname.chars().count()).max().unwrap_or(0);
         for member in &network.members {
-            let link = match member.link {
-                PeerLink::Offline => "link-offline",
-                PeerLink::Connecting => "link-connecting",
-                PeerLink::Direct => "link-direct",
+            let link = match (member.link, member.latency_ms) {
+                (PeerLink::Offline, _) => l.tr("link-offline"),
+                (PeerLink::Connecting, _) => l.tr("link-connecting"),
+                (PeerLink::Relay, _) => l.tr("link-relay"),
+                (PeerLink::Direct, Some(ms)) => l.tr_args("link-direct-latency", &[("ms", &ms.to_string())]),
+                (PeerLink::Direct, None) => l.tr("link-direct"),
             };
-            println!("  {:<width$}  {:<15}  {}", member.nickname, member.address.to_string(), l.tr(link));
+            println!("  {:<width$}  {:<15}  {link}", member.nickname, member.address.to_string());
         }
     }
 }

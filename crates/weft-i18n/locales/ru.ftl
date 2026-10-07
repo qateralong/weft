@@ -57,6 +57,8 @@ role-admin = администратор
 role-member = участник
 link-offline = не в сети
 link-connecting = соединение
+link-relay = в сети, через сервер
+link-direct-latency = в сети, напрямую, { $ms } мс
 link-direct = в сети, напрямую
 
 error-daemon = Не удалось связаться с weftd ({ $path }): { $reason }

@@ -11,7 +11,7 @@ pub const DISCOVERY_TOKEN_LEN: usize = 16;
 pub struct ClientMessage {
     #[prost(uint32, tag = "1")]
     pub id: u32,
-    #[prost(oneof = "ClientKind", tags = "2, 3, 4, 5, 6")]
+    #[prost(oneof = "ClientKind", tags = "2, 3, 4, 5, 6, 7, 8, 9")]
     pub kind: Option<ClientKind>,
 }
 
@@ -27,6 +27,32 @@ pub enum ClientKind {
     LeaveNetwork(NetworkName),
     #[prost(message, tag = "6")]
     Ping(Empty),
+    #[prost(message, tag = "7")]
+    Candidates(Candidates),
+    #[prost(message, tag = "8")]
+    CallMeMaybe(PeerKey),
+    #[prost(message, tag = "9")]
+    Relay(RelayPacket),
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct Candidates {
+    #[prost(message, repeated, tag = "1")]
+    pub endpoints: Vec<Endpoint>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct PeerKey {
+    #[prost(bytes = "vec", tag = "1")]
+    pub key: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct RelayPacket {
+    #[prost(fixed32, tag = "1")]
+    pub address: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub packet: Vec<u8>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -58,7 +84,7 @@ pub struct Empty {}
 pub struct ServerMessage {
     #[prost(uint32, tag = "1")]
     pub reply_to: u32,
-    #[prost(oneof = "ServerKind", tags = "2, 3, 4, 5")]
+    #[prost(oneof = "ServerKind", tags = "2, 3, 4, 5, 6, 7")]
     pub kind: Option<ServerKind>,
 }
 
@@ -72,6 +98,18 @@ pub enum ServerKind {
     Failure(Failure),
     #[prost(message, tag = "5")]
     State(State),
+    #[prost(message, tag = "6")]
+    CallMeMaybe(PeerCandidates),
+    #[prost(message, tag = "7")]
+    Relay(RelayPacket),
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct PeerCandidates {
+    #[prost(bytes = "vec", tag = "1")]
+    pub key: Vec<u8>,
+    #[prost(message, repeated, tag = "2")]
+    pub endpoints: Vec<Endpoint>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -150,6 +188,8 @@ pub struct Peer {
     pub online: bool,
     #[prost(message, optional, tag = "5")]
     pub endpoint: Option<Endpoint>,
+    #[prost(message, repeated, tag = "6")]
+    pub candidates: Vec<Endpoint>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -229,6 +269,7 @@ mod tests {
                 address: u32::from(Ipv4Addr::new(100, 64, 0, 2)),
                 online: true,
                 endpoint: Some("203.0.113.9:41000".parse::<SocketAddr>().unwrap().into()),
+                candidates: vec!["192.168.1.5:41000".parse::<SocketAddr>().unwrap().into()],
             }],
         };
         let message = ServerMessage::push(ServerKind::State(state));

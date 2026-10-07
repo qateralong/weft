@@ -12,7 +12,6 @@ workspace = true
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
-rand.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -20,6 +19,8 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 weft-ipc.workspace = true
+weft-mesh.workspace = true
+weft-portmap.workspace = true
 weft-proto.workspace = true
 weft-session = { workspace = true, features = ["tokio"] }
 weft-tun.workspace = true

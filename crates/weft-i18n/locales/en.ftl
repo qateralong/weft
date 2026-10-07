@@ -57,6 +57,8 @@ role-admin = admin
 role-member = member
 link-offline = offline
 link-connecting = connecting
+link-relay = online, via the server
+link-direct-latency = online, direct, { $ms } ms
 link-direct = online, direct
 
 error-daemon = Cannot reach weftd at { $path }: { $reason }

@@ -1,6 +1,7 @@
 pub mod control;
 pub mod key;
 pub mod link;
+pub mod loom;
 pub mod obfs;
 pub mod packet;
 pub mod padding;

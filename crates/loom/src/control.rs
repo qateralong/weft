@@ -1,22 +1,23 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use weft_proto::control::{
-    self, ClientKind, ClientMessage, DecodeError, Empty, ErrorCode, NetworkCredentials, NetworkName, PROTOCOL_VERSION,
-    Role, ServerKind, ServerMessage, Welcome,
+    self, Candidates, ClientKind, ClientMessage, DecodeError, Empty, ErrorCode, NetworkCredentials, NetworkName,
+    PROTOCOL_VERSION, PeerKey, RelayPacket, Role, ServerKind, ServerMessage, Welcome,
 };
-use weft_proto::{ObfsKey, PublicKey};
+use weft_proto::{MIN_PACKET_LEN, ObfsKey, PublicKey};
 use weft_session::StaticKeypair;
 use weft_session::stream::{self, io};
 
 use crate::db::{DbError, name_key};
-use crate::hub::{SharedHub, lock};
+use crate::hub::{MAX_CANDIDATES, SharedHub, lock};
+use crate::udp;
 use crate::validate;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -38,7 +39,7 @@ enum ConnError {
     Stale,
 }
 
-pub async fn serve(listener: TcpListener, hub: SharedHub, keypair: Arc<StaticKeypair>, udp_port: u16) {
+pub async fn serve(listener: TcpListener, hub: SharedHub, keypair: Arc<StaticKeypair>, socket: Arc<UdpSocket>) {
     let mut next_conn = 0;
     loop {
         let (stream, addr) = match listener.accept().await {
@@ -50,9 +51,9 @@ pub async fn serve(listener: TcpListener, hub: SharedHub, keypair: Arc<StaticKey
             }
         };
         next_conn += 1;
-        let (hub, keypair, conn) = (hub.clone(), keypair.clone(), next_conn);
+        let (hub, keypair, socket, conn) = (hub.clone(), keypair.clone(), socket.clone(), next_conn);
         tokio::spawn(async move {
-            if let Err(error) = connection(stream, addr, hub, keypair, udp_port, conn).await {
+            if let Err(error) = connection(stream, addr, hub, keypair, socket, conn).await {
                 tracing::debug!(%addr, %error, "connection closed");
             }
         });
@@ -64,9 +65,10 @@ async fn connection(
     addr: SocketAddr,
     hub: SharedHub,
     keypair: Arc<StaticKeypair>,
-    udp_port: u16,
+    socket: Arc<UdpSocket>,
     conn: u64,
 ) -> Result<(), ConnError> {
+    let udp_port = socket.local_addr()?.port();
     stream.set_nodelay(true)?;
     let (mut reader, mut writer) = stream.into_split();
     let own = ObfsKey::for_receiver(&keypair.public());
@@ -110,7 +112,7 @@ async fn connection(
         let pool = hub.config.pool;
         match hub.db.upsert_device(&key, nickname.as_deref().unwrap_or_default(), &pool) {
             Ok(device) => {
-                let token = hub.register(key, conn, tx.clone(), kill_tx);
+                let token = hub.register(key, device.address, conn, tx.clone(), kill_tx);
                 ServerMessage::reply(
                     hello.id,
                     ServerKind::Welcome(Welcome {
@@ -161,7 +163,7 @@ async fn connection(
             Ok(message) => message,
             Err(error) => break Err(error.into()),
         };
-        let reply = handle(&hub, key, addr.ip(), message).await;
+        let Some(reply) = handle(&hub, &socket, key, addr.ip(), message).await else { continue };
         if tx.send(reply).is_err() {
             break Ok(());
         }
@@ -179,17 +181,60 @@ async fn connection(
     result
 }
 
-async fn handle(hub: &SharedHub, key: PublicKey, ip: IpAddr, message: ClientMessage) -> ServerMessage {
+async fn handle(
+    hub: &SharedHub,
+    socket: &UdpSocket,
+    key: PublicKey,
+    ip: IpAddr,
+    message: ClientMessage,
+) -> Option<ServerMessage> {
     let result = match message.kind {
         Some(ClientKind::CreateNetwork(request)) => create(hub, key, request).await,
         Some(ClientKind::JoinNetwork(request)) => join(hub, key, ip, request).await,
         Some(ClientKind::LeaveNetwork(request)) => leave(hub, key, request),
         Some(ClientKind::Ping(_)) => Ok(()),
+        Some(ClientKind::Candidates(candidates)) => {
+            set_candidates(hub, key, candidates);
+            return None;
+        }
+        Some(ClientKind::CallMeMaybe(target)) => {
+            call_me_maybe(hub, key, target);
+            return None;
+        }
+        Some(ClientKind::Relay(packet)) => {
+            relay(hub, socket, key, packet).await;
+            return None;
+        }
         Some(ClientKind::Hello(_)) | None => Err(ErrorCode::InvalidRequest),
     };
-    match result {
+    Some(match result {
         Ok(()) => ServerMessage::reply(message.id, ServerKind::Ack(Empty {})),
         Err(code) => ServerMessage::failure(message.id, code),
+    })
+}
+
+fn set_candidates(hub: &SharedHub, key: PublicKey, candidates: Candidates) {
+    let candidates: Vec<SocketAddr> =
+        candidates.endpoints.iter().filter_map(|endpoint| endpoint.to_socket_addr()).take(MAX_CANDIDATES).collect();
+    let mut hub = lock(hub);
+    if hub.set_candidates(&key, candidates) {
+        hub.notify_related(&key);
+    }
+}
+
+fn call_me_maybe(hub: &SharedHub, key: PublicKey, target: PeerKey) {
+    if let Ok(target) = PublicKey::from_slice(&target.key) {
+        lock(hub).call_me_maybe(&key, &target);
+    }
+}
+
+async fn relay(hub: &SharedHub, socket: &UdpSocket, key: PublicKey, packet: RelayPacket) {
+    if packet.packet.len() < MIN_PACKET_LEN {
+        return;
+    }
+    let route = lock(hub).route(&key, Ipv4Addr::from(packet.address), Instant::now());
+    if let Some(route) = route {
+        udp::forward(socket, route, &packet.packet).await;
     }
 }
 
@@ -209,7 +254,7 @@ async fn create(hub: &SharedHub, key: PublicKey, request: NetworkCredentials) ->
     .map_err(internal)?;
     let mut hub = lock(hub);
     match hub.db.create_network(&name, &hash, &key) {
-        Ok(_) => {}
+        Ok(_) => hub.memberships_changed(),
         Err(DbError::NetworkExists) => return Err(ErrorCode::NetworkExists),
         Err(error) => return Err(internal(error)),
     }
@@ -257,6 +302,7 @@ async fn join(hub: &SharedHub, key: PublicKey, ip: IpAddr, request: NetworkCrede
         return Err(ErrorCode::NetworkFull);
     }
     hub.db.add_member(network.id, &key, Role::Member).map_err(internal)?;
+    hub.memberships_changed();
     hub.notify_related(&key);
     Ok(())
 }
@@ -268,6 +314,7 @@ fn leave(hub: &SharedHub, key: PublicKey, request: NetworkName) -> Result<(), Er
     if !hub.db.remove_member(network.id, &key).map_err(internal)? {
         return Err(ErrorCode::NotMember);
     }
+    hub.memberships_changed();
     hub.notify(&before);
     Ok(())
 }

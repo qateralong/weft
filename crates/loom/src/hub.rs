@@ -1,18 +1,22 @@
 use std::collections::{BTreeSet, HashMap};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use rand::RngExt;
 use tokio::sync::{mpsc, oneshot};
-use weft_proto::PublicKey;
-use weft_proto::control::{DISCOVERY_TOKEN_LEN, Network, Peer, ServerKind, ServerMessage, State};
+use weft_proto::control::{Endpoint, Network, Peer, PeerCandidates, ServerKind, ServerMessage, State};
+use weft_proto::loom::Token;
+use weft_proto::{ObfsKey, PublicKey};
 use weft_session::Tai64N;
 
 use crate::config::Config;
 use crate::db::{Db, DbError};
 use crate::limiter::Limiter;
 
-pub type Token = [u8; DISCOVERY_TOKEN_LEN];
+pub const MAX_CANDIDATES: usize = 16;
+const UDP_FRESH: Duration = Duration::from_secs(60);
+
 pub type SharedHub = Arc<Mutex<Hub>>;
 
 pub struct Hub {
@@ -21,15 +25,31 @@ pub struct Hub {
     pub limiter: Limiter,
     sessions: HashMap<PublicKey, Session>,
     tokens: HashMap<Token, PublicKey>,
-    endpoints: HashMap<PublicKey, SocketAddr>,
+    addresses: HashMap<Ipv4Addr, PublicKey>,
     timestamps: HashMap<PublicKey, Tai64N>,
+    relations: HashMap<(PublicKey, PublicKey), bool>,
 }
 
 struct Session {
     conn: u64,
     tx: mpsc::UnboundedSender<ServerMessage>,
     token: Token,
+    address: Ipv4Addr,
+    obfs: ObfsKey,
+    endpoint: Option<SocketAddr>,
+    discovered_at: Option<Instant>,
+    candidates: Vec<SocketAddr>,
     _kill: oneshot::Sender<()>,
+}
+
+pub struct Route {
+    pub source: Ipv4Addr,
+    pub delivery: Delivery,
+}
+
+pub enum Delivery {
+    Udp(SocketAddr, ObfsKey),
+    Tcp(mpsc::UnboundedSender<ServerMessage>),
 }
 
 pub fn lock(hub: &SharedHub) -> MutexGuard<'_, Hub> {
@@ -44,8 +64,9 @@ impl Hub {
             limiter: Limiter::default(),
             sessions: HashMap::new(),
             tokens: HashMap::new(),
-            endpoints: HashMap::new(),
+            addresses: HashMap::new(),
             timestamps: HashMap::new(),
+            relations: HashMap::new(),
         }
     }
 
@@ -62,16 +83,29 @@ impl Hub {
     pub fn register(
         &mut self,
         key: PublicKey,
+        address: Ipv4Addr,
         conn: u64,
         tx: mpsc::UnboundedSender<ServerMessage>,
         kill: oneshot::Sender<()>,
     ) -> Token {
         let token: Token = rand::rng().random();
-        if let Some(old) = self.sessions.insert(key, Session { conn, tx, token, _kill: kill }) {
+        let session = Session {
+            conn,
+            tx,
+            token,
+            address,
+            obfs: ObfsKey::for_receiver(&key),
+            endpoint: None,
+            discovered_at: None,
+            candidates: Vec::new(),
+            _kill: kill,
+        };
+        if let Some(old) = self.sessions.insert(key, session) {
             self.tokens.remove(&old.token);
+            self.addresses.remove(&old.address);
         }
         self.tokens.insert(token, key);
-        self.endpoints.remove(&key);
+        self.addresses.insert(address, key);
         token
     }
 
@@ -81,14 +115,76 @@ impl Hub {
         }
         if let Some(session) = self.sessions.remove(key) {
             self.tokens.remove(&session.token);
+            self.addresses.remove(&session.address);
         }
-        self.endpoints.remove(key);
         true
     }
 
-    pub fn discovered(&mut self, token: &Token, addr: SocketAddr) -> Option<PublicKey> {
+    pub fn token_owner(&self, token: &Token) -> Option<PublicKey> {
+        self.tokens.get(token).copied()
+    }
+
+    pub fn discovered(&mut self, token: &Token, addr: SocketAddr, now: Instant) -> Option<PublicKey> {
         let key = *self.tokens.get(token)?;
-        (self.endpoints.insert(key, addr) != Some(addr)).then_some(key)
+        let session = self.sessions.get_mut(&key)?;
+        session.discovered_at = Some(now);
+        (session.endpoint.replace(addr) != Some(addr)).then_some(key)
+    }
+
+    pub fn set_candidates(&mut self, key: &PublicKey, candidates: Vec<SocketAddr>) -> bool {
+        let Some(session) = self.sessions.get_mut(key) else { return false };
+        let changed = session.candidates != candidates;
+        session.candidates = candidates;
+        changed
+    }
+
+    pub fn memberships_changed(&mut self) {
+        self.relations.clear();
+    }
+
+    pub fn related(&mut self, a: &PublicKey, b: &PublicKey) -> bool {
+        if let Some(&related) = self.relations.get(&(*a, *b)) {
+            return related;
+        }
+        let related = a != b && self.db.related(a).is_ok_and(|set| set.contains(b));
+        if self.relations.len() > 100_000 {
+            self.relations.clear();
+        }
+        self.relations.insert((*a, *b), related);
+        related
+    }
+
+    pub fn call_me_maybe(&mut self, from: &PublicKey, to: &PublicKey) {
+        if !self.related(from, to) {
+            return;
+        }
+        let (Some(a), Some(b)) = (self.sessions.get(from), self.sessions.get(to)) else { return };
+        let candidates = |session: &Session| -> Vec<Endpoint> {
+            session.endpoint.iter().chain(&session.candidates).map(|&addr| addr.into()).collect()
+        };
+        let message = |key: &PublicKey, session: &Session| {
+            ServerMessage::push(ServerKind::CallMeMaybe(PeerCandidates {
+                key: key.as_bytes().to_vec(),
+                endpoints: candidates(session),
+            }))
+        };
+        let _ = b.tx.send(message(from, a));
+        let _ = a.tx.send(message(to, b));
+    }
+
+    pub fn route(&mut self, source: &PublicKey, destination: Ipv4Addr, now: Instant) -> Option<Route> {
+        let source_address = self.sessions.get(source)?.address;
+        let destination_key = *self.addresses.get(&destination)?;
+        if !self.related(source, &destination_key) {
+            return None;
+        }
+        let session = self.sessions.get(&destination_key)?;
+        let fresh = session.discovered_at.is_some_and(|at| now.duration_since(at) < UDP_FRESH);
+        let delivery = match session.endpoint {
+            Some(endpoint) if fresh => Delivery::Udp(endpoint, session.obfs.clone()),
+            _ => Delivery::Tcp(session.tx.clone()),
+        };
+        Some(Route { source: source_address, delivery })
     }
 
     pub fn state_for(&self, key: &PublicKey) -> Result<State, DbError> {
@@ -107,13 +203,14 @@ impl Hub {
         let mut peers: Vec<Peer> = devices
             .into_values()
             .map(|device| {
-                let online = self.sessions.contains_key(&device.key);
+                let session = self.sessions.get(&device.key);
                 Peer {
                     key: device.key.as_bytes().to_vec(),
                     nickname: device.nickname,
                     address: u32::from(device.address),
-                    online,
-                    endpoint: online.then(|| self.endpoints.get(&device.key)).flatten().map(|&addr| addr.into()),
+                    online: session.is_some(),
+                    endpoint: session.and_then(|s| s.endpoint).map(Endpoint::from),
+                    candidates: session.map(|s| s.candidates.iter().map(|&c| c.into()).collect()).unwrap_or_default(),
                 }
             })
             .collect();

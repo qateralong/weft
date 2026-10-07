@@ -1,9 +1,9 @@
 pub mod config;
 mod control;
 pub mod db;
-mod discovery;
 mod hub;
 mod limiter;
+mod udp;
 mod validate;
 
 use std::io;
@@ -30,14 +30,14 @@ impl Server {
     pub async fn start(config: Config, keypair: StaticKeypair, db: Db) -> io::Result<Self> {
         let listener = TcpListener::bind(config.listen).await?;
         let tcp_addr = listener.local_addr()?;
-        let socket = UdpSocket::bind(tcp_addr).await?;
+        let socket = Arc::new(UdpSocket::bind(tcp_addr).await?);
         let udp_addr = socket.local_addr()?;
         let public_key = keypair.public();
         let own = ObfsKey::for_receiver(&public_key);
         let hub = Arc::new(Mutex::new(Hub::new(db, config)));
         let tasks = vec![
-            tokio::spawn(control::serve(listener, hub.clone(), Arc::new(keypair), udp_addr.port())),
-            tokio::spawn(discovery::serve(socket, hub, own)),
+            tokio::spawn(control::serve(listener, hub.clone(), Arc::new(keypair), socket.clone())),
+            tokio::spawn(udp::serve(socket, hub, own)),
         ];
         Ok(Self { tcp_addr, udp_addr, public_key, tasks })
     }

@@ -9,3 +9,8 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+rand.workspace = true
+weft-proto.workspace = true
+weft-session.workspace = true

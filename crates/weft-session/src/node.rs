@@ -216,13 +216,21 @@ impl Node {
     pub fn receive(&mut self, now: Instant, datagram: &[u8]) -> Result<Received, Error> {
         let mut packet = datagram.to_vec();
         let header = self.shared.obfs.open(&mut packet)?;
-        let body = &packet[HEADER_LEN..];
+        self.receive_opened(now, header, &packet)
+    }
+
+    pub fn receive_opened(&mut self, now: Instant, header: Header, packet: &[u8]) -> Result<Received, Error> {
+        let body = packet.get(HEADER_LEN..).ok_or(PacketError::TooShort)?;
         match header {
             Header::HandshakeInit { sender } => self.on_init(now, sender, body),
             Header::HandshakeResp { sender, receiver } => self.on_resp(now, sender, receiver, body),
             Header::Data { receiver, counter } => self.on_data(now, receiver, counter, body),
-            Header::Discover => Err(PacketError::InvalidHeader.into()),
+            _ => Err(Error::Unexpected),
         }
+    }
+
+    pub fn obfs(&self) -> &ObfsKey {
+        &self.shared.obfs
     }
 
     pub fn tick(&mut self, now: Instant) {

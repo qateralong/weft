@@ -9,3 +9,10 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+crab_nat.workspace = true
+igd-next.workspace = true
+netdev.workspace = true
+tokio.workspace = true
+tracing.workspace = true
