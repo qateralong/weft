@@ -190,6 +190,8 @@ async fn reconnect_replaces_old_session() {
     let server = start().await;
     let mut old = Client::connect(&server, 1).await;
     old.hello("alice").await;
+    // Handshake timestamps have 20 ms granularity, an earlier one would be rejected as a replay.
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let mut new = Client::connect(&server, 1).await;
     new.hello("alice").await;
     let closed = tokio::time::timeout(Duration::from_secs(5), async {
