@@ -9,3 +9,9 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+blake2.workspace = true
+chacha20.workspace = true
+data-encoding.workspace = true
+thiserror.workspace = true

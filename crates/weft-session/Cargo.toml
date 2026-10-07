@@ -9,3 +9,13 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+getrandom.workspace = true
+rand.workspace = true
+snow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+weft-proto.workspace = true
+x25519-dalek.workspace = true
+zeroize.workspace = true

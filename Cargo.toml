@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/qateralong/weft"
@@ -18,6 +18,17 @@ weft-portmap = { path = "crates/weft-portmap" }
 weft-ipc = { path = "crates/weft-ipc" }
 weft-i18n = { path = "crates/weft-i18n" }
 weft-sim = { path = "crates/weft-sim" }
+
+blake2 = "0.11"
+chacha20 = "0.10"
+data-encoding = "2.11"
+getrandom = "0.4"
+rand = { version = "0.10", default-features = false, features = ["std", "std_rng"] }
+snow = { version = "0.10", default-features = false, features = ["default-resolver", "use-blake2", "use-chacha20poly1305", "use-curve25519", "use-getrandom"] }
+thiserror = "2"
+tracing = "0.1"
+x25519-dalek = { version = "3", features = ["static_secrets", "zeroize"] }
+zeroize = "1.9"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
