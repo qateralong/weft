@@ -61,6 +61,8 @@ Start-Sleep 5
 Get-NetAdapter -Name WeftCheck -ErrorAction SilentlyContinue | Format-List Name, InterfaceDescription, Status, MtuSize
 Get-NetIPAddress -InterfaceAlias WeftCheck -AddressFamily IPv4 -ErrorAction SilentlyContinue | Format-Table IPAddress, PrefixLength
 Get-NetConnectionProfile -InterfaceAlias WeftCheck -ErrorAction SilentlyContinue | Format-List InterfaceAlias, NetworkCategory
+Get-NetIPInterface -InterfaceAlias WeftCheck -AddressFamily IPv4 -ErrorAction SilentlyContinue | Format-Table InterfaceAlias, InterfaceMetric
+Get-NetRoute -InterfaceAlias WeftCheck -AddressFamily IPv4 -ErrorAction SilentlyContinue | Format-Table DestinationPrefix, RouteMetric
 Get-NetFirewallRule -DisplayName 'Weft', 'Weft daemon' -ErrorAction SilentlyContinue | Format-Table DisplayName, Enabled, Direction, Action
 $processes | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep 1
@@ -94,6 +96,21 @@ if ($Link) {
             ping -n 4 $Matches[1]
         }
     }
+    Section 'LAN discovery'
+    Write-Host 'Sending broadcast and multicast discovery packets for 10 s.'
+    Write-Host 'On the other machine run: python3 tools/lan-probe.py listen 15'
+    $udp = New-Object System.Net.Sockets.UdpClient
+    $udp.EnableBroadcast = $true
+    $broadcast = [Text.Encoding]::ASCII.GetBytes('broadcast')
+    $multicast = [Text.Encoding]::ASCII.GetBytes('multicast')
+    for ($i = 0; $i -lt 20; $i++) {
+        [void]$udp.Send($broadcast, $broadcast.Length, '255.255.255.255', 4445)
+        [void]$udp.Send($multicast, $multicast.Length, '224.0.2.60', 4445)
+        Start-Sleep -Milliseconds 500
+    }
+    $udp.Close()
+    Get-NetIPInterface -InterfaceAlias Weft -AddressFamily IPv4 -ErrorAction SilentlyContinue | Format-Table InterfaceAlias, InterfaceMetric
+    Get-NetRoute -InterfaceAlias Weft -AddressFamily IPv4 -ErrorAction SilentlyContinue | Format-Table DestinationPrefix, RouteMetric
     Section 'Service log'
     Get-Content "$env:ProgramData\Weft\weftd.log" -Tail 100 -ErrorAction SilentlyContinue
     if (-not $KeepService) {

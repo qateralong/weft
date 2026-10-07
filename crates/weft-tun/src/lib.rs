@@ -3,6 +3,7 @@ use std::net::Ipv4Addr;
 
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
+mod routes;
 #[cfg(windows)]
 mod windows;
 
@@ -18,6 +19,19 @@ pub struct TunConfig {
     pub address: Ipv4Addr,
     pub prefix: u8,
     pub mtu: u16,
+    pub routes: Vec<Route>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Route {
+    pub destination: Ipv4Addr,
+    pub prefix: u8,
+}
+
+impl Route {
+    pub fn host(destination: Ipv4Addr) -> Self {
+        Self { destination, prefix: 32 }
+    }
 }
 
 impl TunConfig {
@@ -45,7 +59,9 @@ impl Tun {
         let device = builder.build_async()?;
         let name = device.name().unwrap_or_else(|_| config.name.clone());
         #[cfg(windows)]
-        windows::configure(&name, &config.network());
+        windows::configure(&name, &config.network(), &config.routes);
+        #[cfg(not(windows))]
+        routes::apply(&name, &config.routes);
         Ok(Self { device, name })
     }
 
@@ -68,7 +84,13 @@ mod tests {
 
     #[test]
     fn network() {
-        let config = TunConfig { name: "t".into(), address: Ipv4Addr::new(100, 64, 3, 7), prefix: 10, mtu: 1280 };
+        let config = TunConfig {
+            name: "t".into(),
+            address: Ipv4Addr::new(100, 64, 3, 7),
+            prefix: 10,
+            mtu: 1280,
+            routes: Vec::new(),
+        };
         assert_eq!(config.network(), "100.64.0.0/10");
         let config = TunConfig { address: Ipv4Addr::new(10, 1, 2, 3), prefix: 24, ..config };
         assert_eq!(config.network(), "10.1.2.0/24");

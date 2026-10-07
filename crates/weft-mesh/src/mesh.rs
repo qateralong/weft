@@ -10,6 +10,7 @@ use weft_proto::{Header, ObfsKey, PublicKey};
 use weft_session::{Event, Node, PeerId, StaticKeypair};
 
 use crate::disco::{self, DiscoKey, Message, TxId};
+use crate::flood::{self, Bucket};
 
 pub const PATH_PING_AFTER: Duration = Duration::from_secs(8);
 pub const PATH_STALE_AFTER: Duration = Duration::from_secs(20);
@@ -56,6 +57,10 @@ pub enum SendError {
     NoRoute,
     #[error("invalid packet")]
     Invalid,
+    #[error("broadcast is filtered")]
+    Filtered,
+    #[error("broadcast rate limit")]
+    RateLimited,
 }
 
 pub struct Mesh {
@@ -67,8 +72,16 @@ pub struct Mesh {
     by_key: HashMap<PublicKey, PeerId>,
     by_address: HashMap<Ipv4Addr, PeerId>,
     server: Option<Server>,
+    local: Option<Local>,
+    flood: Bucket,
     outputs: VecDeque<Output>,
     rng: StdRng,
+}
+
+#[derive(Clone, Copy)]
+struct Local {
+    address: Ipv4Addr,
+    broadcast: Ipv4Addr,
 }
 
 struct Server {
@@ -125,6 +138,8 @@ impl Mesh {
             by_key: HashMap::new(),
             by_address: HashMap::new(),
             server: None,
+            local: None,
+            flood: Bucket::default(),
             outputs: VecDeque::new(),
             rng,
         }
@@ -148,6 +163,12 @@ impl Mesh {
             discover_at: now,
         });
         self.tick(now);
+    }
+
+    pub fn set_local(&mut self, address: Ipv4Addr, prefix: u8) {
+        let host_bits = u32::MAX.checked_shr(u32::from(prefix)).unwrap_or(0);
+        let broadcast = Ipv4Addr::from(u32::from(address) | host_bits);
+        self.local = Some(Local { address, broadcast });
     }
 
     pub fn clear_server(&mut self) {
@@ -212,10 +233,33 @@ impl Mesh {
 
     pub fn send(&mut self, now: Instant, packet: &[u8]) -> Result<(), SendError> {
         let destination = ipv4_destination(packet).ok_or(SendError::Invalid)?;
+        if flood::is_flood(destination, self.local.map(|local| local.broadcast)) {
+            return self.flood(now, packet);
+        }
         let &id = self.by_address.get(&destination).ok_or(SendError::NoRoute)?;
         let result = self.node.send(now, id, packet).map_err(|_| SendError::Invalid);
         self.flush(now);
         result
+    }
+
+    fn flood(&mut self, now: Instant, packet: &[u8]) -> Result<(), SendError> {
+        if !flood::floodable(packet) {
+            return Err(SendError::Filtered);
+        }
+        if !self.flood.take(now) {
+            return Err(SendError::RateLimited);
+        }
+        let targets: Vec<PeerId> = self
+            .peers
+            .iter()
+            .filter(|(id, peer)| peer.online && self.node.is_established(**id))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in targets {
+            let _ = self.node.send(now, id, packet);
+        }
+        self.flush(now);
+        Ok(())
     }
 
     pub fn receive_udp(&mut self, now: Instant, from: SocketAddr, datagram: &[u8]) -> Option<Delivered> {
@@ -447,6 +491,14 @@ impl Mesh {
         let packet = received.packet?;
         if ipv4_source(&packet) != Some(peer.address) {
             tracing::debug!(peer = %peer.address, "dropped packet with a foreign source address");
+            return None;
+        }
+        let destination = ipv4_destination(&packet)?;
+        let accepted = self
+            .local
+            .is_none_or(|local| destination == local.address || flood::is_flood(destination, Some(local.broadcast)));
+        if !accepted {
+            tracing::debug!(peer = %peer.address, %destination, "dropped packet for a foreign destination");
             return None;
         }
         Some(Delivered { source: peer.address, packet })

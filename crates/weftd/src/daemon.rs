@@ -15,7 +15,7 @@ use weft_proto::control::{
 };
 use weft_proto::{Link, PublicKey};
 use weft_session::StaticKeypair;
-use weft_tun::{DEFAULT_MTU, Tun, TunConfig};
+use weft_tun::{DEFAULT_MTU, Route, Tun, TunConfig};
 
 use crate::control::{Control, ControlEvent};
 use crate::ipc::Command;
@@ -330,15 +330,16 @@ impl Daemon {
         tracing::info!(%server, %address, "connected to the server");
         self.connection = Connection::Connected;
         self.backoff = MIN_BACKOFF;
+        let prefix = welcome.prefix_len.min(32) as u8;
+        self.mesh.set_local(address, prefix);
         if !self.echo && (self.tun.is_none() || self.tun_address != Some(address)) {
             self.tun = None;
             self.tun_address = None;
-            let config = TunConfig {
-                name: self.tun_name.clone(),
-                address,
-                prefix: welcome.prefix_len.min(32) as u8,
-                mtu: DEFAULT_MTU,
-            };
+            let mut routes: Vec<Route> = self.settings.multicast_groups.iter().copied().map(Route::host).collect();
+            if self.settings.broadcast {
+                routes.insert(0, Route::host(Ipv4Addr::BROADCAST));
+            }
+            let config = TunConfig { name: self.tun_name.clone(), address, prefix, mtu: DEFAULT_MTU, routes };
             match Tun::create(&config) {
                 Ok(tun) => {
                     tracing::info!(name = tun.name(), %address, "tun interface is up");

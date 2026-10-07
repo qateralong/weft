@@ -352,3 +352,64 @@ fn linux_conntrack_nats_punch_through() {
     assert!(direct(world.link(b, a)).is_some(), "{:?}", world.link(b, a));
     world.exchange(a, b);
 }
+
+fn udp(source: Ipv4Addr, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Vec<u8> {
+    let total = 28 + payload.len();
+    let mut packet = vec![0; total];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 17;
+    packet[12..16].copy_from_slice(&source.octets());
+    packet[16..20].copy_from_slice(&destination.octets());
+    packet[20..22].copy_from_slice(&port.to_be_bytes());
+    packet[22..24].copy_from_slice(&port.to_be_bytes());
+    packet[24..26].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    packet[28..].copy_from_slice(payload);
+    packet
+}
+
+#[test]
+fn broadcast_and_multicast_reach_every_peer() {
+    let mut world = World::new();
+    let agents: Vec<usize> = (0..3).map(|i| world.agent(&format!("198.51.100.{}:5000", 10 + i), None)).collect();
+    for &i in &agents {
+        let address = world.agents[i].address;
+        world.agents[i].mesh.set_local(address, 10);
+    }
+    world.run_for(Duration::from_secs(5));
+
+    let now = world.net.now();
+    let source = world.agents[0].address;
+    let packets: Vec<Vec<u8>> = [Ipv4Addr::BROADCAST, Ipv4Addr::new(100, 127, 255, 255), Ipv4Addr::new(224, 0, 2, 60)]
+        .into_iter()
+        .map(|destination| udp(source, destination, 4445, b"lan game"))
+        .collect();
+    for packet in &packets {
+        world.agents[0].mesh.send(now, packet).unwrap();
+    }
+    assert_eq!(
+        world.agents[0].mesh.send(now, &udp(source, Ipv4Addr::BROADCAST, 137, b"netbios")),
+        Err(weft_mesh::SendError::Filtered)
+    );
+    world.run_for(Duration::from_secs(1));
+    for &i in &agents[1..] {
+        let received: Vec<Vec<u8>> = world.agents[i].inbox.iter().map(|d| d.packet.clone()).collect();
+        assert_eq!(received, packets, "agent {i}");
+    }
+    assert!(world.agents[0].inbox.is_empty());
+}
+
+#[test]
+fn packets_for_a_foreign_destination_are_dropped() {
+    let mut world = World::new();
+    let a = world.agent("198.51.100.10:5000", None);
+    let b = world.agent("198.51.100.20:5000", None);
+    world.agents[b].mesh.set_local(Ipv4Addr::new(100, 64, 0, 99), 10);
+    world.run_for(Duration::from_secs(5));
+    let now = world.net.now();
+    let (from, to) = (world.agents[a].address, world.agents[b].address);
+    world.agents[a].mesh.send(now, &udp(from, to, 4000, b"hello")).unwrap();
+    world.run_for(Duration::from_secs(1));
+    assert!(world.agents[b].inbox.is_empty());
+}

@@ -104,6 +104,16 @@ weft b status | grep -E 'alice'
 weft a status | grep -q "$pattern"
 weft b status | grep -q "$pattern"
 nsenter --net=/run/netns/a ping -q -c 3 -W 2 "$addr_b"
+echo "--- LAN game discovery from a to b"
+addr_a=$(weft a status | awk -F': *' '/^Address/ {print $2}')
+nsenter --net=/run/netns/b python3 "$(dirname "$SELF")/lan-probe.py" listen 10 > "$WORK/probe.txt" &
+probe=$!
+sleep 1
+nsenter --net=/run/netns/a python3 "$(dirname "$SELF")/lan-probe.py" send 6
+wait "$probe"
+sort -u "$WORK/probe.txt"
+grep -q "^$addr_a broadcast$" "$WORK/probe.txt"
+grep -q "^$addr_a multicast$" "$WORK/probe.txt"
 echo "--- passed: $EXPECT"
 if [ -n "${SHOW_LOGS:-}" ]; then
     show_logs

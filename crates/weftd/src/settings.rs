@@ -1,15 +1,33 @@
 use std::io;
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub server: Option<String>,
     pub nickname: Option<String>,
     pub port: Option<u16>,
     pub up: bool,
+    pub broadcast: bool,
+    pub multicast_groups: Vec<Ipv4Addr>,
+}
+
+pub const MINECRAFT_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 2, 60);
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            server: None,
+            nickname: None,
+            port: None,
+            up: false,
+            broadcast: true,
+            multicast_groups: vec![MINECRAFT_GROUP],
+        }
+    }
 }
 
 pub struct SettingsFile {
@@ -66,10 +84,19 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = SettingsFile::new(dir.join("weftd.toml"));
         assert_eq!(file.load().unwrap(), Settings::default());
-        let settings =
-            Settings { server: Some("weft://x#k=y".into()), nickname: Some("n".into()), port: Some(4000), up: true };
+        let settings = Settings {
+            server: Some("weft://x#k=y".into()),
+            nickname: Some("n".into()),
+            port: Some(4000),
+            up: true,
+            ..Settings::default()
+        };
         file.save(&settings).unwrap();
         assert_eq!(file.load().unwrap(), settings);
+        std::fs::write(file.path(), "up = true\n").unwrap();
+        let loaded = file.load().unwrap();
+        assert!(loaded.broadcast);
+        assert_eq!(loaded.multicast_groups, vec![MINECRAFT_GROUP]);
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(!default_nickname().is_empty());
     }
