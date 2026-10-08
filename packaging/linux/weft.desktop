@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Weft
+GenericName=Virtual LAN
+Comment=Peer-to-peer virtual LAN
+Exec=weft-gui
+Icon=weft
+Terminal=false
+Categories=Network;
+StartupWMClass=weft-gui

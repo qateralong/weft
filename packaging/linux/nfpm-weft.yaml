@@ -1,0 +1,36 @@
+name: weft
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: qateralong <qateralong@users.noreply.github.com>
+description: Peer-to-peer virtual LAN (daemon, command line and desktop app)
+homepage: https://github.com/qateralong/weft
+license: AGPL-3.0-or-later
+overrides:
+  deb:
+    depends: [libwebkit2gtk-4.1-0, libgtk-3-0, libayatana-appindicator3-1]
+  rpm:
+    depends: [webkit2gtk4.1, gtk3, libayatana-appindicator-gtk3]
+contents:
+  - src: target/release/weftd
+    dst: /usr/bin/weftd
+  - src: target/release/weft
+    dst: /usr/bin/weft
+  - src: target/release/weft-gui
+    dst: /usr/bin/weft-gui
+  - src: packaging/linux/weftd.service
+    dst: /usr/lib/systemd/system/weftd.service
+  - src: packaging/linux/weft.sysusers
+    dst: /usr/lib/sysusers.d/weft.conf
+  - src: packaging/linux/weft.desktop
+    dst: /usr/share/applications/weft.desktop
+  - src: packaging/linux/weft-autostart.desktop
+    dst: /etc/xdg/autostart/weft.desktop
+    type: config|noreplace
+  - src: crates/weft-gui/icons/icon.png
+    dst: /usr/share/icons/hicolor/512x512/apps/weft.png
+scripts:
+  postinstall: packaging/linux/weft-postinstall.sh
+  preremove: packaging/linux/weft-preremove.sh

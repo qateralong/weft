@@ -1,0 +1,12 @@
+post_install() {
+    echo 'Start the daemon:          systemctl enable --now weftd'
+    echo 'Use Weft without sudo:     usermod -aG weft <user>, then log in again'
+}
+
+post_upgrade() {
+    systemctl try-restart weftd.service 2> /dev/null || true
+}
+
+pre_remove() {
+    systemctl disable --now weftd.service 2> /dev/null || true
+}

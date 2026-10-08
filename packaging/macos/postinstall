@@ -1,0 +1,9 @@
+#!/bin/sh
+dseditgroup -o read weft > /dev/null 2>&1 || dseditgroup -o create -r Weft weft
+user=$(stat -f%Su /dev/console)
+if [ -n "$user" ] && [ "$user" != root ]; then
+    dseditgroup -o edit -a "$user" -t user weft
+fi
+launchctl bootout system/org.weft.weftd 2> /dev/null || true
+launchctl bootstrap system /Library/LaunchDaemons/org.weft.weftd.plist
+exit 0

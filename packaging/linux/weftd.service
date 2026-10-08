@@ -1,0 +1,11 @@
+[Unit]
+Description=Weft peer-to-peer virtual LAN
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/weftd
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

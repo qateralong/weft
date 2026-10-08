@@ -1,0 +1,23 @@
+name: weft-loom
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: qateralong <qateralong@users.noreply.github.com>
+description: Weft coordination server with discovery and relay
+homepage: https://github.com/qateralong/weft
+license: AGPL-3.0-or-later
+contents:
+  - src: target/release/loom
+    dst: /usr/bin/loom
+  - src: packaging/linux/loom.service
+    dst: /usr/lib/systemd/system/loom.service
+  - src: packaging/linux/loom.sysusers
+    dst: /usr/lib/sysusers.d/loom.conf
+  - src: packaging/linux/loom.toml
+    dst: /etc/loom/loom.toml
+    type: config|noreplace
+scripts:
+  postinstall: packaging/linux/loom-postinstall.sh
+  preremove: packaging/linux/loom-preremove.sh

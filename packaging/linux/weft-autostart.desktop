@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Weft
+Comment=Peer-to-peer virtual LAN
+Exec=weft-gui --hidden
+Icon=weft
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

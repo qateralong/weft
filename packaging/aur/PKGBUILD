@@ -1,0 +1,48 @@
+pkgbase=weft
+pkgname=(weft weft-loom)
+pkgver=0.0.10
+pkgrel=1
+pkgdesc='Peer-to-peer virtual LAN'
+arch=(x86_64 aarch64)
+url='https://github.com/qateralong/weft'
+license=(AGPL-3.0-or-later)
+makedepends=(cargo webkit2gtk-4.1 libayatana-appindicator)
+source=("$pkgbase-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$pkgbase-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgbase-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target
+    cargo build --frozen --release -p weftd -p weft -p weft-gui -p loom
+}
+
+package_weft() {
+    pkgdesc='Peer-to-peer virtual LAN: daemon, command line and desktop app'
+    depends=(gcc-libs glibc gtk3 webkit2gtk-4.1 libayatana-appindicator)
+    backup=(etc/xdg/autostart/weft.desktop)
+    install=weft.install
+    cd "$pkgbase-$pkgver"
+    install -Dm755 target/release/{weftd,weft,weft-gui} -t "$pkgdir/usr/bin"
+    install -Dm644 packaging/linux/weftd.service "$pkgdir/usr/lib/systemd/system/weftd.service"
+    install -Dm644 packaging/linux/weft.sysusers "$pkgdir/usr/lib/sysusers.d/weft.conf"
+    install -Dm644 packaging/linux/weft.desktop "$pkgdir/usr/share/applications/weft.desktop"
+    install -Dm644 packaging/linux/weft-autostart.desktop "$pkgdir/etc/xdg/autostart/weft.desktop"
+    install -Dm644 crates/weft-gui/icons/icon.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/weft.png"
+}
+
+package_weft-loom() {
+    pkgdesc='Weft coordination server with discovery and relay'
+    depends=(gcc-libs glibc)
+    backup=(etc/loom/loom.toml)
+    cd "$pkgbase-$pkgver"
+    install -Dm755 target/release/loom -t "$pkgdir/usr/bin"
+    install -Dm644 packaging/linux/loom.service "$pkgdir/usr/lib/systemd/system/loom.service"
+    install -Dm644 packaging/linux/loom.sysusers "$pkgdir/usr/lib/sysusers.d/loom.conf"
+    install -Dm644 packaging/linux/loom.toml "$pkgdir/etc/loom/loom.toml"
+}

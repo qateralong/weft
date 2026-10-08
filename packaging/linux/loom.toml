@@ -1,0 +1,8 @@
+# Weft coordination server. Restart after changes: systemctl restart loom
+# Print the server link for clients: sudo -u loom loom --config /etc/loom/loom.toml link
+listen = "0.0.0.0:443"
+# Host name or IP address that clients connect to.
+# public_host = "vpn.example.com"
+data_dir = "/var/lib/loom"
+# pool = "100.64.0.0/10"
+# max_members = 250

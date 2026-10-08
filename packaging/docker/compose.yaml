@@ -1,0 +1,15 @@
+# Weft coordination server. Print the client link with:
+#   docker compose exec loom loom link --host vpn.example.com
+services:
+  loom:
+    image: ghcr.io/qateralong/loom:latest
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - loom:/var/lib/loom
+
+volumes:
+  loom:
