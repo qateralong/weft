@@ -97,7 +97,23 @@ fn main() -> ExitCode {
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Punching through a symmetric NAT briefly needs several hundred sockets.
+#[cfg(unix)]
+fn raise_file_limit() {
+    use nix::sys::resource::{Resource, getrlimit, setrlimit};
+    if let Ok((soft, hard)) = getrlimit(Resource::RLIMIT_NOFILE) {
+        let wanted = hard.min(4096);
+        if soft < wanted
+            && let Err(error) = setrlimit(Resource::RLIMIT_NOFILE, wanted, hard)
+        {
+            tracing::debug!(%error, "cannot raise the open file limit");
+        }
+    }
+}
+
 fn run(options: Options, shutdown: impl Future<Output = ()>) -> Result<(), BoxError> {
+    #[cfg(unix)]
+    raise_file_limit();
     let state_dir = options.state_dir.unwrap_or_else(default_state_dir);
     std::fs::create_dir_all(&state_dir)?;
     let keypair = StaticKeypair::load_or_create(&state_dir.join("key"))?;

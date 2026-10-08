@@ -10,7 +10,7 @@ use weft_ipc::{
     Connection, DeviceInfo, Diagnostics, Failure, InviteInfo, MemberStatus, NetworkStatus, PeerDiagnostics, PeerLink,
     PortMapping, Request, Response, Status,
 };
-use weft_mesh::{Mesh, Output, PeerConfig};
+use weft_mesh::{Mesh, Output, PeerConfig, SocketId};
 use weft_portmap::{Mapped, PortMapper};
 use weft_proto::control::{
     Candidates, ClientKind, ClientMessage, DeviceList, Endpoint, ErrorCode, Invite, InviteCode, InviteRequest,
@@ -46,6 +46,9 @@ pub struct Daemon {
     mesh: Mesh,
     udp: UdpSocket,
     udp_port: u16,
+    extra: HashMap<SocketId, ExtraSocket>,
+    extra_tx: mpsc::Sender<(SocketId, SocketAddr, Vec<u8>)>,
+    extra_rx: mpsc::Receiver<(SocketId, SocketAddr, Vec<u8>)>,
     mapper: PortMapper,
     mapped: watch::Receiver<Option<Mapped>>,
     tun: Option<Tun>,
@@ -69,10 +72,26 @@ pub struct Daemon {
     commands: mpsc::Receiver<Command>,
 }
 
+/// A short-lived socket used while punching through a symmetric NAT.
+struct ExtraSocket {
+    socket: Arc<UdpSocket>,
+    ttl: u32,
+    task: tokio::task::JoinHandle<()>,
+}
+
+const DEFAULT_TTL: u32 = 64;
+
+impl Drop for ExtraSocket {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 enum Wake {
     Command(Option<Command>),
     Control(Option<(u64, ControlEvent)>),
     Udp(std::io::Result<(usize, SocketAddr)>),
+    Extra(Option<(SocketId, SocketAddr, Vec<u8>)>),
     Tun(std::io::Result<usize>),
     Mapped,
     Timer,
@@ -90,13 +109,15 @@ impl Daemon {
         let udp = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?;
         let udp_port = udp.local_addr()?.port();
         tracing::info!(port = udp_port, key = %keypair.public(), "weftd started");
-        let mesh = Mesh::new(
+        let mut mesh = Mesh::new(
             StaticKeypair::from_secret(keypair.secret()),
             std::time::Instant::now(),
             std::time::SystemTime::now(),
         )
         .map_err(std::io::Error::other)?;
+        mesh.set_udp_port(udp_port);
         let mapper = PortMapper::spawn(udp_port);
+        let (extra_tx, extra_rx) = mpsc::channel(1024);
         let mapped = mapper.subscribe();
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let mut daemon = Self {
@@ -108,6 +129,9 @@ impl Daemon {
             mesh,
             udp,
             udp_port,
+            extra: HashMap::new(),
+            extra_tx,
+            extra_rx,
             mapper,
             mapped,
             tun: None,
@@ -145,6 +169,7 @@ impl Daemon {
                 command = self.commands.recv() => Wake::Command(command),
                 event = self.control_rx.recv() => Wake::Control(event),
                 received = self.udp.recv_from(&mut udp_buf) => Wake::Udp(received),
+                received = self.extra_rx.recv() => Wake::Extra(received),
                 received = recv_tun(self.tun.as_ref(), &mut tun_buf) => Wake::Tun(received),
                 Ok(()) = self.mapped.changed() => Wake::Mapped,
                 _ = sleep_until(deadline) => Wake::Timer,
@@ -158,10 +183,16 @@ impl Daemon {
                 }
                 Wake::Control(_) => {}
                 Wake::Udp(Ok((len, from))) => {
-                    if let Some(delivered) = self.mesh.receive_udp(now, from, &udp_buf[..len]) {
+                    if let Some(delivered) = self.mesh.receive_udp(now, 0, from, &udp_buf[..len]) {
                         self.deliver(&delivered.packet).await;
                     }
                 }
+                Wake::Extra(Some((socket, from, datagram))) => {
+                    if let Some(delivered) = self.mesh.receive_udp(now, socket, from, &datagram) {
+                        self.deliver(&delivered.packet).await;
+                    }
+                }
+                Wake::Extra(None) => {}
                 Wake::Udp(Err(error)) => tracing::debug!(%error, "udp receive failed"),
                 Wake::Tun(Ok(len)) if dns::is_query(&tun_buf[..len]) => {
                     if let (Some(reply), Some(tun)) = (dns::respond(&tun_buf[..len], &self.names), &self.tun) {
@@ -504,6 +535,10 @@ impl Daemon {
     fn on_timer(&mut self) {
         let now = Instant::now();
         self.mesh.tick(now.into_std());
+        if !self.extra.is_empty() {
+            let used = self.mesh.sockets();
+            self.extra.retain(|id, _| used.contains(id));
+        }
         if self.reconnect_at.is_some_and(|at| now >= at) {
             self.connect();
         }
@@ -511,6 +546,37 @@ impl Daemon {
             self.candidates_at = Some(now + CANDIDATES_INTERVAL);
             self.publish_candidates();
         }
+    }
+
+    async fn extra_socket(&mut self, id: SocketId, to: SocketAddr, ttl: u32) -> Option<Arc<UdpSocket>> {
+        if let Some(extra) = self.extra.get_mut(&id) {
+            if extra.ttl != ttl && extra.socket.set_ttl(ttl).is_ok() {
+                extra.ttl = ttl;
+            }
+            return Some(extra.socket.clone());
+        }
+        let bind = if to.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+        let socket = match UdpSocket::bind(bind).await {
+            Ok(socket) => Arc::new(socket),
+            Err(error) => {
+                tracing::debug!(%error, "cannot open a punching socket");
+                return None;
+            }
+        };
+        if let Err(error) = socket.set_ttl(ttl) {
+            tracing::debug!(%error, "cannot set the ttl");
+        }
+        let (receiver, tx) = (socket.clone(), self.extra_tx.clone());
+        let task = tokio::spawn(async move {
+            let mut buf = vec![0; 65_535];
+            while let Ok((len, from)) = receiver.recv_from(&mut buf).await {
+                if tx.send((id, from, buf[..len].to_vec())).await.is_err() {
+                    return;
+                }
+            }
+        });
+        self.extra.insert(id, ExtraSocket { socket: socket.clone(), ttl, task });
+        Some(socket)
     }
 
     fn publish_candidates(&mut self) {
@@ -541,9 +607,17 @@ impl Daemon {
     async fn flush(&mut self) {
         while let Some(output) = self.mesh.poll_output() {
             match output {
-                Output::Udp { to, datagram } => {
+                Output::Udp { socket: 0, to, datagram, .. } => {
                     if let Err(error) = self.udp.send_to(&datagram, to).await {
                         tracing::trace!(%to, %error, "udp send failed");
+                    }
+                }
+                Output::Udp { socket, to, datagram, ttl } => {
+                    let Some(extra) = self.extra_socket(socket, to, ttl.map_or(DEFAULT_TTL, u32::from)).await else {
+                        continue;
+                    };
+                    if let Err(error) = extra.send_to(&datagram, to).await {
+                        tracing::trace!(%to, socket, %error, "udp send failed");
                     }
                 }
                 Output::TcpRelay { to, packet } => {
@@ -734,7 +808,8 @@ fn peer_configs(state: &State) -> Vec<PeerConfig> {
         .filter_map(|peer| {
             let key = PublicKey::from_slice(&peer.key).ok()?;
             let candidates = peer.endpoint.iter().chain(&peer.candidates).filter_map(|e| e.to_socket_addr()).collect();
-            Some(PeerConfig { key, address: Ipv4Addr::from(peer.address), online: peer.online, candidates })
+            let endpoint = peer.endpoint.as_ref().and_then(|endpoint| endpoint.to_socket_addr());
+            Some(PeerConfig { key, address: Ipv4Addr::from(peer.address), online: peer.online, candidates, endpoint })
         })
         .collect()
 }

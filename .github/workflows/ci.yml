@@ -77,6 +77,8 @@ jobs:
         run: tools/netns-lab.sh
       - name: Linux NAT, cone to cone
         run: NAT_A=cone NAT_B=cone EXPECT=direct tools/nat-lab.sh
+      - name: Linux NAT, cone to symmetric (port spraying, one retry as it is probabilistic)
+        run: NAT_A=cone NAT_B=symmetric EXPECT=direct tools/nat-lab.sh || NAT_A=cone NAT_B=symmetric EXPECT=direct tools/nat-lab.sh
       - name: Linux NAT, symmetric to symmetric
         run: NAT_A=symmetric NAT_B=symmetric EXPECT=relay tools/nat-lab.sh
       - name: Linux NAT, UDP to loom blocked

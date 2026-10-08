@@ -7,7 +7,7 @@ pub struct NatId(usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NatKind {
-    /// One public port per internal socket.
+    /// One public port per internal socket, the local port when it is free.
     EndpointIndependent(Filtering),
     /// A new public port for every destination.
     Symmetric,
@@ -169,7 +169,8 @@ impl Network {
                 let preserved = from.port();
                 let clash = nat.stale.get(&(to, preserved)).is_some_and(|&until| now < until);
                 let taken = nat.reverse.get(&preserved).is_some_and(|&owner| owner != from);
-                let port = if nat.kind == NatKind::Conntrack && !clash && !taken {
+                let preserves = matches!(nat.kind, NatKind::Conntrack | NatKind::EndpointIndependent(_));
+                let port = if preserves && !clash && !taken {
                     preserved
                 } else {
                     nat.next_port += 1;

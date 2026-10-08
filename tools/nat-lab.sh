@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs loom and two weftd instances behind separate Linux NAT routers in unprivileged namespaces.
-#   NAT_A, NAT_B: cone (masquerade) or symmetric (masquerade random)
+#   NAT_A, NAT_B: cone (masquerade) or symmetric (masquerade random); each site sits behind
+#   an extra ISP router, so packets with a low TTL can expire between the two NATs
 #   BLOCK_LOOM_UDP_A=1: router A drops UDP to loom, so A must use the TCP relay
 #   EXPECT: direct or relay
 set -Eeuo pipefail
@@ -33,13 +34,26 @@ ip link set br0 up
 
 site() {
     local name=$1 n=$2 mode=$3 block=$4
+    ip netns add "isp$name"
     ip netns add "r$name"
     ip netns add "$name"
-    ip link add "veth-r$name" type veth peer name wan netns "r$name"
-    ip link set "veth-r$name" master br0 up
-    ip -n "r$name" addr add "10.99.0.$((n + 1))/24" dev wan
+    # internet <-> ISP router <-> NAT router <-> host, so a low TTL can expire between the NATs
+    ip link add "veth-i$name" type veth peer name wan netns "isp$name"
+    ip link set "veth-i$name" master br0 up
+    ip -n "isp$name" addr add "10.99.0.$((n + 1))/24" dev wan
+    ip -n "isp$name" link set wan up
+    ip -n "isp$name" link set lo up
+    ip -n "isp$name" link add cust type veth peer name wan netns "r$name"
+    ip -n "isp$name" addr add "172.16.$n.1/24" dev cust
+    ip -n "isp$name" link set cust up
+    nsenter --net="/run/netns/isp$name" sh -c 'echo 1 > /proc/sys/net/ipv4/ip_forward'
+    nsenter --net="/run/netns/isp$name" tc qdisc add dev wan root netem delay "${DELAY:-10ms}"
+    tc qdisc add dev "veth-i$name" root netem delay "${DELAY:-10ms}"
+    ip route add "172.16.$n.0/24" via "10.99.0.$((n + 1))"
+    ip -n "r$name" addr add "172.16.$n.2/24" dev wan
     ip -n "r$name" link set wan up
     ip -n "r$name" link set lo up
+    ip -n "r$name" route add default via "172.16.$n.1"
     ip -n "r$name" link add lan type veth peer name eth0 netns "$name"
     ip -n "r$name" addr add "192.168.$n.1/24" dev lan
     ip -n "r$name" link set lan up
@@ -48,8 +62,6 @@ site() {
     ip -n "$name" link set lo up
     ip -n "$name" route add default via "192.168.$n.1"
     nsenter --net="/run/netns/r$name" sh -c 'echo 1 > /proc/sys/net/ipv4/ip_forward'
-    nsenter --net="/run/netns/r$name" tc qdisc add dev wan root netem delay "${DELAY:-10ms}"
-    tc qdisc add dev "veth-r$name" root netem delay "${DELAY:-10ms}"
     local flags=""
     [ "$mode" = symmetric ] && flags="random"
     local drop=""
@@ -66,6 +78,8 @@ NFT
 
 site a 1 "$NAT_A" "${BLOCK_LOOM_UDP_A:-0}"
 site b 2 "$NAT_B" 0
+ip -n ispa route add 172.16.2.0/24 via 10.99.0.3
+ip -n ispb route add 172.16.1.0/24 via 10.99.0.2
 
 cat > "$WORK/loom.toml" <<CONF
 listen = "10.99.0.1:7443"

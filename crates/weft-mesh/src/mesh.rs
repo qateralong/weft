@@ -1,5 +1,5 @@
-use std::collections::{HashMap, VecDeque};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant, SystemTime};
 
 use rand::rngs::StdRng;
@@ -22,6 +22,40 @@ pub const DISCOVER_JITTER: Duration = Duration::from_secs(5);
 pub const SERVER_UDP_FRESH: Duration = Duration::from_secs(60);
 const UDP_CHECK: Duration = Duration::from_secs(10);
 const MAX_PATHS: usize = 32;
+/// Opening packets from the symmetric side use a low TTL so they create a mapping in its own
+/// NAT but expire before the peer's NAT. A Linux conntrack NAT on the peer's side would remember
+/// such a flow, and once the peer's probe hits it, move all its later probes to another port.
+/// The distance to our NAT is unknown, so rounds try larger TTLs with fresh sockets, the safe
+/// low ones first and with more time before the next.
+const SPRAY_TTLS: [u8; 5] = [2, 3, 4, 5, 6];
+const SPRAY_OPEN_AT: [Duration; 5] =
+    [Duration::ZERO, Duration::from_secs(3), Duration::from_secs(9), Duration::from_secs(12), Duration::from_secs(15)];
+const SPRAY_ROUND_SOCKETS: SocketId = 96;
+/// Extra sockets the side behind a symmetric NAT opens towards one peer.
+pub const SPRAY_SOCKETS: SocketId = SPRAY_ROUND_SOCKETS * SPRAY_TTLS.len() as SocketId;
+const SPRAY_PROBES: usize = 512;
+const SPRAY_ROUNDS: u32 = 7;
+const SPRAY_INTERVAL: Duration = Duration::from_secs(3);
+const SPRAY_SCAN_DELAY: Duration = Duration::from_millis(500);
+const SPRAY_COOLDOWN: Duration = Duration::from_secs(300);
+const SPRAY_AFTER: u32 = 2;
+const MIN_SPRAY_PORT: u16 = 1024;
+
+/// Index of a local UDP socket; 0 is the main socket, the others only exist while spraying.
+pub type SocketId = u16;
+
+/// A local socket and a remote address: one end-to-end UDP path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Via {
+    pub socket: SocketId,
+    pub addr: SocketAddr,
+}
+
+impl Via {
+    pub fn main(addr: SocketAddr) -> Self {
+        Self { socket: 0, addr }
+    }
+}
 const MAX_DISCO_PADDING: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,13 +64,26 @@ pub struct PeerConfig {
     pub address: Ipv4Addr,
     pub online: bool,
     pub candidates: Vec<SocketAddr>,
+    /// The peer's address as the server sees it.
+    pub endpoint: Option<SocketAddr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Output {
-    Udp { to: SocketAddr, datagram: Vec<u8> },
-    TcpRelay { to: Ipv4Addr, packet: Vec<u8> },
-    CallMeMaybe { peer: PublicKey },
+    /// `ttl` is set only for packets that must not travel far.
+    Udp {
+        socket: SocketId,
+        to: SocketAddr,
+        datagram: Vec<u8>,
+        ttl: Option<u8>,
+    },
+    TcpRelay {
+        to: Ipv4Addr,
+        packet: Vec<u8>,
+    },
+    CallMeMaybe {
+        peer: PublicKey,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,6 +141,7 @@ pub struct Mesh {
     flood: Bucket,
     outputs: VecDeque<Output>,
     rng: StdRng,
+    udp_port: Option<u16>,
 }
 
 #[derive(Clone, Copy)]
@@ -119,12 +167,31 @@ struct Peer {
     obfs: ObfsKey,
     disco: DiscoKey,
     candidates: Vec<SocketAddr>,
-    paths: HashMap<SocketAddr, Path>,
-    best: Option<SocketAddr>,
+    endpoint: Option<SocketAddr>,
+    paths: HashMap<Via, Path>,
+    best: Option<Via>,
     probe_at: Option<Instant>,
     attempts: u32,
-    pings: HashMap<TxId, (SocketAddr, Instant)>,
+    pings: HashMap<TxId, (Via, Instant)>,
     observed: Option<SocketAddr>,
+    spray: Option<Spray>,
+    sprayed_at: Option<Instant>,
+}
+
+/// Birthday-style punching for a cone NAT on one side and a symmetric NAT on the other.
+#[derive(Clone, Copy, Debug)]
+struct Spray {
+    role: SprayRole,
+    next: Instant,
+    rounds: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SprayRole {
+    /// We are behind the symmetric NAT: open many mappings towards the peer.
+    Open(SocketAddr),
+    /// The peer is: probe random ports on its public address.
+    Scan(IpAddr),
 }
 
 #[derive(Default)]
@@ -162,7 +229,26 @@ impl Mesh {
             flood: Bucket::default(),
             outputs: VecDeque::new(),
             rng,
+            udp_port: None,
         }
+    }
+
+    /// The local port of the main socket, to tell whether our NAT changes ports.
+    pub fn set_udp_port(&mut self, port: u16) {
+        self.udp_port = Some(port);
+    }
+
+    /// Sockets that still carry a path or a probe; the others can be closed.
+    pub fn sockets(&self) -> BTreeSet<SocketId> {
+        let mut sockets = BTreeSet::from([0]);
+        for peer in self.peers.values() {
+            sockets.extend(peer.best.map(|via| via.socket));
+            sockets.extend(peer.pings.values().map(|(via, _)| via.socket));
+            if matches!(peer.spray, Some(Spray { role: SprayRole::Open(_), .. })) {
+                sockets.extend(1..=SPRAY_SOCKETS);
+            }
+        }
+        sockets
     }
 
     pub fn public_key(&self) -> PublicKey {
@@ -228,6 +314,7 @@ impl Mesh {
                 peer.address = config.address;
             }
             self.by_address.insert(config.address, id);
+            peer.endpoint = config.endpoint;
             let mut candidates = config.candidates;
             candidates.dedup();
             if peer.candidates != candidates {
@@ -243,12 +330,15 @@ impl Mesh {
 
     pub fn call_me_maybe(&mut self, now: Instant, key: &PublicKey, candidates: Vec<SocketAddr>) {
         let Some(&id) = self.by_key.get(key) else { return };
-        if let Some(peer) = self.peers.get_mut(&id)
-            && !candidates.is_empty()
-        {
+        let Some(peer) = self.peers.get_mut(&id) else { return };
+        if !candidates.is_empty() {
             peer.candidates = candidates;
         }
+        let retry = peer.attempts + 1 >= SPRAY_AFTER;
         self.burst(now, id);
+        if retry {
+            self.start_spray(now, id);
+        }
         self.flush(now);
     }
 
@@ -283,24 +373,32 @@ impl Mesh {
         Ok(())
     }
 
-    pub fn receive_udp(&mut self, now: Instant, from: SocketAddr, datagram: &[u8]) -> Option<Delivered> {
+    pub fn receive_udp(
+        &mut self,
+        now: Instant,
+        socket: SocketId,
+        from: SocketAddr,
+        datagram: &[u8],
+    ) -> Option<Delivered> {
         let mut packet = datagram.to_vec();
         let header = self.obfs.open(&mut packet).ok()?;
+        let via = Via { socket, addr: from };
         let delivered = match header {
-            Header::Observed => {
+            Header::Observed if socket == 0 => {
                 self.on_observed(now, from, &packet);
                 None
             }
+            Header::Observed => None,
             Header::Relayed => {
-                let from_server = self.server.as_ref().is_some_and(|server| server.udp == from);
+                let from_server = socket == 0 && self.server.as_ref().is_some_and(|server| server.udp == from);
                 let (source, inner) = parse_relayed(&packet).filter(|_| from_server)?;
                 self.on_relayed(now, source, inner)
             }
             Header::Disco => {
-                self.on_disco(now, from, &packet);
+                self.on_disco(now, via, &packet);
                 None
             }
-            header => self.on_session(now, Some(from), header, &packet),
+            header => self.on_session(now, Some(via), header, &packet),
         };
         self.flush(now);
         delivered
@@ -325,7 +423,7 @@ impl Mesh {
             server.discover_at = now + DISCOVER_INTERVAL - DISCOVER_JITTER + Duration::from_millis(jitter);
             let mut packet = discover_packet(&server.token, self.rng.random_range(0..=64), self.rng.random());
             if server.obfs.seal(&mut packet).is_ok() {
-                self.outputs.push_back(Output::Udp { to: server.udp, datagram: packet });
+                self.outputs.push_back(Output::Udp { socket: 0, to: server.udp, datagram: packet, ttl: None });
             }
         }
         self.flush(now);
@@ -343,7 +441,7 @@ impl Mesh {
                 Some(ping.min(heard + PATH_STALE_AFTER))
             });
             let pings = peer.pings.values().map(|&(_, sent)| sent + PING_TIMEOUT).min();
-            [peer.probe_at, path_check, pings]
+            [peer.probe_at, path_check, pings, peer.spray.map(|spray| spray.next)]
         });
         let server = self.server.as_ref().map(|server| server.discover_at);
         peers.flatten().chain(server).chain(self.node.next_timeout()).min()
@@ -381,7 +479,9 @@ impl Mesh {
             return Some(PeerLink::Connecting);
         }
         Some(match peer.best {
-            Some(addr) => PeerLink::Direct { addr, latency: peer.paths.get(&addr).and_then(|path| path.latency) },
+            Some(via) => {
+                PeerLink::Direct { addr: via.addr, latency: peer.paths.get(&via).and_then(|path| path.latency) }
+            }
             None => PeerLink::Relay,
         })
     }
@@ -398,12 +498,15 @@ impl Mesh {
                 obfs: ObfsKey::for_receiver(&config.key),
                 disco,
                 candidates: Vec::new(),
+                endpoint: config.endpoint,
                 paths: HashMap::new(),
                 best: None,
                 probe_at: Some(now),
                 attempts: 0,
                 pings: HashMap::new(),
                 observed: None,
+                spray: None,
+                sprayed_at: None,
             },
         );
         self.by_key.insert(config.key, id);
@@ -433,7 +536,7 @@ impl Mesh {
                     }
                 }
                 _ => {
-                    tracing::debug!(peer = %peer.address, %best, "direct path lost");
+                    tracing::debug!(peer = %peer.address, path = %best.addr, "direct path lost");
                     peer.best = None;
                     peer.probe_at = Some(now);
                     peer.attempts = 0;
@@ -444,6 +547,9 @@ impl Mesh {
             self.peers.get(&id).is_some_and(|peer| peer.best.is_none() && peer.probe_at.is_some_and(|at| now >= at));
         if due {
             self.probe(now, id);
+        }
+        if self.peers.get(&id).and_then(|peer| peer.spray).is_some_and(|spray| now >= spray.next) {
+            self.spray_round(now, id);
         }
     }
 
@@ -456,10 +562,78 @@ impl Mesh {
         peer.attempts += 1;
         peer.probe_at = Some(now + if peer.attempts == 1 { PROBE_RETRY } else { PROBE_BACKOFF });
         let key = peer.key;
+        let spray = peer.attempts >= SPRAY_AFTER;
         if self.server.is_some() {
             self.outputs.push_back(Output::CallMeMaybe { peer: key });
         } else {
             self.burst(now, id);
+        }
+        if spray {
+            self.start_spray(now, id);
+        }
+    }
+
+    /// Whether our NAT gave the main socket a different public port than the local one.
+    fn port_changing(&self) -> bool {
+        let observed = self.server.as_ref().and_then(|server| server.observed);
+        observed.zip(self.udp_port).is_some_and(|(observed, port)| observed.port() != port)
+    }
+
+    fn start_spray(&mut self, now: Instant, id: PeerId) {
+        let own = self.port_changing();
+        let has_server = self.server.is_some();
+        let Some(peer) = self.peers.get_mut(&id) else { return };
+        let cooling = peer.sprayed_at.is_some_and(|at| now < at + SPRAY_COOLDOWN);
+        if !has_server || !peer.online || peer.best.is_some() || peer.spray.is_some() || cooling {
+            return;
+        }
+        let Some(endpoint) = peer.endpoint else { return };
+        let peer_changing = !peer.candidates.iter().any(|&c| c != endpoint && c.port() == endpoint.port());
+        let (role, start) = match (own, peer_changing) {
+            (true, false) => (SprayRole::Open(endpoint), now),
+            (false, true) => (SprayRole::Scan(endpoint.ip()), now + SPRAY_SCAN_DELAY),
+            _ => return,
+        };
+        tracing::debug!(peer = %peer.address, ?role, "spraying for a symmetric NAT");
+        peer.spray = Some(Spray { role, next: start, rounds: 0 });
+        peer.sprayed_at = Some(now);
+    }
+
+    fn spray_round(&mut self, now: Instant, id: PeerId) {
+        let Some(peer) = self.peers.get_mut(&id) else { return };
+        let Some(mut spray) = peer.spray.take() else { return };
+        if peer.best.is_some() {
+            return;
+        }
+        let round = spray.rounds as usize;
+        spray.rounds += 1;
+        spray.next = match spray.role {
+            SprayRole::Open(_) => match SPRAY_OPEN_AT.get(round + 1) {
+                Some(&at) => now + at - SPRAY_OPEN_AT[round],
+                None => now,
+            },
+            SprayRole::Scan(_) => now + SPRAY_INTERVAL,
+        };
+        let last = match spray.role {
+            SprayRole::Open(_) => SPRAY_TTLS.len() as u32,
+            SprayRole::Scan(_) => SPRAY_ROUNDS,
+        };
+        if spray.rounds < last {
+            peer.spray = Some(spray);
+        }
+        let (targets, ttl): (Vec<Via>, Option<u8>) = match spray.role {
+            SprayRole::Open(target) => {
+                let first = round as SocketId * SPRAY_ROUND_SOCKETS + 1;
+                let sockets = first..first + SPRAY_ROUND_SOCKETS;
+                (sockets.map(|socket| Via { socket, addr: target }).collect(), Some(SPRAY_TTLS[round]))
+            }
+            SprayRole::Scan(ip) => {
+                let ports = (0..SPRAY_PROBES).map(|_| self.rng.random_range(MIN_SPRAY_PORT..=u16::MAX));
+                (ports.map(|port| Via::main(SocketAddr::new(ip, port))).collect(), None)
+            }
+        };
+        for via in targets {
+            self.ping_via(now, id, via, false, ttl);
         }
     }
 
@@ -468,15 +642,21 @@ impl Mesh {
         if !peer.online {
             return;
         }
-        let mut targets: Vec<SocketAddr> = peer.candidates.clone();
-        targets.extend(peer.paths.keys().copied().filter(|addr| !peer.candidates.contains(addr)));
+        let mut targets: Vec<Via> = peer.candidates.iter().copied().map(Via::main).collect();
+        let known: Vec<Via> = peer.paths.keys().copied().filter(|via| !targets.contains(via)).collect();
+        targets.extend(known);
         tracing::trace!(peer = %peer.address, ?targets, "probing");
         for target in targets {
             self.ping(now, id, target);
         }
     }
 
-    fn ping(&mut self, now: Instant, id: PeerId, to: SocketAddr) {
+    fn ping(&mut self, now: Instant, id: PeerId, to: Via) {
+        self.ping_via(now, id, to, true, None);
+    }
+
+    /// Sends a disco ping; untracked pings do not create paths until they are answered.
+    fn ping_via(&mut self, now: Instant, id: PeerId, to: Via, track: bool, ttl: Option<u8>) {
         let Some(peer) = self.peers.get_mut(&id) else { return };
         let tx: TxId = self.rng.random();
         let padding = self.rng.random_range(0..=MAX_DISCO_PADDING);
@@ -486,10 +666,10 @@ impl Mesh {
             return;
         };
         peer.pings.insert(tx, (to, now));
-        if peer.paths.len() < MAX_PATHS || peer.paths.contains_key(&to) {
+        if track && (peer.paths.len() < MAX_PATHS || peer.paths.contains_key(&to)) {
             peer.paths.entry(to).or_default().pinged = Some(now);
         }
-        self.outputs.push_back(Output::Udp { to, datagram });
+        self.outputs.push_back(Output::Udp { socket: to.socket, to: to.addr, datagram, ttl });
     }
 
     fn on_observed(&mut self, now: Instant, from: SocketAddr, packet: &[u8]) {
@@ -513,13 +693,7 @@ impl Mesh {
         (self.by_address.get(&delivered.source) == Some(&id)).then_some(delivered)
     }
 
-    fn on_session(
-        &mut self,
-        now: Instant,
-        from: Option<SocketAddr>,
-        header: Header,
-        packet: &[u8],
-    ) -> Option<Delivered> {
+    fn on_session(&mut self, now: Instant, from: Option<Via>, header: Header, packet: &[u8]) -> Option<Delivered> {
         let received = match self.node.receive_opened(now, header, packet) {
             Ok(received) => received,
             Err(error) => {
@@ -547,24 +721,26 @@ impl Mesh {
         Some(Delivered { source: peer.address, packet })
     }
 
-    fn on_disco(&mut self, now: Instant, from: SocketAddr, packet: &[u8]) {
+    fn on_disco(&mut self, now: Instant, from: Via, packet: &[u8]) {
         let Some(&id) = disco::sender(packet).and_then(|key| self.by_key.get(&key)) else { return };
         let Some(peer) = self.peers.get_mut(&id) else { return };
         let Some(message) = disco::open(&peer.disco, packet) else { return };
-        tracing::trace!(peer = %peer.address, %from, ?message, "disco");
+        tracing::trace!(peer = %peer.address, ?from, ?message, "disco");
         match message {
             Message::Ping { tx } => {
                 let padding = self.rng.random_range(0..=MAX_DISCO_PADDING);
                 let nonce = self.rng.random();
-                let pong = Message::Pong { tx, observed: from };
+                let pong = Message::Pong { tx, observed: from.addr };
                 if let Ok(datagram) = disco::seal(&peer.disco, &self.public, &peer.obfs, &pong, padding, nonce) {
-                    self.outputs.push_back(Output::Udp { to: from, datagram });
+                    self.outputs.push_back(Output::Udp { socket: from.socket, to: from.addr, datagram, ttl: None });
                 }
                 let known = peer.paths.contains_key(&from);
                 if !known && peer.paths.len() < MAX_PATHS {
                     peer.paths.insert(from, Path::default());
                 }
-                if peer.best.is_none() && !peer.pings.values().any(|&(addr, _)| addr == from) {
+                let pinging =
+                    peer.paths.get(&from).and_then(|path| path.pinged).is_some_and(|at| now < at + PING_TIMEOUT);
+                if peer.best.is_none() && !pinging {
                     self.ping(now, id, from);
                 }
             }
@@ -590,14 +766,19 @@ impl Mesh {
         while let Some(transmit) = self.node.poll_transmit() {
             let Some(peer) = self.peers.get(&transmit.peer) else { continue };
             if let Some(best) = peer.best {
-                self.outputs.push_back(Output::Udp { to: best, datagram: transmit.datagram });
+                self.outputs.push_back(Output::Udp {
+                    socket: best.socket,
+                    to: best.addr,
+                    datagram: transmit.datagram,
+                    ttl: None,
+                });
                 continue;
             }
             let Some(server) = &self.server else { continue };
             if server.udp_fresh_until.is_some_and(|until| now < until) {
                 let mut packet = relay_packet(&server.token, peer.address, &transmit.datagram);
                 if server.obfs.seal(&mut packet).is_ok() {
-                    self.outputs.push_back(Output::Udp { to: server.udp, datagram: packet });
+                    self.outputs.push_back(Output::Udp { socket: 0, to: server.udp, datagram: packet, ttl: None });
                 }
             } else {
                 self.outputs.push_back(Output::TcpRelay { to: peer.address, packet: transmit.datagram });
@@ -606,7 +787,7 @@ impl Mesh {
     }
 }
 
-fn heard(peer: &mut Peer, from: SocketAddr, now: Instant, latency: Option<Duration>) {
+fn heard(peer: &mut Peer, from: Via, now: Instant, latency: Option<Duration>) {
     if !peer.paths.contains_key(&from) && peer.paths.len() >= MAX_PATHS {
         return;
     }
@@ -629,10 +810,11 @@ fn heard(peer: &mut Peer, from: SocketAddr, now: Instant, latency: Option<Durati
         }
     };
     if better && (latency.is_some() || peer.best.is_none()) {
-        tracing::debug!(peer = %peer.address, path = %from, ?latency, "direct path selected");
+        tracing::debug!(peer = %peer.address, path = %from.addr, socket = from.socket, ?latency, "direct path selected");
         peer.best = Some(from);
         peer.probe_at = None;
         peer.attempts = 0;
+        peer.spray = None;
     }
 }
 

@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/qateralong/weft"
@@ -31,7 +31,7 @@ getrandom = "0.4"
 idna = "1"
 igd-next = { version = "0.18", default-features = false, features = ["aio_tokio"] }
 netdev = "0.46"
-nix = { version = "0.30", features = ["user"] }
+nix = { version = "0.30", features = ["resource", "user"] }
 prost = "0.14"
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
 rand = { version = "0.10", default-features = false, features = ["std", "std_rng", "thread_rng"] }

@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant, SystemTime};
 
-use weft_mesh::{Delivered, Mesh, Output, PeerConfig, PeerLink};
+use weft_mesh::{Delivered, Mesh, Output, PeerConfig, PeerLink, SPRAY_SOCKETS, SocketId};
 use weft_proto::PublicKey;
 use weft_session::StaticKeypair;
 use weft_sim::{Delivery, FakeLoom, Filtering, NatId, NatKind, Network};
@@ -9,6 +9,7 @@ use weft_sim::{Delivery, FakeLoom, Filtering, NatId, NatKind, Network};
 struct Agent {
     mesh: Mesh,
     local: SocketAddr,
+    nat: Option<NatId>,
     key: PublicKey,
     address: Ipv4Addr,
     inbox: Vec<Delivered>,
@@ -62,8 +63,9 @@ impl World {
         let mut mesh = Mesh::with_seed(keypair, now, SystemTime::now(), u64::from(n));
         mesh.set_server(now, self.loom.addr, self.loom.public_key(), token);
         let local: SocketAddr = local.parse().unwrap();
+        mesh.set_udp_port(local.port());
         self.net.add_host(local, nat);
-        self.agents.push(Agent { mesh, local, key, address, inbox: Vec::new() });
+        self.agents.push(Agent { mesh, local, nat, key, address, inbox: Vec::new() });
         self.next_sync.push(now + SYNC_SKEW * n as u32);
         self.agents.len() - 1
     }
@@ -78,6 +80,7 @@ impl World {
                 address: agent.address,
                 online: true,
                 candidates: self.loom.endpoint(agent.address).into_iter().chain([agent.local]).collect::<Vec<_>>(),
+                endpoint: self.loom.endpoint(agent.address),
             })
             .collect();
         self.agents[i].mesh.update_peers(now, configs);
@@ -110,7 +113,14 @@ impl World {
                 while let Some(output) = self.agents[i].mesh.poll_output() {
                     busy = true;
                     match output {
-                        Output::Udp { to, datagram } => self.net.send(self.agents[i].local, to, datagram),
+                        Output::Udp { socket, to, datagram, .. } => {
+                            let local = self.agents[i].local;
+                            let from = SocketAddr::new(local.ip(), local.port() + socket);
+                            if socket != 0 {
+                                self.net.add_host(from, self.agents[i].nat);
+                            }
+                            self.net.send(from, to, datagram)
+                        }
                         Output::TcpRelay { to, packet } => {
                             let source = self.agents[i].address;
                             match self.loom.relay_tcp(source, to, &packet) {
@@ -169,8 +179,10 @@ impl World {
                             Delivery::Tcp { to, source, packet } => self.deliver_tcp(to, source, &packet),
                         }
                     }
-                } else if let Some(agent) = self.agents.iter_mut().find(|agent| agent.local == host)
-                    && let Some(delivered) = agent.mesh.receive_udp(now, from, &data)
+                } else if let Some((agent, socket)) = self.agents.iter_mut().find_map(|agent| {
+                    let socket = host.port().checked_sub(agent.local.port())? as SocketId;
+                    (host.ip() == agent.local.ip() && socket <= SPRAY_SOCKETS).then_some((agent, socket))
+                }) && let Some(delivered) = agent.mesh.receive_udp(now, socket, from, &data)
                 {
                     agent.inbox.push(delivered);
                 }
@@ -268,6 +280,23 @@ fn symmetric_nat_reaches_an_open_cone_directly() {
     assert!(direct(world.link(a, b)).is_some());
     assert!(direct(world.link(b, a)).is_some());
     world.exchange(a, b);
+}
+
+#[test]
+fn spraying_punches_a_cone_to_a_symmetric_nat() {
+    for seed in 0..3 {
+        let mut world = World::new();
+        let nat_a = world.nat("198.51.100.1", cone(Filtering::AddressAndPort));
+        let nat_b = world.nat("198.51.100.2", NatKind::Symmetric);
+        let a = world.agent(&format!("192.168.1.{}:5000", 10 + seed), Some(nat_a));
+        let b = world.agent("192.168.2.10:5000", Some(nat_b));
+        world.run_for(Duration::from_secs(30));
+        let path = direct(world.link(a, b)).unwrap_or_else(|| panic!("seed {seed}: {:?}", world.link(a, b)));
+        assert_eq!(path.ip(), "198.51.100.2".parse::<IpAddr>().unwrap());
+        assert!(direct(world.link(b, a)).is_some());
+        world.exchange(a, b);
+        assert!(world.agents[b].mesh.sockets().len() <= 2, "{:?}", world.agents[b].mesh.sockets().len());
+    }
 }
 
 #[test]
