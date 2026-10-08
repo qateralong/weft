@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use weft_i18n::Localizer;
-use weft_ipc::{Connection, DeviceInfo, Failure, InviteInfo, PeerLink, Request, Response, Role, Status};
+use weft_ipc::{Connection, DeviceInfo, InviteInfo, PeerLink, Request, Response, Role, Status};
 
 const MAX_EXPIRY: u64 = 365 * 24 * 3600;
 
@@ -287,7 +287,7 @@ fn run(l: &Localizer, matches: &ArgMatches) -> Result<(), String> {
             print_devices(l, &request, &devices);
             Ok(())
         }
-        Response::Error(failure) => Err(l.tr(failure_id(failure))),
+        Response::Error(failure) => Err(l.tr(failure.message_id())),
     }
 }
 
@@ -433,36 +433,6 @@ fn print_status(l: &Localizer, status: &Status) {
             };
             println!("  {:<width$}  {:<15}  {link}", member.nickname, member.address.to_string());
         }
-    }
-}
-
-fn failure_id(failure: Failure) -> &'static str {
-    match failure {
-        Failure::NoServer => "error-no-server",
-        Failure::InvalidLink => "error-invalid-link",
-        Failure::NotConnected => "error-not-connected",
-        Failure::Timeout => "error-timeout",
-        Failure::UnsupportedVersion => "error-unsupported-version",
-        Failure::InvalidRequest => "error-invalid-request",
-        Failure::InvalidName => "error-invalid-name",
-        Failure::InvalidNickname => "error-invalid-nickname",
-        Failure::InvalidPassword => "error-invalid-password",
-        Failure::NetworkExists => "error-network-exists",
-        Failure::NetworkNotFound => "error-network-not-found",
-        Failure::WrongPassword => "error-wrong-password",
-        Failure::NetworkFull => "error-network-full",
-        Failure::RateLimited => "error-rate-limited",
-        Failure::AlreadyMember => "error-already-member",
-        Failure::NotMember => "error-not-member",
-        Failure::PoolExhausted => "error-pool-exhausted",
-        Failure::Forbidden => "error-forbidden",
-        Failure::InviteNotFound => "error-invite-not-found",
-        Failure::Banned => "error-banned",
-        Failure::MemberNotFound => "error-member-not-found",
-        Failure::AmbiguousMember => "error-ambiguous-member",
-        Failure::TooManyInvites => "error-too-many-invites",
-        Failure::NetworkLocked => "error-network-locked",
-        Failure::Internal => "error-internal",
     }
 }
 

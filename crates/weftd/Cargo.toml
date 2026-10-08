@@ -25,5 +25,9 @@ weft-proto.workspace = true
 weft-session = { workspace = true, features = ["tokio"] }
 weft-tun.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-service.workspace = true
+windows-sys.workspace = true

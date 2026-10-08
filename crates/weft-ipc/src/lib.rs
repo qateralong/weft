@@ -102,6 +102,38 @@ pub enum Failure {
     Internal,
 }
 
+impl Failure {
+    pub fn message_id(self) -> &'static str {
+        match self {
+            Failure::NoServer => "error-no-server",
+            Failure::InvalidLink => "error-invalid-link",
+            Failure::NotConnected => "error-not-connected",
+            Failure::Timeout => "error-timeout",
+            Failure::UnsupportedVersion => "error-unsupported-version",
+            Failure::InvalidRequest => "error-invalid-request",
+            Failure::InvalidName => "error-invalid-name",
+            Failure::InvalidNickname => "error-invalid-nickname",
+            Failure::InvalidPassword => "error-invalid-password",
+            Failure::NetworkExists => "error-network-exists",
+            Failure::NetworkNotFound => "error-network-not-found",
+            Failure::WrongPassword => "error-wrong-password",
+            Failure::NetworkFull => "error-network-full",
+            Failure::RateLimited => "error-rate-limited",
+            Failure::AlreadyMember => "error-already-member",
+            Failure::NotMember => "error-not-member",
+            Failure::PoolExhausted => "error-pool-exhausted",
+            Failure::Forbidden => "error-forbidden",
+            Failure::InviteNotFound => "error-invite-not-found",
+            Failure::Banned => "error-banned",
+            Failure::MemberNotFound => "error-member-not-found",
+            Failure::AmbiguousMember => "error-ambiguous-member",
+            Failure::TooManyInvites => "error-too-many-invites",
+            Failure::NetworkLocked => "error-network-locked",
+            Failure::Internal => "error-internal",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Status {
     pub connection: Connection,

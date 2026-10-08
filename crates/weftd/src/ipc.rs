@@ -7,6 +7,11 @@ use tokio::sync::{mpsc, oneshot};
 use weft_ipc::{Failure, Request, Response};
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(unix)]
+const SOCKET_GROUP: &str = "weft";
+/// SYSTEM and administrators get full access, interactive users read and write.
+#[cfg(windows)]
+const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
 
 pub struct Command {
     pub request: Request,
@@ -28,6 +33,9 @@ pub fn bind(path: &Path) -> io::Result<Listener> {
     }
     let listener = tokio::net::UnixListener::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
+    if let Ok(Some(group)) = nix::unistd::Group::from_name(SOCKET_GROUP) {
+        std::os::unix::fs::chown(path, None, Some(group.gid.as_raw()))?;
+    }
     Ok(Listener(listener))
 }
 
@@ -59,13 +67,52 @@ pub struct Listener {
 
 #[cfg(windows)]
 pub fn bind(path: &Path) -> io::Result<Listener> {
-    let first = tokio::net::windows::named_pipe::ServerOptions::new().first_pipe_instance(true).create(path)?;
+    let first = create_pipe(path.as_os_str(), true)?;
     Ok(Listener { path: path.as_os_str().to_owned(), first })
 }
 
 #[cfg(windows)]
-pub async fn serve(listener: Listener, commands: mpsc::Sender<Command>) {
+#[allow(unsafe_code)]
+fn create_pipe(path: &std::ffi::OsStr, first: bool) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
     use tokio::net::windows::named_pipe::ServerOptions;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+
+    let sddl: Vec<u16> = PIPE_SDDL.encode_utf16().chain(Some(0)).collect();
+    let mut descriptor = std::ptr::null_mut();
+    // SAFETY: `sddl` is NUL-terminated and `descriptor` receives a LocalAlloc'ed pointer freed below.
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    if converted == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor,
+        bInheritHandle: 0,
+    };
+    // SAFETY: `attributes` points to a valid security descriptor for the duration of the call.
+    let pipe = unsafe {
+        ServerOptions::new()
+            .first_pipe_instance(first)
+            .create_with_security_attributes_raw(path, (&raw mut attributes).cast())
+    };
+    // SAFETY: the descriptor was allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
+    unsafe { LocalFree(descriptor) };
+    pipe
+}
+
+#[cfg(windows)]
+pub async fn serve(listener: Listener, commands: mpsc::Sender<Command>) {
     let Listener { path, mut first } = listener;
     loop {
         if let Err(error) = first.connect().await {
@@ -73,7 +120,7 @@ pub async fn serve(listener: Listener, commands: mpsc::Sender<Command>) {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
-        let next = match ServerOptions::new().create(&path) {
+        let next = match create_pipe(&path, false) {
             Ok(next) => next,
             Err(error) => {
                 tracing::error!(%error, "cannot create the next pipe instance");

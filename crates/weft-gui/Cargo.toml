@@ -1,0 +1,21 @@
+[package]
+name = "weft-gui"
+description = "Weft desktop app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+tauri = { workspace = true, features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance.workspace = true
+weft-i18n.workspace = true
+weft-ipc.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true

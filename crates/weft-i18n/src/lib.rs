@@ -1,4 +1,6 @@
 use fluent_bundle::concurrent::FluentBundle;
+use std::collections::BTreeMap;
+
 use fluent_bundle::{FluentArgs, FluentResource};
 use unic_langid::{LanguageIdentifier, langid};
 
@@ -27,6 +29,7 @@ impl Language {
 }
 
 pub struct Localizer {
+    language: Language,
     bundle: FluentBundle<FluentResource>,
     fallback: FluentBundle<FluentResource>,
 }
@@ -37,11 +40,20 @@ impl Localizer {
             Language::English => (EN, langid!("en")),
             Language::Russian => (RU, langid!("ru")),
         };
-        Self { bundle: bundle(source, id), fallback: bundle(EN, langid!("en")) }
+        Self { language, bundle: bundle(source, id), fallback: bundle(EN, langid!("en")) }
     }
 
     pub fn from_env() -> Self {
         Self::new(Language::from_env())
+    }
+
+    pub fn language(&self) -> Language {
+        self.language
+    }
+
+    /// Every message, with variables left as `{$name}`.
+    pub fn catalog(&self) -> BTreeMap<String, String> {
+        message_ids(EN).map(|id| (id.to_string(), self.tr(id))).collect()
     }
 
     pub fn tr(&self, id: &str) -> String {
@@ -67,6 +79,10 @@ impl Localizer {
     }
 }
 
+fn message_ids(source: &str) -> impl Iterator<Item = &str> {
+    source.lines().filter_map(|line| line.split_once(" = ").map(|(id, _)| id)).filter(|id| !id.starts_with(' '))
+}
+
 fn bundle(source: &str, id: LanguageIdentifier) -> FluentBundle<FluentResource> {
     let resource = FluentResource::try_new(source.to_string()).expect("valid fluent resource");
     let mut bundle = FluentBundle::new_concurrent(vec![id]);
@@ -82,7 +98,7 @@ mod tests {
     use super::*;
 
     fn ids(source: &str) -> BTreeSet<&str> {
-        source.lines().filter_map(|line| line.split_once(" = ").map(|(id, _)| id)).collect()
+        message_ids(source).collect()
     }
 
     #[test]
@@ -98,6 +114,9 @@ mod tests {
         let en = Localizer::new(Language::English);
         assert_eq!(en.tr("state-connected"), "connected");
         assert_eq!(en.tr("no-such-message"), "no-such-message");
+        let catalog = ru.catalog();
+        assert_eq!(catalog["done-create"], "Сеть «{$name}» создана");
+        assert_eq!(catalog.len(), ids(EN).len());
     }
 
     #[test]

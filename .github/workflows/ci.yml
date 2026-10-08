@@ -24,6 +24,8 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - if: runner.os == 'Linux'
         run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -38,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace
+      - run: cargo build --workspace --exclude weft-gui
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -69,7 +71,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace
+      - run: cargo build --workspace --exclude weft-gui
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Flat network
         run: tools/netns-lab.sh
