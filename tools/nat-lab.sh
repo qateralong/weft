@@ -6,6 +6,8 @@
 #   IPV6=1: also route IPv6 without NAT; routers let in only replies, like home routers
 #   EXPECT: direct or relay
 set -Eeuo pipefail
+# Test daemons must not join the public server.
+export WEFT_PUBLIC_SERVER=
 
 BIN=$(realpath "${BIN:-target/debug}")
 SELF=$(realpath "$0")

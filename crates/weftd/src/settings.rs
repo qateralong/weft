@@ -22,6 +22,8 @@ pub struct Settings {
     pub dns: bool,
     /// How the control connection to the server looks on the wire.
     pub transport: Transport,
+    /// Whether the public server was added once: `Some(false)` after the user removed it.
+    pub public_server: Option<bool>,
     pub host: HostSettings,
     pub servers: Vec<ServerEntry>,
 }
@@ -57,6 +59,15 @@ pub enum Transport {
 
 pub const MINECRAFT_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 2, 60);
 
+/// The server every new installation joins, so the app works without setup.
+pub const PUBLIC_SERVER: &str = "weft://141.11.211.11:8443#k=g4xfbqwhwx3slxpw73sszriu2w5bsgms7ahkso2mxuk7253bbn7a";
+
+/// The public server link; `WEFT_PUBLIC_SERVER` replaces it, and an empty value turns it off.
+pub fn public_server() -> Option<weft_proto::Link> {
+    let link = std::env::var("WEFT_PUBLIC_SERVER").unwrap_or_else(|_| PUBLIC_SERVER.to_string());
+    link.parse::<weft_proto::Link>().ok().map(|link| link.server())
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -69,6 +80,7 @@ impl Default for Settings {
             multicast_groups: vec![MINECRAFT_GROUP],
             dns: true,
             transport: Transport::Tls,
+            public_server: None,
             host: HostSettings::default(),
             servers: Vec::new(),
         }

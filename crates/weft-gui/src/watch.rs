@@ -204,6 +204,7 @@ mod tests {
             host: None,
             servers: vec![ServerStatus {
                 hosted: false,
+                public: false,
                 server: "weft://example.com".into(),
                 host: "example.com:443".into(),
                 connection,

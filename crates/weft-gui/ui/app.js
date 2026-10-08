@@ -287,7 +287,9 @@ function serverDialog() {
       const online = server.connection !== 'disconnected';
       return el('div', { class: 'row' },
         el('span', { class: `dot ${server.connection}` }),
-        el('div', { class: 'grow' }, el('div', { class: 'mono' }, server.host), el('div', { class: 'muted' }, t(`state-${server.connection}`))),
+        el('div', { class: 'grow' },
+          el('div', { class: 'mono' }, server.public ? t('gui-public-server') : server.hosted ? t('gui-host-yours') : server.host),
+          el('div', { class: 'muted' }, t(`state-${server.connection}`))),
         el('button', {
           class: 'small',
           onclick: async () => {
@@ -726,7 +728,7 @@ function render() {
   const networks = status.servers.map((server) => [
     several && el('div', { class: 'server-head' },
       el('span', { class: `dot ${server.connection}` }),
-      el('span', { class: 'mono grow' }, server.hosted ? t('gui-host-yours') : server.host),
+      el('span', { class: 'mono grow' }, server.hosted ? t('gui-host-yours') : server.public ? t('gui-public-server') : server.host),
       server.address && el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(server.address) }, server.address)),
     server.networks.map((network) => renderNetwork({ ...network, server: server.host })),
   ]);

@@ -350,3 +350,4 @@ gui-host-address = Address for the link
 gui-host-address-auto = automatic
 gui-host-port = Port
 gui-host-stop = Stop the server
+gui-public-server = Public Weft server

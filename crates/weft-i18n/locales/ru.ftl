@@ -350,3 +350,4 @@ gui-host-address = Адрес для ссылки
 gui-host-address-auto = автоматически
 gui-host-port = Порт
 gui-host-stop = Остановить сервер
+gui-public-server = Публичный сервер Weft

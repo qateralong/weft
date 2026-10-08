@@ -38,9 +38,9 @@ CONF
 LINK=$("$BIN/loom$exe" --config "$(native "$WORK/loom.toml")" link --host 127.0.0.1 | tr -d '\r')
 "$BIN/loom$exe" --config "$(native "$WORK/loom.toml")" > "$WORK/loom.log" 2>&1 &
 pids+=($!)
-$SUDO "$BIN/weftd$exe" --state-dir "$(native "$WORK/a")" --socket "$sock_a" > "$WORK/a.log" 2>&1 &
+$SUDO env WEFT_PUBLIC_SERVER= "$BIN/weftd$exe" --state-dir "$(native "$WORK/a")" --socket "$sock_a" > "$WORK/a.log" 2>&1 &
 pids+=($!)
-"$BIN/weftd$exe" --state-dir "$(native "$WORK/b")" --socket "$sock_b" --echo > "$WORK/b.log" 2>&1 &
+WEFT_PUBLIC_SERVER= "$BIN/weftd$exe" --state-dir "$(native "$WORK/b")" --socket "$sock_b" --echo > "$WORK/b.log" 2>&1 &
 pids+=($!)
 sleep 3
 

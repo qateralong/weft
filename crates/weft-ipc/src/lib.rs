@@ -274,6 +274,9 @@ pub struct ServerStatus {
     /// Whether this device hosts the server.
     #[serde(default)]
     pub hosted: bool,
+    /// Whether this is the public Weft server.
+    #[serde(default)]
+    pub public: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

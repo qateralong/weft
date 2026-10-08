@@ -2,6 +2,8 @@
 # Runs loom and two weftd instances in isolated network namespaces (no root needed)
 # and checks that the peers can ping each other over the virtual network.
 set -Eeuo pipefail
+# Test daemons must not join the public server.
+export WEFT_PUBLIC_SERVER=
 
 BIN=$(realpath "${BIN:-target/debug}")
 SELF=$(realpath "$0")

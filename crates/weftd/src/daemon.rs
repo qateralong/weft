@@ -26,7 +26,7 @@ use crate::control::{Control, ControlEvent};
 use crate::dns;
 use crate::host::Hosted;
 use crate::ipc::Command;
-use crate::settings::{ServerEntry, Settings, SettingsFile, Transport, default_nickname};
+use crate::settings::{ServerEntry, Settings, SettingsFile, Transport, default_nickname, public_server};
 
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -237,6 +237,15 @@ impl Daemon {
                 }
                 Err(error) => tracing::warn!(link = entry.link, %error, "skipping an invalid server link"),
             }
+        }
+        if daemon.settings.public_server.is_none()
+            && let Some(link) = public_server()
+        {
+            if daemon.find(&link).is_none() {
+                daemon.add_session(link, true);
+            }
+            daemon.settings.public_server = Some(true);
+            daemon.save_settings();
         }
         for index in 0..daemon.sessions.len() {
             if daemon.sessions[index].up {
@@ -482,6 +491,14 @@ impl Daemon {
         }
     }
 
+    fn find(&self, link: &Link) -> Option<usize> {
+        self.sessions.iter().position(|session| session.link == *link)
+    }
+
+    fn is_public(&self, index: usize) -> bool {
+        public_server().is_some_and(|link| self.sessions[index].link == link)
+    }
+
     fn add_session(&mut self, link: Link, up: bool) -> usize {
         let id = self.next_server;
         self.next_server += 1;
@@ -590,6 +607,9 @@ impl Daemon {
             self.stop_hosting();
             let _ = reply.send(Response::Ok);
             return;
+        }
+        if self.is_public(index) {
+            self.settings.public_server = Some(false);
         }
         self.disconnect_session(index);
         self.sessions.remove(index);
@@ -1100,6 +1120,7 @@ impl Daemon {
                     address: session.address(),
                     networks: self.networks(session),
                     hosted: self.is_hosted(index),
+                    public: self.is_public(index),
                 }
             })
             .collect();
