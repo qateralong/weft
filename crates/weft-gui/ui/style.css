@@ -269,14 +269,19 @@ main { padding: 14px 16px 28px; }
 .mode-text b { display: flex; align-items: center; gap: 8px; font-size: 15px; }
 .mode-text .tag { font-weight: 500; font-size: 11px; }
 
-.server-card { padding: 14px; }
+.server-row { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.server-row:last-child { border-bottom: none; }
+.server-row .note { margin: 8px 0 0; }
+button.add-server { width: 100%; margin-top: 8px; }
+.row.self { background: var(--accent-soft); }
+.members .row.self:hover { background: var(--accent-soft); }
+.icon-gap { width: 30px; flex: none; }
+.row.self .tag { font-size: 11px; }
 .server-line { display: flex; align-items: center; gap: 12px; }
-.server-line > .icon-box { width: 40px; height: 40px; border-radius: 11px; background: var(--accent-soft); color: var(--accent); }
+.server-line > .icon-box { width: 36px; height: 36px; border-radius: 11px; background: var(--accent-soft); color: var(--accent); }
 .server-line .grow { flex: 1; min-width: 0; }
 .server-line .info { margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .server-line .sub { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
-.share { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
-.share .grow { flex: 1; min-width: 0; }
 .wrap { white-space: normal; word-break: break-all; }
 .card p.note { margin: 8px 0 0; }
 
@@ -317,11 +322,6 @@ summary:hover { color: var(--text); }
 .step.failed { color: var(--danger); }
 .step.failed .step-mark { background: var(--danger); border-color: var(--danger); }
 
-.section-head { display: flex; align-items: center; gap: 8px; margin: 18px 4px 8px; color: var(--muted); font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
-.section-head:first-child { margin-top: 2px; }
-.section-head button { text-transform: none; letter-spacing: 0; font-weight: 500; }
-.section-head svg { width: 14px; height: 14px; }
-.server-card + .section-head { margin-top: 18px; }
 .mode:disabled { opacity: .55; }
 dialog .menu > button { width: 100%; justify-content: flex-start; margin-bottom: 8px; padding: 10px 12px; }
 
@@ -337,7 +337,6 @@ dialog .menu > button { width: 100%; justify-content: flex-start; margin-bottom:
 .bars i.level-2 { background: var(--warn); }
 .bars i.level-1 { background: var(--danger); }
 .signal .ms { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.server-card + .server-card { margin-top: -4px; }
 
 /* Controls */
 

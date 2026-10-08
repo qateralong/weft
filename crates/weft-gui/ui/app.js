@@ -176,7 +176,7 @@ function remaining(seconds) {
 
 function linkText(member) {
   switch (member.link) {
-    case 'direct': return member.latency_ms != null ? t('link-direct-latency', { ms: member.latency_ms }) : t('link-direct');
+    case 'direct': return t('link-direct');
     case 'relay': return t('link-relay');
     case 'connecting': return t('link-connecting');
     default: return t('link-offline');
@@ -213,6 +213,8 @@ function taken(current) {
   kinds.delete('vps');
   return kinds;
 }
+
+const several = () => serverList(status).length > 1;
 
 function serverName(server) {
   if (server.public) return t('gui-mode-online');
@@ -478,6 +480,9 @@ function settingsDialog() {
   const [nickLabel, nickname] = field('gui-nickname', { value: status?.nickname ?? '' });
   openDialog(t('gui-settings'), () => [
     nickLabel,
+    el('div', { class: 'section' }, t('gui-servers')),
+    el('div', { class: 'list servers' }, serverList(status).map(serverRow)),
+    el('button', { class: 'add-server', onclick: addServerDialog }, icon('plus'), t('gui-add-server')),
     el('div', { class: 'section' }, t('gui-app')),
     settingToggle('gui-notifications', 'notifications'),
     settingToggle('gui-check-updates', 'updates'),
@@ -779,36 +784,31 @@ function welcome() {
     modeCards(chooseMode));
 }
 
-/** Signal bars and the round trip to the server. */
-function signal(server) {
-  const ms = server.connection === 'connected' ? server.latency_ms : null;
+/** Signal bars and the round trip; `estimate` marks a guess. */
+function signal(ms, estimate = false) {
   const level = ms == null ? 0 : ms < 60 ? 4 : ms < 120 ? 3 : ms < 250 ? 2 : 1;
-  return el('div', { class: 'signal', title: t('gui-ping') },
+  const text = ms == null ? '—' : t('gui-ping-ms', { ms: ms < 1 ? '<1' : `${estimate ? '~' : ''}${ms}` });
+  return el('div', { class: 'signal', title: t(estimate ? 'gui-ping-relay' : 'gui-ping') },
     el('span', { class: 'bars' }, [1, 2, 3, 4].map((bar) => el('i', { class: bar <= level ? `on level-${level}` : '' }))),
-    el('span', { class: 'ms' }, ms == null ? '—' : t('gui-ping-ms', { ms: ms < 1 ? '<1' : ms })));
+    el('span', { class: 'ms' }, text));
 }
 
-function serverCard(server) {
+const serverLatency = (server) => (server?.connection === 'connected' ? server.latency_ms ?? null : null);
+
+function serverRow(server) {
   const mode = kindOf(server);
   const host = server.hosted ? status.host : null;
-  const where = mode === 'local' ? null : server.host;
   const reach = host && t({ public: 'host-reach-public', local: 'host-reach-local', behind: 'host-reach-behind' }[host.reach]);
-  return el('div', { class: 'card server-card', 'data-key': `server:${server.server}` },
+  return el('div', { class: 'server-row' },
     el('div', { class: 'server-line' },
       icon(MODES[mode].icon),
       el('div', { class: 'grow' },
         el('b', {}, t(MODES[mode].title)),
-        el('div', { class: 'muted sub' }, el('span', { class: `dot ${server.connection}` }), t(`state-${server.connection}`),
-          server.address && el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(server.address) }, server.address)),
-        where && el('div', { class: 'muted info mono' }, where)),
-      signal(server),
+        el('div', { class: 'muted sub' }, el('span', { class: `dot ${server.connection}` }), t(`state-${server.connection}`)),
+        mode !== 'local' && el('div', { class: 'muted info mono' }, server.host)),
+      signal(serverLatency(server)),
       el('button', { class: 'icon', title: t('gui-settings'), onclick: () => serverMenu(server) }, icon('more'))),
-    host && [
-      el('div', { class: 'share' },
-        el('span', { class: 'grow mono wrap' }, host.link ?? ''),
-        el('button', { class: 'small primary', onclick: () => copy(host.link ?? '') }, t('gui-copy'))),
-      el('p', { class: 'muted note' }, reach, !(host.reach === 'public' && host.mapped) && `. ${t(host.mapped ? 'host-mapped' : 'host-not-mapped', { port: host.port })}`),
-    ]);
+    host && el('p', { class: 'muted note' }, reach, !(host.reach === 'public' && host.mapped) && `. ${t(host.mapped ? 'host-mapped' : 'host-not-mapped', { port: host.port })}`));
 }
 
 function toggleNetwork(card, id) {
@@ -822,6 +822,7 @@ function networkCard(network) {
   const tags = [el('span', { class: 'tag role' }, t(`role-${network.role}`))];
   if (network.locked) tags.push(el('span', { class: 'tag' }, t('network-locked')));
   if (network.approval) tags.push(el('span', { class: 'tag' }, t('network-approval')));
+  if (several()) tags.push(el('span', { class: 'tag' }, serverName(status.servers.find((server) => server.server === network.server) ?? {})));
   const online = network.members.filter((member) => member.link !== 'offline').length;
   const stop = (run) => (event) => { event.stopPropagation(); run(); };
   const id = `${network.server}/${network.name}`;
@@ -836,16 +837,32 @@ function networkCard(network) {
     }, icon('users'), el('span', { class: 'badge' }, network.requests)),
     manager && el('button', { class: 'icon', title: t('gui-invites'), onclick: stop(() => invitesDialog(network)) }, icon('link')),
     el('button', { class: 'icon', title: t('gui-network-settings'), onclick: stop(() => networkMenu(network)) }, icon('more')));
-  const rows = network.members.length
-    ? network.members.map((member) => entering(el('div', { class: 'row' },
-      avatar(member),
-      el('div', { class: 'grow' },
-        el('div', member.dns ? { class: 'dns-name', title: member.dns, onclick: () => copy(member.dns) } : {}, member.nickname),
-        el('div', { class: 'muted' }, linkText(member))),
-      el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(member.address) }, member.address),
-      manager && el('button', { class: 'icon', onclick: () => memberDialog(network, member) }, icon('more'))),
-    `member:${id}:${member.address}`))
-    : el('div', { class: 'row empty' }, t('network-empty'));
+  const server = status.servers.find((candidate) => candidate.server === network.server);
+  const toServer = serverLatency(server);
+  const ping = (member) => {
+    if (member.link === 'direct') return signal(member.latency_ms ?? null);
+    if (member.link === 'relay') return signal(toServer == null ? null : toServer * 2, true);
+    return signal(null);
+  };
+  const address = (value) => el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(value) }, value);
+  const me = { nickname: status.nickname, link: server?.connection === 'connected' ? 'direct' : 'offline' };
+  const self = el('div', { class: 'row self' },
+    avatar(me),
+    el('div', { class: 'grow' },
+      el('div', {}, status.nickname, ' ', el('span', { class: 'tag' }, t('gui-you'))),
+      el('div', { class: 'muted' }, several() ? serverName(server ?? {}) : t(`state-${server?.connection ?? 'disconnected'}`))),
+    server?.address && address(server.address),
+    signal(toServer),
+    manager && el('span', { class: 'icon-gap' }));
+  const rows = [self, network.members.map((member) => entering(el('div', { class: 'row' },
+    avatar(member),
+    el('div', { class: 'grow' },
+      el('div', member.dns ? { class: 'dns-name', title: member.dns, onclick: () => copy(member.dns) } : {}, member.nickname),
+      el('div', { class: 'muted' }, linkText(member))),
+    address(member.address),
+    ping(member),
+    manager && el('button', { class: 'icon', onclick: () => memberDialog(network, member) }, icon('more'))),
+  `member:${id}:${member.address}`))];
   card.append(head, el('div', { class: 'members' }, el('div', {}, rows)));
   return entering(card, `network:${id}`);
 }
@@ -882,28 +899,18 @@ function content() {
   if (busy) return [notice('gui-busy-title', busy, null, true)];
   if (problem && Date.now() - startedAt > STARTUP_GRACE_MS) return [problemCard()];
   if (!status) return [notice('gui-starting', null, null, true)];
-  const servers = serverList(status);
-  if (!servers.length) return [welcome()];
+  if (!serverList(status).length) return [welcome()];
   const banner = update && el('div', { class: 'card update', 'data-key': 'update' },
     el('span', { class: 'grow' }, t('gui-update', { version: update.tag.replace(/^v/, '') })),
     el('button', { class: 'small primary', onclick: () => invoke('open_release', { url: update.url }).catch((e) => toast(String(e), true)) },
       t('gui-download')));
-  const serversHead = el('div', { class: 'section-head', 'data-key': 'servers-head' },
-    el('span', { class: 'grow' }, t('gui-servers')),
-    el('button', { class: 'small', onclick: addServerDialog }, icon('plus'), t('gui-add-server')));
   const toolbar = el('div', { class: 'toolbar', 'data-key': 'toolbar' },
     el('button', { onclick: createDialog }, icon('plus'), t('gui-create-network')),
     el('button', { class: 'primary', onclick: joinDialog }, icon('join'), t('gui-join-network')));
-  const several = status.servers.length > 1;
-  const networks = status.servers.map((server) => [
-    several && server.networks.length > 0 && el('div', { class: 'server-head', 'data-key': `head:${server.server}` },
-      el('span', { class: `dot ${server.connection}` }), el('span', { class: 'grow' }, serverName(server))),
-    server.networks.map((network) => networkCard({ ...network, server: server.server })),
-  ]);
+  const networks = status.servers.map((server) => server.networks.map((network) => networkCard({ ...network, server: server.server })));
   const empty = status.servers.every((server) => !server.networks.length)
     && el('div', { class: 'card pad empty-state', 'data-key': 'empty' }, el('p', {}, t(overall(status) === 'connected' ? 'gui-no-networks' : 'gui-waiting-server')));
-  const networksHead = el('div', { class: 'section-head', 'data-key': 'networks-head' }, el('span', { class: 'grow' }, t('gui-networks')));
-  return [banner, serversHead, servers.map(serverCard), networksHead, toolbar, networks, empty];
+  return [banner, toolbar, networks, empty];
 }
 
 function render() {
