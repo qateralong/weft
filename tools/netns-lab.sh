@@ -42,10 +42,18 @@ listen = "10.99.0.1:7443"
 data_dir = "$WORK/loom"
 CONF
 LINK=$("$BIN/loom" --config "$WORK/loom.toml" link --host 10.99.0.1)
+wait_port() {
+    for _ in $(seq 100); do
+        (exec 3<> "/dev/tcp/$1/$2") 2> /dev/null && return
+        sleep 0.1
+    done
+    return 1
+}
 start_loom() {
     RUST_LOG=${RUST_LOG:-info} "$BIN/loom" --config "$WORK/loom.toml" >> "$WORK/loom.log" 2>&1 &
     loom_pid=$!
     pids+=("$loom_pid")
+    wait_port 10.99.0.1 7443
 }
 start_loom
 
@@ -160,7 +168,7 @@ CONF
 LINK2=$("$BIN/loom" --config "$WORK/loom2.toml" link --host 10.99.0.1)
 RUST_LOG=${RUST_LOG:-info} "$BIN/loom" --config "$WORK/loom2.toml" > "$WORK/loom2.log" 2>&1 &
 pids+=($!)
-sleep 1
+wait_port 10.99.0.1 7444
 weft a up "$LINK2"
 weft b up "$LINK2"
 weft a create games --password secret && exit 1

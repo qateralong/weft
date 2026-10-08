@@ -162,7 +162,7 @@ mod tests {
         assert_eq!(hosted.local_link().host, Host::Ipv4(Ipv4Addr::LOCALHOST));
         let (link, reach) = hosted.share(Some("vpn.example.com"));
         assert_eq!(reach, Reach::Public);
-        assert_eq!(link.unwrap().to_string(), format!("weft://vpn.example.com:{}#k={}", hosted.port, hosted.key));
+        assert_eq!(link.unwrap(), loom::server_link("vpn.example.com", hosted.port, &hosted.key).unwrap());
         let key = hosted.key;
         drop(hosted);
         let again = Hosted::start(&dir, 0).await;

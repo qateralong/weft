@@ -115,6 +115,10 @@ CONF
 LINK=$("$BIN/loom" --config "$WORK/loom.toml" link --host 10.99.0.1)
 RUST_LOG=${RUST_LOG:-info} "$BIN/loom" --config "$WORK/loom.toml" > "$WORK/loom.log" 2>&1 &
 pids+=($!)
+for _ in $(seq 100); do
+    (exec 3<> /dev/tcp/10.99.0.1/7443) 2> /dev/null && break
+    sleep 0.1
+done
 
 for n in a b; do
     RUST_LOG=${RUST_LOG:-info} nsenter --net="/run/netns/$n" \
