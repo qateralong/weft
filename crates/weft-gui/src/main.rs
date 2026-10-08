@@ -22,17 +22,43 @@ const RELEASES: &str = "https://github.com/qateralong/weft/releases/";
 #[derive(Serialize)]
 struct Catalog {
     language: &'static str,
+    rtl: bool,
+    languages: Vec<(&'static str, &'static str)>,
     version: &'static str,
     messages: BTreeMap<String, String>,
 }
 
 #[tauri::command]
 fn catalog(l: State<'_, Localizer>) -> Catalog {
-    let language = match l.language() {
-        Language::English => "en",
-        Language::Russian => "ru",
-    };
-    Catalog { language, version: env!("CARGO_PKG_VERSION"), messages: l.catalog() }
+    let language = l.language();
+    Catalog {
+        language: language.code(),
+        rtl: language.is_rtl(),
+        languages: Language::ALL.into_iter().map(|language| (language.code(), language.name())).collect(),
+        version: env!("CARGO_PKG_VERSION"),
+        messages: l.catalog(),
+    }
+}
+
+/// The saved language, or the system one.
+fn chosen_language(settings: &Settings) -> Language {
+    settings.language.as_deref().and_then(Language::from_code).unwrap_or_else(Language::from_env)
+}
+
+#[tauri::command]
+fn set_language(
+    app: AppHandle,
+    l: State<'_, Localizer>,
+    store: State<'_, SettingsStore>,
+    language: Option<String>,
+) -> Result<(), String> {
+    let settings = Settings { language, ..store.get() };
+    l.set_language(chosen_language(&settings));
+    store.set(settings)?;
+    if let Some(tray) = app.tray_by_id("main") {
+        tray.set_menu(Some(tray_menu(&app).map_err(|error| error.to_string())?)).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -180,9 +206,9 @@ fn toggle_window(app: &AppHandle) {
     }
 }
 
-fn tray(app: &AppHandle) -> tauri::Result<()> {
+fn tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let l = app.state::<Localizer>();
-    let menu = Menu::with_items(
+    Menu::with_items(
         app,
         &[
             &MenuItem::with_id(app, "show", l.tr("gui-tray-open"), true, None::<&str>)?,
@@ -192,7 +218,11 @@ fn tray(app: &AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", l.tr("gui-tray-quit"), true, None::<&str>)?,
         ],
-    )?;
+    )
+}
+
+fn tray(app: &AppHandle) -> tauri::Result<()> {
+    let menu = tray_menu(app)?;
     TrayIconBuilder::with_id("main")
         .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
         .tooltip("Weft")
@@ -225,7 +255,6 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show_window(app)))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(Localizer::from_env())
         .invoke_handler(tauri::generate_handler![
             catalog,
             request,
@@ -233,13 +262,16 @@ fn main() {
             save_report,
             settings,
             set_settings,
+            set_language,
             open_release,
             daemon_state,
             repair,
             deploy_server
         ])
         .setup(move |app| {
-            app.manage(SettingsStore::load(app.handle()));
+            let store = SettingsStore::load(app.handle());
+            app.manage(Localizer::new(chosen_language(&store.get())));
+            app.manage(store);
             tray(app.handle())?;
             tauri::async_runtime::spawn(watch::run(app.handle().clone()));
             if !hidden {

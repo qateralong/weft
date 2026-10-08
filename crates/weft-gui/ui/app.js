@@ -11,14 +11,14 @@ const RELEASES_API = 'https://api.github.com/repos/qateralong/weft/releases/late
 const UPDATE_EVERY_MS = 6 * 3600 * 1000;
 
 let messages = {};
+let languages = [];
 let appVersion = '0.0.0';
-let settings = { notifications: true, updates: true };
+let settings = { notifications: true, updates: true, language: null };
 let update = null;
 let status = null;
 let problem = null;
 let startedAt = Date.now();
 let pollTimer = null;
-let busy = null;
 
 const ICONS = {
   power: '<path d="M12 3v9"/><path d="M6.4 6.6a8 8 0 1 0 11.2 0"/>',
@@ -28,14 +28,14 @@ const ICONS = {
   plus: '<path d="M12 5v14M5 12h14"/>',
   join: '<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/>',
   chevron: '<path d="M6 9l6 6 6-6"/>',
+  next: '<path d="M9 6l6 6-6 6"/>',
+  globe: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20z"/>',
+  cloud: '<path d="M18 10h-1.3A7 7 0 1 0 9 19h9a5 5 0 0 0 0-9z"/>',
+  monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
   link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
   pulse: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
   users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/>',
-  globe: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20z"/>',
-  cloud: '<path d="M18 10h-1.3A7 7 0 1 0 9 19h9a5 5 0 0 0 0-9z"/>',
-  monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
-  check: '<path d="M20 6 9 17l-5-5"/>',
 };
 const AVATAR_COLORS = ['#d9734e', '#c9a03a', '#5f9e57', '#3e9a91', '#3f7fb8', '#7867c4', '#b95f9d', '#8b7258'];
 const MODES = {
@@ -207,13 +207,6 @@ function serverList(current) {
   return servers;
 }
 
-/** Modes that cannot be added twice. */
-function taken(current) {
-  const kinds = new Set(serverList(current).map(kindOf));
-  kinds.delete('vps');
-  return kinds;
-}
-
 const several = () => serverList(status).length > 1;
 
 function serverName(server) {
@@ -222,24 +215,95 @@ function serverName(server) {
   return server.host;
 }
 
-function serverPicker() {
-  const servers = status?.servers ?? [];
-  if (servers.length < 2) return [null, () => null];
-  const preferred = servers.find((server) => server.connection === 'connected') ?? servers[0];
-  const select = el('select', {}, servers.map((server) => el('option', { value: server.server, selected: server === preferred }, serverName(server))));
-  return [el('label', {}, el('span', {}, t('gui-server')), select), () => select.value];
+/** Waits until the server `pick` finds is connected and returns it. */
+async function connected(pick, timeoutMs = 20000) {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    await poll();
+    const server = serverList(status).find(pick);
+    if (server?.connection === 'connected') return server;
+    if (Date.now() > until) throw new Error(t('gui-server-unreachable'));
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  }
 }
 
-/** Adds a server next to the ones already in use. */
-async function addMode(mode, link = null) {
-  if (mode === 'local') await request('host', { enabled: true, port: null, address: null });
-  else await request('up', { link, nickname: null });
-  await poll();
+/**
+ * The server choice for creating or joining a network: servers in use, plus the kinds not added
+ * yet. Returns [nodes, resolve], where resolve sets the chosen server up and returns its link.
+ */
+function serverChooser(onlyNew = false) {
+  const servers = status?.servers ?? [];
+  const options = onlyNew ? [] : servers.map((server) => [server.server, serverName(server)]);
+  if (!servers.some((server) => server.public) && status?.public_link) options.push(['new:online', t('gui-mode-online')]);
+  if (!status?.host) options.push(['new:local', t('gui-mode-local')]);
+  options.push(['new:vps', t('gui-mode-vps')]);
+  const preferred = servers.find((server) => server.connection === 'connected')?.server ?? options[0][0];
+  const select = el('select', {}, options.map(([value, label]) => el('option', { value, selected: value === preferred }, label)));
+  const hint = el('p', { class: 'muted hint' });
+  const [hostLabel, host] = field('gui-vps-host', { placeholder: '203.0.113.10', autocomplete: 'off' });
+  const [userLabel, user] = field('gui-vps-user', { value: 'root', autocomplete: 'off' });
+  const [passLabel, password] = field('gui-vps-password', { type: 'password' });
+  const [portLabel, port] = field('gui-vps-port', { type: 'number', min: 1, max: 65535, value: 22 });
+  const vps = el('div', { class: 'vps', hidden: true }, hostLabel, userLabel, passLabel, el('details', {}, el('summary', {}, t('gui-advanced')), portLabel));
+  const progress = el('div', { class: 'steps', hidden: true }, DEPLOY_STEPS.map((step) => el('div', { class: 'step', 'data-step': step },
+    el('span', { class: 'step-mark' }), t(`gui-deploy-${step}`))));
+  const update = () => {
+    const mode = select.value.startsWith('new:') ? select.value.slice(4) : null;
+    hint.textContent = mode ? t(MODES[mode].hint) : '';
+    hint.hidden = !mode;
+    vps.hidden = mode !== 'vps';
+  };
+  select.onchange = update;
+  update();
+
+  const deploy = async () => {
+    if (!host.value.trim() || !password.value) throw new Error(t('gui-vps-missing'));
+    progress.hidden = false;
+    for (const node of progress.children) node.className = 'step';
+    const unlisten = await listen('deploy-step', (event) => {
+      let reached = false;
+      for (const node of progress.children) {
+        if (node.dataset.step === event.payload) { node.className = 'step active'; reached = true; } else if (!reached) node.className = 'step done';
+      }
+    });
+    try {
+      const link = await invoke('deploy_server', {
+        host: host.value.trim(), port: Number(port.value) || 22, user: user.value.trim() || 'root', password: password.value,
+      });
+      for (const node of progress.children) node.className = 'step done';
+      return link;
+    } catch (error) {
+      for (const node of progress.children) if (node.className === 'step active') node.className = 'step failed';
+      throw error;
+    } finally {
+      unlisten();
+    }
+  };
+
+  const resolve = async () => {
+    switch (select.value) {
+      case 'new:online':
+        await request('up', { link: status.public_link, nickname: null });
+        return (await connected((server) => server.public)).server;
+      case 'new:local':
+        await request('host', { enabled: true, port: null, address: null });
+        return (await connected((server) => server.hosted)).server;
+      case 'new:vps': {
+        const link = await deploy();
+        await request('up', { link, nickname: null });
+        return (await connected((server) => server.server === link)).server;
+      }
+      default:
+        return select.value;
+    }
+  };
+  return [[el('label', {}, el('span', {}, t(onlyNew ? 'gui-server-kind' : 'gui-server')), select), hint, vps, progress], resolve];
 }
 
 /* Dialogs */
 
-function openDialog(title, build, actions = []) {
+/** Opens the dialog; with `back`, the leave button and Escape go to that dialog instead of closing. */
+function openDialog(title, build, actions = [], back = null) {
   const dialog = document.getElementById('dialog');
   const body = el('div', { class: 'body' });
   const error = el('div', { class: 'error', hidden: true });
@@ -267,9 +331,11 @@ function openDialog(title, build, actions = []) {
       }
     },
   }, label));
+  const leave = back ?? close;
+  const leaveLabel = back ? 'gui-back' : actions.length ? 'gui-cancel' : 'gui-close';
   dialog.replaceChildren(el('h3', {}, title), body,
-    el('div', { class: 'actions' }, el('button', { onclick: close }, t(actions.length ? 'gui-cancel' : 'gui-close')), buttons));
-  dialog.oncancel = (event) => { event.preventDefault(); close(); };
+    el('div', { class: 'actions' }, el('button', { onclick: () => leave() }, t(leaveLabel)), buttons));
+  dialog.oncancel = (event) => { event.preventDefault(); leave(); };
   dialog.onkeydown = (event) => {
     if (event.key === 'Enter' && event.target.tagName === 'INPUT' && buttons.length) buttons[buttons.length - 1].click();
   };
@@ -301,108 +367,6 @@ function dangerButton(label, run) {
     await run();
   };
   return button;
-}
-
-function modeCards(onPick, used = new Set()) {
-  return el('div', { class: 'modes' }, Object.entries(MODES).map(([mode, info]) => el('button', {
-    class: 'mode',
-    disabled: used.has(mode),
-    onclick: () => onPick(mode),
-  },
-  icon(info.icon),
-  el('span', { class: 'mode-text' },
-    el('b', {}, t(info.title),
-      used.has(mode) ? el('span', { class: 'tag' }, t('gui-added'))
-        : mode === 'online' && el('span', { class: 'tag role' }, t('gui-recommended'))),
-    el('span', { class: 'muted' }, t(info.hint))))));
-}
-
-function chooseMode(mode) {
-  if (mode === 'vps') {
-    closeDialog();
-    setTimeout(vpsDialog, 170);
-    return;
-  }
-  busy = t(mode === 'online' ? 'gui-busy-online' : 'gui-busy-local');
-  closeDialog();
-  render();
-  addMode(mode, mode === 'online' ? status?.public_link : null)
-    .then(() => toast(t(mode === 'online' ? 'gui-done-online' : 'gui-host-started')))
-    .catch((error) => toast(String(error), true))
-    .finally(() => { busy = null; render(); });
-}
-
-function addServerDialog() {
-  openDialog(t('gui-add-server'), () => [
-    el('p', { class: 'muted' }, t('gui-add-server-hint')),
-    modeCards(chooseMode, taken(status)),
-  ]);
-}
-
-function serverMenu(server) {
-  const local = server.hosted;
-  openDialog(serverName(server), ({ close, fail }) => {
-    const item = (label, run) => el('button', { onclick: () => { close(); setTimeout(run, 170); } }, label);
-    const link = local ? status.host?.link : server.server;
-    return el('div', { class: 'menu' },
-      local && item(t('gui-host-advanced'), hostDialog),
-      link && item(t('gui-copy-server-link'), () => copy(link)),
-      dangerButton(t(local ? 'gui-host-stop' : 'gui-server-remove'), async () => {
-        try {
-          await request(local ? 'host' : 'remove', local ? { enabled: false, port: null, address: null } : {}, local ? null : server.server);
-          toast(t('done-remove', { server: serverName(server) }));
-          close();
-          await poll();
-        } catch (e) { fail(String(e)); }
-      }));
-  });
-}
-
-function vpsDialog() {
-  const [hostLabel, host] = field('gui-vps-host', { placeholder: '203.0.113.10', autocomplete: 'off' });
-  const [userLabel, user] = field('gui-vps-user', { value: 'root', autocomplete: 'off' });
-  const [passLabel, password] = field('gui-vps-password', { type: 'password' });
-  const [portLabel, port] = field('gui-vps-port', { type: 'number', min: 1, max: 65535, value: 22 });
-  const advanced = el('details', {}, el('summary', {}, t('gui-advanced')), portLabel);
-  const progress = el('div', { class: 'steps', hidden: true }, DEPLOY_STEPS.map((step) => el('div', { class: 'step', 'data-step': step },
-    el('span', { class: 'step-mark' }), t(`gui-deploy-${step}`))));
-  let unlisten = null;
-  openDialog(t('gui-mode-vps'), () => [
-    el('p', { class: 'muted' }, t('gui-vps-intro')), hostLabel, userLabel, passLabel, advanced, progress,
-  ], [{
-    label: t('gui-vps-install'),
-    primary: true,
-    run: async ({ fail }) => {
-      if (!host.value.trim() || !password.value) return fail(t('gui-vps-missing')) ?? false;
-      progress.hidden = false;
-      for (const node of progress.children) node.className = 'step';
-      unlisten?.();
-      unlisten = await listen('deploy-step', (event) => {
-        let reached = false;
-        for (const node of progress.children) {
-          if (node.dataset.step === event.payload) { node.className = 'step active'; reached = true; } else if (!reached) node.className = 'step done';
-        }
-      });
-      try {
-        const link = await invoke('deploy_server', {
-          host: host.value.trim(), port: Number(port.value) || 22, user: user.value.trim() || 'root', password: password.value,
-        });
-        for (const node of progress.children) node.className = 'step done';
-        busy = t('gui-busy-vps');
-        render();
-        await addMode('vps', link);
-        toast(t('gui-done-vps'));
-        return true;
-      } catch (error) {
-        for (const node of progress.children) if (node.className === 'step active') node.className = 'step failed';
-        return fail(String(error)) ?? false;
-      } finally {
-        unlisten?.();
-        busy = null;
-        render();
-      }
-    },
-  }]);
 }
 
 function diagnosticsDialog() {
@@ -476,13 +440,33 @@ function settingToggle(labelId, key) {
   return el('label', { class: 'check' }, box, el('span', {}, t(labelId)));
 }
 
+function languagePicker() {
+  const select = el('select', {
+    onchange: async () => {
+      const language = select.value || null;
+      try {
+        await invoke('set_language', { language });
+        settings = { ...settings, language };
+        await loadCatalog();
+        render();
+        settingsDialog();
+      } catch (e) { toast(String(e), true); }
+    },
+  },
+  el('option', { value: '', selected: !settings.language }, t('gui-language-system')),
+  languages.map(([code, name]) => el('option', { value: code, selected: settings.language === code }, name)));
+  return el('label', {}, el('span', {}, t('gui-language')), select);
+}
+
 function settingsDialog() {
   const [nickLabel, nickname] = field('gui-nickname', { value: status?.nickname ?? '' });
   openDialog(t('gui-settings'), () => [
     nickLabel,
-    el('div', { class: 'section' }, t('gui-servers')),
-    el('div', { class: 'list servers' }, serverList(status).map(serverRow)),
-    el('button', { class: 'add-server', onclick: addServerDialog }, icon('plus'), t('gui-add-server')),
+    languagePicker(),
+    el('button', { class: 'menu-item', onclick: serversDialog },
+      el('span', { class: 'grow' }, t('gui-servers')),
+      el('span', { class: 'muted' }, String(serverList(status).length)),
+      icon('next')),
     el('div', { class: 'section' }, t('gui-app')),
     settingToggle('gui-notifications', 'notifications'),
     settingToggle('gui-check-updates', 'updates'),
@@ -494,6 +478,25 @@ function settingsDialog() {
       await poll();
     },
   }]);
+}
+
+function serverMenu(server) {
+  const local = server.hosted;
+  openDialog(serverName(server), ({ fail }) => {
+    const item = (label, run) => el('button', { onclick: run }, label);
+    const link = local ? status.host?.link : server.server;
+    return el('div', { class: 'menu' },
+      local && item(t('gui-host-advanced'), hostDialog),
+      link && item(t('gui-copy-server-link'), () => { copy(link); serversDialog(); }),
+      dangerButton(t(local ? 'gui-host-stop' : 'gui-server-remove'), async () => {
+        try {
+          await request(local ? 'host' : 'remove', local ? { enabled: false, port: null, address: null } : {}, local ? null : server.server);
+          toast(t('done-remove', { server: serverName(server) }));
+          await poll();
+          serversDialog();
+        } catch (e) { fail(String(e)); }
+      }));
+  }, [], serversDialog);
 }
 
 function hostDialog() {
@@ -509,20 +512,62 @@ function hostDialog() {
       const value = Number(port.value);
       await request('host', { enabled: true, port: value > 0 ? value : null, address: address.value.trim() });
       await poll();
+      serversDialog();
+      return false;
     },
-  }]);
+  }], serversDialog);
+}
+
+function serverRow(server) {
+  const mode = kindOf(server);
+  const host = server.hosted ? status.host : null;
+  const reach = host && t({ public: 'host-reach-public', local: 'host-reach-local', behind: 'host-reach-behind' }[host.reach]);
+  return el('div', { class: 'server-row' },
+    el('div', { class: 'server-line' },
+      icon(MODES[mode].icon),
+      el('div', { class: 'grow' },
+        el('b', {}, t(MODES[mode].title)),
+        el('div', { class: 'muted sub' }, el('span', { class: `dot ${server.connection}` }), t(`state-${server.connection}`)),
+        mode !== 'local' && el('div', { class: 'muted info mono' }, server.host)),
+      signal(serverLatency(server)),
+      el('button', { class: 'icon', title: t('gui-settings'), onclick: () => serverMenu(server) }, icon('more'))),
+    host && el('p', { class: 'muted note' }, reach, !(host.reach === 'public' && host.mapped) && `. ${t(host.mapped ? 'host-mapped' : 'host-not-mapped', { port: host.port })}`));
+}
+
+function serversDialog() {
+  openDialog(t('gui-servers'), () => {
+    const servers = serverList(status);
+    return [
+      el('div', { class: 'list servers' }, servers.length ? servers.map(serverRow) : el('div', { class: 'row empty' }, t('gui-no-servers'))),
+      el('button', { class: 'add-server', onclick: addServerDialog }, icon('plus'), t('gui-add-server')),
+    ];
+  }, [], settingsDialog);
+}
+
+function addServerDialog() {
+  const [nodes, resolve] = serverChooser(true);
+  openDialog(t('gui-add-server'), () => nodes, [{
+    label: t('gui-add'), primary: true,
+    run: async () => {
+      await resolve();
+      toast(t('gui-server-added'));
+      serversDialog();
+      return false;
+    },
+  }], serversDialog);
 }
 
 function createDialog() {
   const [nameLabel, name] = field('gui-network-name', { maxLength: 64 });
   const [passLabel, password] = field('gui-password', { type: 'password' });
   const [repeatLabel, repeat] = field('gui-password-repeat', { type: 'password' });
-  const [serverLabel, server] = serverPicker();
-  openDialog(t('gui-create-network'), () => [serverLabel, nameLabel, passLabel, repeatLabel], [{
+  const [server, resolve] = serverChooser();
+  openDialog(t('gui-create-network'), () => [nameLabel, passLabel, repeatLabel, server], [{
     label: t('gui-create'), primary: true,
     run: async ({ fail }) => {
+      if (!name.value.trim()) return fail(t('gui-name-missing')) ?? false;
       if (password.value !== repeat.value) return fail(t('password-mismatch')) ?? false;
-      await request('create', { name: name.value.trim(), password: password.value }, server());
+      await request('create', { name: name.value.trim(), password: password.value }, await resolve());
       toast(t('done-create', { name: name.value.trim() }));
       await poll();
     },
@@ -532,19 +577,16 @@ function createDialog() {
 function joinDialog() {
   const [targetLabel, target] = field('gui-name-or-link', { placeholder: 'weft://…' });
   const [passLabel, password] = field('gui-password', { type: 'password' });
-  const [serverLabel, server] = serverPicker();
-  target.oninput = () => {
-    const link = target.value.trim().toLowerCase().startsWith('weft://');
-    passLabel.hidden = link;
-    if (serverLabel) serverLabel.hidden = link;
-  };
-  openDialog(t('gui-join-network'), () => [targetLabel, serverLabel, passLabel], [{
+  const [server, resolve] = serverChooser();
+  const byName = el('div', {}, passLabel, server);
+  target.oninput = () => { byName.hidden = target.value.trim().toLowerCase().startsWith('weft://'); };
+  openDialog(t('gui-join-network'), () => [targetLabel, byName], [{
     label: t('gui-join'), primary: true,
     run: async () => {
       const value = target.value.trim();
-      const response = passLabel.hidden
+      const response = byName.hidden
         ? await request('redeem', { link: value })
-        : await request('join', { name: value, password: password.value }, server());
+        : await request('join', { name: value, password: password.value }, await resolve());
       if (response.result === 'joined') toast(t('done-join', { name: response.data }));
       else if (response.result === 'pending') toast(t('done-pending', { name: response.data }));
       else toast(t('done-join', { name: value }));
@@ -781,7 +823,9 @@ function welcome() {
     el('h2', {}, t('gui-welcome')),
     el('p', {}, t('gui-welcome-hint')),
     nickLabel,
-    modeCards(chooseMode));
+    el('div', { class: 'toolbar' },
+      el('button', { onclick: createDialog }, icon('plus'), t('gui-create-network')),
+      el('button', { class: 'primary', onclick: joinDialog }, icon('join'), t('gui-join-network'))));
 }
 
 /** Signal bars and the round trip; `estimate` marks a guess. */
@@ -794,22 +838,6 @@ function signal(ms, estimate = false) {
 }
 
 const serverLatency = (server) => (server?.connection === 'connected' ? server.latency_ms ?? null : null);
-
-function serverRow(server) {
-  const mode = kindOf(server);
-  const host = server.hosted ? status.host : null;
-  const reach = host && t({ public: 'host-reach-public', local: 'host-reach-local', behind: 'host-reach-behind' }[host.reach]);
-  return el('div', { class: 'server-row' },
-    el('div', { class: 'server-line' },
-      icon(MODES[mode].icon),
-      el('div', { class: 'grow' },
-        el('b', {}, t(MODES[mode].title)),
-        el('div', { class: 'muted sub' }, el('span', { class: `dot ${server.connection}` }), t(`state-${server.connection}`)),
-        mode !== 'local' && el('div', { class: 'muted info mono' }, server.host)),
-      signal(serverLatency(server)),
-      el('button', { class: 'icon', title: t('gui-settings'), onclick: () => serverMenu(server) }, icon('more'))),
-    host && el('p', { class: 'muted note' }, reach, !(host.reach === 'public' && host.mapped) && `. ${t(host.mapped ? 'host-mapped' : 'host-not-mapped', { port: host.port })}`));
-}
 
 function toggleNetwork(card, id) {
   if (collapsed.has(id)) collapsed.delete(id); else collapsed.add(id);
@@ -896,7 +924,6 @@ function problemCard() {
 }
 
 function content() {
-  if (busy) return [notice('gui-busy-title', busy, null, true)];
   if (problem && Date.now() - startedAt > STARTUP_GRACE_MS) return [problemCard()];
   if (!status) return [notice('gui-starting', null, null, true)];
   if (!serverList(status).length) return [welcome()];
@@ -940,12 +967,18 @@ async function poll() {
   pollTimer = setTimeout(poll, POLL_MS);
 }
 
-async function start() {
+async function loadCatalog() {
   const catalog = await invoke('catalog');
   messages = catalog.messages;
+  languages = catalog.languages;
   appVersion = catalog.version;
-  try { settings = await invoke('settings'); } catch { /* defaults */ }
   document.documentElement.lang = catalog.language;
+  document.documentElement.dir = catalog.rtl ? 'rtl' : 'ltr';
+}
+
+async function start() {
+  await loadCatalog();
+  try { settings = await invoke('settings'); } catch { /* defaults */ }
   startedAt = Date.now();
   render();
   await poll();

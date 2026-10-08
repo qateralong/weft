@@ -12,16 +12,18 @@ use weft_ipc::{Connection, NetworkStatus, PeerLink, Request, Response, Status};
 
 const POLL: Duration = Duration::from_secs(2);
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(default)]
 pub struct Settings {
     pub notifications: bool,
     pub updates: bool,
+    /// A language code; the system language when unset.
+    pub language: Option<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { notifications: true, updates: true }
+        Self { notifications: true, updates: true, language: None }
     }
 }
 
@@ -42,16 +44,16 @@ impl SettingsStore {
     }
 
     pub fn get(&self) -> Settings {
-        *self.current.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.current.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     pub fn set(&self, settings: Settings) -> Result<(), String> {
+        let text = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
         *self.current.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = settings;
         let Some(path) = &self.path else { return Ok(()) };
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
         }
-        let text = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
         std::fs::write(path, text).map_err(|error| error.to_string())
     }
 }

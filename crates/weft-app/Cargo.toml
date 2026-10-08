@@ -1,0 +1,20 @@
+[package]
+name = "weft-app"
+description = "Weft desktop app without a web engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+slint.workspace = true
+tokio.workspace = true
+weft-i18n.workspace = true
+weft-ipc.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true

@@ -1,19 +1,54 @@
 use fluent_bundle::concurrent::FluentBundle;
 use std::collections::BTreeMap;
+use std::sync::RwLock;
 
 use fluent_bundle::{FluentArgs, FluentResource};
 use unic_langid::{LanguageIdentifier, langid};
 
 const EN: &str = include_str!("../locales/en.ftl");
 const RU: &str = include_str!("../locales/ru.ftl");
+const ES: &str = include_str!("../locales/es.ftl");
+const AR: &str = include_str!("../locales/ar.ftl");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Language {
     English,
     Russian,
+    Spanish,
+    Arabic,
 }
 
 impl Language {
+    pub const ALL: [Language; 4] = [Language::English, Language::Russian, Language::Spanish, Language::Arabic];
+
+    /// The ISO 639-1 code.
+    pub fn code(self) -> &'static str {
+        match self {
+            Language::English => "en",
+            Language::Russian => "ru",
+            Language::Spanish => "es",
+            Language::Arabic => "ar",
+        }
+    }
+
+    /// The language's name in itself.
+    pub fn name(self) -> &'static str {
+        match self {
+            Language::English => "English",
+            Language::Russian => "\u{0420}\u{0443}\u{0441}\u{0441}\u{043a}\u{0438}\u{0439}",
+            Language::Spanish => "Espa\u{f1}ol",
+            Language::Arabic => "\u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064a}\u{0629}",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|language| language.code() == code)
+    }
+
+    pub fn is_rtl(self) -> bool {
+        self == Language::Arabic
+    }
+
     pub fn from_env() -> Self {
         ["LC_ALL", "LC_MESSAGES", "LANG"]
             .into_iter()
@@ -24,23 +59,35 @@ impl Language {
     }
 
     pub fn from_locale(locale: &str) -> Self {
-        if locale.to_ascii_lowercase().starts_with("ru") { Language::Russian } else { Language::English }
+        let locale = locale.to_ascii_lowercase();
+        Self::ALL.into_iter().find(|language| locale.starts_with(language.code())).unwrap_or(Language::English)
+    }
+
+    fn source(self) -> (&'static str, LanguageIdentifier) {
+        match self {
+            Language::English => (EN, langid!("en")),
+            Language::Russian => (RU, langid!("ru")),
+            Language::Spanish => (ES, langid!("es")),
+            Language::Arabic => (AR, langid!("ar")),
+        }
     }
 }
 
+/// Translates messages; the language can be switched while it is shared.
 pub struct Localizer {
-    language: Language,
-    bundle: FluentBundle<FluentResource>,
+    current: RwLock<(Language, FluentBundle<FluentResource>)>,
     fallback: FluentBundle<FluentResource>,
 }
 
 impl Localizer {
     pub fn new(language: Language) -> Self {
-        let (source, id) = match language {
-            Language::English => (EN, langid!("en")),
-            Language::Russian => (RU, langid!("ru")),
-        };
-        Self { language, bundle: bundle(source, id), fallback: bundle(EN, langid!("en")) }
+        let (source, id) = language.source();
+        Self { current: RwLock::new((language, bundle(source, id))), fallback: bundle(EN, langid!("en")) }
+    }
+
+    pub fn set_language(&self, language: Language) {
+        let (source, id) = language.source();
+        *self.current.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = (language, bundle(source, id));
     }
 
     pub fn from_env() -> Self {
@@ -48,7 +95,7 @@ impl Localizer {
     }
 
     pub fn language(&self) -> Language {
-        self.language
+        self.current.read().unwrap_or_else(|poisoned| poisoned.into_inner()).0
     }
 
     /// Every message, with variables left as `{$name}`.
@@ -69,7 +116,8 @@ impl Localizer {
     }
 
     fn format(&self, id: &str, args: Option<&FluentArgs<'_>>) -> String {
-        for bundle in [&self.bundle, &self.fallback] {
+        let current = self.current.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for bundle in [&current.1, &self.fallback] {
             if let Some(pattern) = bundle.get_message(id).and_then(|message| message.value()) {
                 let mut errors = Vec::new();
                 return bundle.format_pattern(pattern, args, &mut errors).into_owned();
@@ -103,7 +151,9 @@ mod tests {
 
     #[test]
     fn locales_have_the_same_messages() {
-        assert_eq!(ids(EN), ids(RU));
+        for source in [RU, ES, AR] {
+            assert_eq!(ids(EN), ids(source));
+        }
         assert!(ids(EN).len() > 40);
     }
 
@@ -125,5 +175,17 @@ mod tests {
         assert_eq!(Language::from_locale("en_US.UTF-8"), Language::English);
         assert_eq!(Language::from_locale("C"), Language::English);
         assert_eq!(Language::from_locale("ru-RU"), Language::Russian);
+        assert_eq!(Language::from_locale("es_MX.UTF-8"), Language::Spanish);
+        assert_eq!(Language::from_locale("ar_EG.UTF-8"), Language::Arabic);
+    }
+
+    #[test]
+    fn switches_language() {
+        let l = Localizer::new(Language::English);
+        l.set_language(Language::Spanish);
+        assert_eq!(l.language(), Language::Spanish);
+        assert_eq!(l.tr("state-connected"), "conectado");
+        assert_eq!(Language::from_code("ar"), Some(Language::Arabic));
+        assert!(Language::Arabic.is_rtl());
     }
 }
