@@ -290,3 +290,7 @@ diag-dns-off = turned off
 diag-transport = Control channel
 diag-transport-tls = TLS, looks like HTTPS
 diag-transport-raw = plain encrypted stream (transport = "raw")
+
+diag-ipv6 = IPv6
+diag-ipv6-yes = available: peers with IPv6 connect directly, without NAT
+diag-ipv6-no = not available

@@ -3,6 +3,7 @@
 #   NAT_A, NAT_B: cone (masquerade) or symmetric (masquerade random); each site sits behind
 #   an extra ISP router, so packets with a low TTL can expire between the two NATs
 #   BLOCK_LOOM_UDP_A=1: router A drops UDP to loom, so A must use the TCP relay
+#   IPV6=1: also route IPv6 without NAT; routers let in only replies, like home routers
 #   EXPECT: direct or relay
 set -Eeuo pipefail
 
@@ -74,12 +75,38 @@ table ip filter {
     chain forward { type filter hook forward priority 0; $drop }
 }
 NFT
+    if [ "${IPV6:-0}" = 1 ]; then
+        for ns in "isp$name" "r$name"; do
+            nsenter --net="/run/netns/$ns" sh -c 'echo 1 > /proc/sys/net/ipv6/conf/all/forwarding'
+        done
+        ip -n "isp$name" -6 addr add "2001:db8::$((n + 1))/64" dev wan nodad
+        ip -n "isp$name" -6 addr add "2001:db8:10$n::1/64" dev cust nodad
+        ip -n "isp$name" -6 route add "2001:db8:$n::/64" via "2001:db8:10$n::2"
+        ip -n "r$name" -6 addr add "2001:db8:10$n::2/64" dev wan nodad
+        ip -n "r$name" -6 route add default via "2001:db8:10$n::1"
+        ip -n "r$name" -6 addr add "2001:db8:$n::1/64" dev lan nodad
+        ip -n "$name" -6 addr add "2001:db8:$n::10/64" dev eth0 nodad
+        ip -n "$name" -6 route add default via "2001:db8:$n::1"
+        ip -6 route add "2001:db8:$n::/48" via "2001:db8::$((n + 1))"
+        nsenter --net="/run/netns/r$name" nft -f - <<NFT
+table ip6 firewall {
+    chain forward { type filter hook forward priority 0; iifname "wan" ct state established,related accept; iifname "wan" drop; }
+}
+NFT
+    fi
 }
 
+if [ "${IPV6:-0}" = 1 ]; then
+    ip -6 addr add 2001:db8::1/64 dev br0 nodad
+fi
 site a 1 "$NAT_A" "${BLOCK_LOOM_UDP_A:-0}"
 site b 2 "$NAT_B" 0
 ip -n ispa route add 172.16.2.0/24 via 10.99.0.3
 ip -n ispb route add 172.16.1.0/24 via 10.99.0.2
+if [ "${IPV6:-0}" = 1 ]; then
+    ip -n ispa -6 route add 2001:db8:2::/48 via 2001:db8::3
+    ip -n ispb -6 route add 2001:db8:1::/48 via 2001:db8::2
+fi
 
 cat > "$WORK/loom.toml" <<CONF
 listen = "10.99.0.1:7443"
@@ -128,8 +155,11 @@ if [ -n "${BLOCK_LOOM_UDP_A:-}" ]; then
 else
     grep -q '^UDP to server: *works' "$WORK/netcheck"
 fi
+if [ "${IPV6:-0}" = 1 ]; then
+    grep -q '^IPv6: *available' "$WORK/netcheck" && grep -q 'bob (.*): direct, \[2001:db8:2::10\]' "$WORK/netcheck"
+fi
 case "$EXPECT" in
-    direct) grep -Eq '^NAT: .*good for direct links' "$WORK/netcheck" && grep -q 'bob (.*): direct' "$WORK/netcheck" ;;
+    direct) grep -q 'bob (.*): direct' "$WORK/netcheck" ;;
     relay) grep -q 'bob (.*): through the server' "$WORK/netcheck" ;;
 esac
 nsenter --net=/run/netns/a ping -q -c 3 -W 2 "$addr_b"

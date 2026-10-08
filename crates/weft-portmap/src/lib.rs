@@ -164,7 +164,37 @@ pub fn local_addresses(exclude_interface: Option<&str>) -> Vec<IpAddr> {
         .into_iter()
         .filter(|interface| interface.is_up() && !interface.is_loopback())
         .filter(|interface| exclude_interface.is_none_or(|name| interface.name != name))
-        .flat_map(|interface| interface.ipv4.iter().map(|net| IpAddr::V4(net.addr())).collect::<Vec<_>>())
+        .flat_map(|interface| {
+            let v4 = interface.ipv4.iter().map(|net| IpAddr::V4(net.addr()));
+            let v6 = interface.ipv6.iter().map(|net| net.addr()).filter(is_global_v6).map(IpAddr::V6);
+            v4.chain(v6).collect::<Vec<_>>()
+        })
         .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
         .collect()
+}
+
+/// Addresses peers on the internet can reach: not link-local, unique local or multicast.
+pub fn is_global_v6(ip: &std::net::Ipv6Addr) -> bool {
+    let first = ip.segments()[0];
+    !ip.is_loopback()
+        && !ip.is_unspecified()
+        && !ip.is_multicast()
+        && first & 0xffc0 != 0xfe80
+        && first & 0xfe00 != 0xfc00
+        && ip.to_ipv4_mapped().is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_ipv6() {
+        let global = |text: &str| is_global_v6(&text.parse().unwrap());
+        assert!(global("2a02:6b8::feed:0ff"));
+        assert!(global("2001:db8::10"));
+        for local in ["fe80::1", "fd00::1", "::1", "::", "ff02::1", "::ffff:192.0.2.1"] {
+            assert!(!global(local), "{local}");
+        }
+    }
 }

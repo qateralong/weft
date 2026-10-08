@@ -81,5 +81,7 @@ jobs:
         run: NAT_A=cone NAT_B=symmetric EXPECT=direct tools/nat-lab.sh || NAT_A=cone NAT_B=symmetric EXPECT=direct tools/nat-lab.sh
       - name: Linux NAT, symmetric to symmetric
         run: NAT_A=symmetric NAT_B=symmetric EXPECT=relay tools/nat-lab.sh
+      - name: Linux NAT, symmetric to symmetric with IPv6 behind stateful firewalls
+        run: IPV6=1 NAT_A=symmetric NAT_B=symmetric EXPECT=direct tools/nat-lab.sh
       - name: Linux NAT, UDP to loom blocked
         run: NAT_A=symmetric NAT_B=symmetric BLOCK_LOOM_UDP_A=1 EXPECT=relay tools/nat-lab.sh

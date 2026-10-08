@@ -17,6 +17,9 @@ pub struct Diagnostics {
     pub observed: Option<SocketAddr>,
     pub local_port: u16,
     pub local_addresses: Vec<IpAddr>,
+    /// Whether peers can reach this device over IPv6, where there is no NAT.
+    #[serde(default)]
+    pub ipv6: bool,
     /// Whether the system resolver sends `.weft` names to the daemon; `None` when names are off.
     #[serde(default)]
     pub dns: Option<bool>,
@@ -121,6 +124,7 @@ pub fn format(diagnostics: &Diagnostics, tr: &Translate<'_>) -> String {
         (tr("diag-public", &[]), d.observed.map_or_else(|| none.clone(), |addr| addr.to_string())),
         (tr("diag-local-port", &[]), d.local_port.to_string()),
         (tr("diag-local-addresses", &[]), if addresses.is_empty() { none.clone() } else { addresses.join(", ") }),
+        (tr("diag-ipv6", &[]), tr(if d.ipv6 { "diag-ipv6-yes" } else { "diag-ipv6-no" }, &[])),
         (tr("diag-mapping", &[]), mapping),
         (tr("diag-nat", &[]), tr(nat, &[])),
         (
@@ -215,6 +219,7 @@ mod tests {
             observed: None,
             local_port: 41000,
             local_addresses: vec![],
+            ipv6: false,
             dns: None,
             port_mapping: None,
             nat: Nat::Unknown,

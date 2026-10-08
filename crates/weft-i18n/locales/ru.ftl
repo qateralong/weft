@@ -290,3 +290,7 @@ diag-dns-off = выключены
 diag-transport = Канал управления
 diag-transport-tls = TLS, выглядит как HTTPS
 diag-transport-raw = простой шифрованный поток (transport = "raw")
+
+diag-ipv6 = IPv6
+diag-ipv6-yes = есть: участники с IPv6 соединяются напрямую, без NAT
+diag-ipv6-no = нет

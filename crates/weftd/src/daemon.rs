@@ -46,6 +46,9 @@ pub struct Daemon {
     mesh: Mesh,
     udp: UdpSocket,
     udp_port: u16,
+    /// IPv6 counterpart of the main socket; peers reach it without NAT.
+    udp6: Option<UdpSocket>,
+    udp6_port: u16,
     extra: HashMap<SocketId, ExtraSocket>,
     extra_tx: mpsc::Sender<(SocketId, SocketAddr, Vec<u8>)>,
     extra_rx: mpsc::Receiver<(SocketId, SocketAddr, Vec<u8>)>,
@@ -91,6 +94,7 @@ enum Wake {
     Command(Option<Command>),
     Control(Option<(u64, ControlEvent)>),
     Udp(std::io::Result<(usize, SocketAddr)>),
+    Udp6(std::io::Result<(usize, SocketAddr)>),
     Extra(Option<(SocketId, SocketAddr, Vec<u8>)>),
     Tun(std::io::Result<usize>),
     Mapped,
@@ -108,7 +112,13 @@ impl Daemon {
         let port = options.port.or(settings.port).unwrap_or(0);
         let udp = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?;
         let udp_port = udp.local_addr()?.port();
-        tracing::info!(port = udp_port, key = %keypair.public(), "weftd started");
+        let udp6 = bind_v6(udp_port).or_else(|_| bind_v6(0));
+        if let Err(error) = &udp6 {
+            tracing::info!(%error, "no ipv6 socket");
+        }
+        let udp6 = udp6.ok();
+        let udp6_port = udp6.as_ref().and_then(|socket| socket.local_addr().ok()).map_or(0, |addr| addr.port());
+        tracing::info!(port = udp_port, port6 = udp6_port, key = %keypair.public(), "weftd started");
         let mut mesh = Mesh::new(
             StaticKeypair::from_secret(keypair.secret()),
             std::time::Instant::now(),
@@ -129,6 +139,8 @@ impl Daemon {
             mesh,
             udp,
             udp_port,
+            udp6,
+            udp6_port,
             extra: HashMap::new(),
             extra_tx,
             extra_rx,
@@ -162,6 +174,7 @@ impl Daemon {
 
     pub async fn run(mut self) {
         let mut udp_buf = vec![0; 65_535];
+        let mut udp6_buf = vec![0; 65_535];
         let mut tun_buf = vec![0; 65_535];
         loop {
             let deadline = self.deadline();
@@ -169,6 +182,7 @@ impl Daemon {
                 command = self.commands.recv() => Wake::Command(command),
                 event = self.control_rx.recv() => Wake::Control(event),
                 received = self.udp.recv_from(&mut udp_buf) => Wake::Udp(received),
+                received = recv_v6(self.udp6.as_ref(), &mut udp6_buf) => Wake::Udp6(received),
                 received = self.extra_rx.recv() => Wake::Extra(received),
                 received = recv_tun(self.tun.as_ref(), &mut tun_buf) => Wake::Tun(received),
                 Ok(()) = self.mapped.changed() => Wake::Mapped,
@@ -194,6 +208,12 @@ impl Daemon {
                 }
                 Wake::Extra(None) => {}
                 Wake::Udp(Err(error)) => tracing::debug!(%error, "udp receive failed"),
+                Wake::Udp6(Ok((len, from))) => {
+                    if let Some(delivered) = self.mesh.receive_udp(now, 0, from, &udp6_buf[..len]) {
+                        self.deliver(&delivered.packet).await;
+                    }
+                }
+                Wake::Udp6(Err(error)) => tracing::debug!(%error, "udp6 receive failed"),
                 Wake::Tun(Ok(len)) if dns::is_query(&tun_buf[..len]) => {
                     if let (Some(reply), Some(tun)) = (dns::respond(&tun_buf[..len], &self.names), &self.tun) {
                         let _ = tun.send(&reply).await;
@@ -587,7 +607,8 @@ impl Daemon {
         let mut candidates: Vec<SocketAddr> = weft_portmap::local_addresses(Some(&tun))
             .into_iter()
             .filter(|ip| Some(*ip) != self.tun_address.map(IpAddr::V4))
-            .map(|ip| SocketAddr::new(ip, self.udp_port))
+            .filter(|ip| ip.is_ipv4() || self.udp6.is_some())
+            .map(|ip| SocketAddr::new(ip, if ip.is_ipv4() { self.udp_port } else { self.udp6_port }))
             .collect();
         let observed = self.mesh.observed().map(|addr| addr.ip());
         if let Some(mapped) = self.mapper.current().and_then(|mapped| mapped.endpoint(observed)) {
@@ -608,7 +629,14 @@ impl Daemon {
         while let Some(output) = self.mesh.poll_output() {
             match output {
                 Output::Udp { socket: 0, to, datagram, .. } => {
-                    if let Err(error) = self.udp.send_to(&datagram, to).await {
+                    let socket = match to {
+                        SocketAddr::V4(_) => &self.udp,
+                        SocketAddr::V6(_) => match &self.udp6 {
+                            Some(socket) => socket,
+                            None => continue,
+                        },
+                    };
+                    if let Err(error) = socket.send_to(&datagram, to).await {
                         tracing::trace!(%to, %error, "udp send failed");
                     }
                 }
@@ -755,6 +783,7 @@ impl Daemon {
             server_udp: report.server_udp,
             observed: report.observed,
             local_port: self.udp_port,
+            ipv6: self.udp6.is_some() && local_addresses.iter().any(IpAddr::is_ipv6),
             local_addresses,
             dns: self.settings.dns.then(|| self.tun.as_ref().map(Tun::dns_configured)).flatten(),
             port_mapping,
@@ -812,6 +841,22 @@ fn peer_configs(state: &State) -> Vec<PeerConfig> {
             Some(PeerConfig { key, address: Ipv4Addr::from(peer.address), online: peer.online, candidates, endpoint })
         })
         .collect()
+}
+
+fn bind_v6(port: u16) -> std::io::Result<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_only_v6(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into())?;
+    UdpSocket::from_std(socket.into())
+}
+
+async fn recv_v6(socket: Option<&UdpSocket>, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+    match socket {
+        Some(socket) => socket.recv_from(buf).await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn recv_tun(tun: Option<&Tun>, buf: &mut [u8]) -> std::io::Result<usize> {
