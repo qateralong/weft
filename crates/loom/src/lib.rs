@@ -33,9 +33,9 @@ pub struct Server {
 
 impl Server {
     pub async fn start(config: Config, keypair: StaticKeypair, db: Db) -> io::Result<Self> {
-        let listener = TcpListener::bind(config.listen).await?;
+        let (listener, socket) = bind_pair(config.listen).await?;
         let tcp_addr = listener.local_addr()?;
-        let socket = Arc::new(UdpSocket::bind(tcp_addr).await?);
+        let socket = Arc::new(socket);
         let udp_addr = socket.local_addr()?;
         let public_key = keypair.public();
         let own = ObfsKey::for_receiver(&public_key);
@@ -73,6 +73,25 @@ impl Drop for Server {
             task.abort();
         }
     }
+}
+
+/// TCP and UDP on the same port. For port 0 the UDP port is picked first and retried, as Windows
+/// reserves ranges of UDP ports that a free TCP port may fall into.
+async fn bind_pair(addr: SocketAddr) -> io::Result<(TcpListener, UdpSocket)> {
+    if addr.port() != 0 {
+        let listener = TcpListener::bind(addr).await?;
+        let socket = UdpSocket::bind(listener.local_addr()?).await?;
+        return Ok((listener, socket));
+    }
+    let mut last = io::Error::other("no free port");
+    for _ in 0..20 {
+        let socket = UdpSocket::bind(addr).await?;
+        match TcpListener::bind(socket.local_addr()?).await {
+            Ok(listener) => return Ok((listener, socket)),
+            Err(error) => last = error,
+        }
+    }
+    Err(last)
 }
 
 pub fn server_link(host: &str, port: u16, key: &PublicKey) -> Result<Link, weft_proto::LinkError> {
