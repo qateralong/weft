@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use rand::RngExt;
 use tokio::sync::{mpsc, oneshot};
-use weft_proto::control::{Endpoint, Network, Peer, PeerCandidates, ServerKind, ServerMessage, State};
+use weft_proto::control::{Endpoint, Network, Peer, PeerCandidates, Role, ServerKind, ServerMessage, State};
 use weft_proto::loom::Token;
 use weft_proto::{ObfsKey, PublicKey};
 use weft_session::Tai64N;
@@ -198,6 +198,9 @@ impl Hub {
                 name: m.name,
                 role: m.role as i32,
                 members: m.members.iter().map(|k| k.as_bytes().to_vec()).collect(),
+                locked: m.locked,
+                approval: m.approval,
+                requests: if m.role >= Role::Admin { m.requests as u32 } else { 0 },
             })
             .collect();
         let mut peers: Vec<Peer> = devices

@@ -106,8 +106,30 @@ weft a bans lan | grep -q bob
 weft b join lan --password secret && exit 1
 weft a unban lan bob
 weft b join lan --password secret
+echo "--- approval, roles and settings"
+weft a kick lan bob
+weft a approval lan on
+weft b join lan --password secret | grep -q 'wait for'
+weft a status | grep -q 'requests: 1'
+weft a requests lan | grep -q bob
+weft a approve lan bob
+weft a promote lan bob
+sleep 1
+weft b status | grep -q '(admin)'
+weft b lock lan
+weft a status | grep -q 'locked'
+weft b password lan --password other && exit 1
+weft a password lan --password changed
+weft b unlock lan
+weft b approval lan off
+weft a demote lan bob
+weft b lock lan && exit 1
+weft a delete lan && exit 1
 sleep 3
 ping_b 2
+weft a delete lan --yes
+sleep 1
+weft b status | grep -q 'No networks'
 echo "--- all checks passed"
 if [ -n "${SHOW_LOGS:-}" ]; then
     show_logs

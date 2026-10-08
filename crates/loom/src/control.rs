@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,9 +10,9 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use weft_proto::control::{
-    self, Ban, BanList, Candidates, ClientKind, ClientMessage, DecodeError, Empty, ErrorCode, Invite, InviteCode,
-    InviteList, InviteRequest, MemberAction, NetworkCredentials, NetworkName, PROTOCOL_VERSION, PeerKey, RelayPacket,
-    Role, ServerKind, ServerMessage, Welcome,
+    self, Candidates, ClientKind, ClientMessage, DecodeError, DeviceInfo, DeviceList, Empty, ErrorCode, Invite,
+    InviteCode, InviteList, InviteRequest, MemberAction, NetworkCredentials, NetworkName, NetworkSettings,
+    PROTOCOL_VERSION, PeerKey, RelayPacket, Role, RoleChange, ServerKind, ServerMessage, Welcome,
 };
 use weft_proto::{MIN_PACKET_LEN, ObfsKey, PublicKey};
 use weft_session::StaticKeypair;
@@ -197,7 +198,7 @@ async fn handle(
     let ack = |result: Result<(), ErrorCode>| result.map(|()| ServerKind::Ack(Empty {}));
     let result = match message.kind {
         Some(ClientKind::CreateNetwork(request)) => ack(create(hub, key, request).await),
-        Some(ClientKind::JoinNetwork(request)) => ack(join(hub, key, ip, request).await),
+        Some(ClientKind::JoinNetwork(request)) => join(hub, key, ip, request).await,
         Some(ClientKind::LeaveNetwork(request)) => ack(leave(hub, key, request)),
         Some(ClientKind::Ping(_)) => ack(Ok(())),
         Some(ClientKind::CreateInvite(request)) => create_invite(&mut lock(hub), key, request),
@@ -208,6 +209,12 @@ async fn handle(
         Some(ClientKind::Ban(request)) => ack(remove(&mut lock(hub), key, request, true)),
         Some(ClientKind::Unban(request)) => ack(unban(&mut lock(hub), key, request)),
         Some(ClientKind::ListBans(request)) => list_bans(&lock(hub), key, request),
+        Some(ClientKind::ListRequests(request)) => list_requests(&lock(hub), key, request),
+        Some(ClientKind::Approve(request)) => ack(approve(&mut lock(hub), key, request)),
+        Some(ClientKind::Deny(request)) => ack(deny(&mut lock(hub), key, request)),
+        Some(ClientKind::SetRole(request)) => ack(set_role(&mut lock(hub), key, request)),
+        Some(ClientKind::UpdateNetwork(request)) => ack(update_network(hub, key, request).await),
+        Some(ClientKind::DeleteNetwork(request)) => ack(delete_network(&mut lock(hub), key, request)),
         Some(ClientKind::Candidates(candidates)) => {
             set_candidates(hub, key, candidates);
             return None;
@@ -277,7 +284,12 @@ async fn create(hub: &SharedHub, key: PublicKey, request: NetworkCredentials) ->
     Ok(())
 }
 
-async fn join(hub: &SharedHub, key: PublicKey, ip: IpAddr, request: NetworkCredentials) -> Result<(), ErrorCode> {
+async fn join(
+    hub: &SharedHub,
+    key: PublicKey,
+    ip: IpAddr,
+    request: NetworkCredentials,
+) -> Result<ServerKind, ErrorCode> {
     let name = validate::network_name(&request.name).ok_or(ErrorCode::InvalidName)?;
     if !validate::password(&request.password) {
         return Err(ErrorCode::WrongPassword);
@@ -293,15 +305,7 @@ async fn join(hub: &SharedHub, key: PublicKey, ip: IpAddr, request: NetworkCrede
             hub.limiter.failed(ip, &limit_key, now);
             return Err(ErrorCode::NetworkNotFound);
         };
-        if hub.db.is_member(network.id, &key).map_err(internal)? {
-            return Err(ErrorCode::AlreadyMember);
-        }
-        if hub.db.is_banned(network.id, &key).map_err(internal)? {
-            return Err(ErrorCode::Banned);
-        }
-        if hub.db.member_count(network.id).map_err(internal)? >= hub.config.max_members {
-            return Err(ErrorCode::NetworkFull);
-        }
+        admissible(&hub, &network, &key)?;
         network
     };
     let hash = network.password_hash.clone();
@@ -316,13 +320,55 @@ async fn join(hub: &SharedHub, key: PublicKey, ip: IpAddr, request: NetworkCrede
         hub.limiter.failed(ip, &limit_key, Instant::now());
         return Err(ErrorCode::WrongPassword);
     }
-    if hub.db.member_count(network.id).map_err(internal)? >= hub.config.max_members {
+    let network = hub
+        .db
+        .network_by_name(&name)
+        .map_err(internal)?
+        .filter(|current| current.id == network.id)
+        .ok_or(ErrorCode::NetworkNotFound)?;
+    Ok(if admit(&mut hub, &network, &key)? {
+        ServerKind::Pending(NetworkName { name: network.name })
+    } else {
+        ServerKind::Ack(Empty {})
+    })
+}
+
+fn admissible(hub: &Hub, network: &NetworkRow, key: &PublicKey) -> Result<(), ErrorCode> {
+    if hub.db.is_member(network.id, key).map_err(internal)? {
+        return Err(ErrorCode::AlreadyMember);
+    }
+    if hub.db.is_banned(network.id, key).map_err(internal)? {
+        return Err(ErrorCode::Banned);
+    }
+    if network.locked {
+        return Err(ErrorCode::NetworkLocked);
+    }
+    if !network.approval && hub.db.member_count(network.id).map_err(internal)? >= hub.config.max_members {
         return Err(ErrorCode::NetworkFull);
     }
-    hub.db.add_member(network.id, &key, Role::Member).map_err(internal)?;
-    hub.memberships_changed();
-    hub.notify_related(&key);
     Ok(())
+}
+
+/// Returns true when the device has to wait for approval.
+fn admit(hub: &mut Hub, network: &NetworkRow, key: &PublicKey) -> Result<bool, ErrorCode> {
+    admissible(hub, network, key)?;
+    if network.approval {
+        hub.db.add_request(network.id, key).map_err(internal)?;
+        let admins: BTreeSet<PublicKey> = hub
+            .db
+            .members(network.id)
+            .map_err(internal)?
+            .into_iter()
+            .filter(|(_, role)| *role >= Role::Admin)
+            .map(|(device, _)| device.key)
+            .collect();
+        hub.notify(&admins);
+        return Ok(true);
+    }
+    hub.db.add_member(network.id, key, Role::Member).map_err(internal)?;
+    hub.memberships_changed();
+    hub.notify_related(key);
+    Ok(false)
 }
 
 fn leave(hub: &SharedHub, key: PublicKey, request: NetworkName) -> Result<(), ErrorCode> {
@@ -382,20 +428,11 @@ fn redeem_invite(hub: &mut Hub, key: PublicKey, ip: IpAddr, request: InviteCode)
         hub.limiter.ip_failed(ip, now);
         return Err(ErrorCode::InviteNotFound);
     };
-    if hub.db.is_member(invite.network, &key).map_err(internal)? {
-        return Err(ErrorCode::AlreadyMember);
-    }
-    if hub.db.is_banned(invite.network, &key).map_err(internal)? {
-        return Err(ErrorCode::Banned);
-    }
-    if hub.db.member_count(invite.network).map_err(internal)? >= hub.config.max_members {
-        return Err(ErrorCode::NetworkFull);
-    }
-    hub.db.add_member(invite.network, &key, Role::Member).map_err(internal)?;
+    let network = hub.db.network_by_name(&invite.network_name).map_err(internal)?.ok_or(ErrorCode::InviteNotFound)?;
+    let pending = admit(hub, &network, &key)?;
     hub.db.use_invite(&invite.code).map_err(internal)?;
-    hub.memberships_changed();
-    hub.notify_related(&key);
-    Ok(ServerKind::Joined(NetworkName { name: invite.network_name }))
+    let name = NetworkName { name: network.name };
+    Ok(if pending { ServerKind::Pending(name) } else { ServerKind::Joined(name) })
 }
 
 fn remove(hub: &mut Hub, key: PublicKey, request: MemberAction, ban: bool) -> Result<(), ErrorCode> {
@@ -428,18 +465,104 @@ fn unban(hub: &mut Hub, key: PublicKey, request: MemberAction) -> Result<(), Err
 
 fn list_bans(hub: &Hub, key: PublicKey, request: NetworkName) -> Result<ServerKind, ErrorCode> {
     let network = manage(hub, &request.name, &key)?.0;
-    let bans = hub
-        .db
-        .bans(network.id)
-        .map_err(internal)?
-        .into_iter()
-        .map(|device| Ban {
-            key: device.key.as_bytes().to_vec(),
-            nickname: device.nickname,
-            address: u32::from(device.address),
-        })
-        .collect();
-    Ok(ServerKind::Bans(BanList { bans }))
+    let bans = hub.db.bans(network.id).map_err(internal)?.into_iter().map(device_info).collect();
+    Ok(ServerKind::Bans(DeviceList { devices: bans }))
+}
+
+fn list_requests(hub: &Hub, key: PublicKey, request: NetworkName) -> Result<ServerKind, ErrorCode> {
+    let network = manage(hub, &request.name, &key)?.0;
+    let devices = hub.db.requests(network.id).map_err(internal)?.into_iter().map(device_info).collect();
+    Ok(ServerKind::Requests(DeviceList { devices }))
+}
+
+fn approve(hub: &mut Hub, key: PublicKey, request: MemberAction) -> Result<(), ErrorCode> {
+    let network = manage(hub, &request.network, &key)?.0;
+    let requests = hub.db.requests(network.id).map_err(internal)?;
+    let target = &requests[resolve(requests.iter(), &request.member)?];
+    if hub.db.member_count(network.id).map_err(internal)? >= hub.config.max_members {
+        return Err(ErrorCode::NetworkFull);
+    }
+    hub.db.add_member(network.id, &target.key, Role::Member).map_err(internal)?;
+    tracing::info!(network = network.name, target = ?target.key, by = ?key, "request approved");
+    hub.memberships_changed();
+    hub.notify_related(&target.key);
+    Ok(())
+}
+
+fn deny(hub: &mut Hub, key: PublicKey, request: MemberAction) -> Result<(), ErrorCode> {
+    let network = manage(hub, &request.network, &key)?.0;
+    let requests = hub.db.requests(network.id).map_err(internal)?;
+    let target = &requests[resolve(requests.iter(), &request.member)?];
+    hub.db.remove_request(network.id, &target.key).map_err(internal)?;
+    hub.notify_related(&key);
+    Ok(())
+}
+
+fn set_role(hub: &mut Hub, key: PublicKey, request: RoleChange) -> Result<(), ErrorCode> {
+    let role = Role::try_from(request.role).map_err(|_| ErrorCode::InvalidRequest)?;
+    if role == Role::Owner {
+        return Err(ErrorCode::InvalidRequest);
+    }
+    let (network, own) = manage(hub, &request.network, &key)?;
+    if own != Role::Owner {
+        return Err(ErrorCode::Forbidden);
+    }
+    let members = hub.db.members(network.id).map_err(internal)?;
+    let (target, target_role) = &members[resolve(members.iter().map(|(device, _)| device), &request.member)?];
+    if *target_role == Role::Owner {
+        return Err(ErrorCode::Forbidden);
+    }
+    hub.db.set_role(network.id, &target.key, role).map_err(internal)?;
+    hub.notify(&BTreeSet::from([target.key]));
+    Ok(())
+}
+
+async fn update_network(hub: &SharedHub, key: PublicKey, request: NetworkSettings) -> Result<(), ErrorCode> {
+    if request.locked.is_none() && request.approval.is_none() && request.password.is_none() {
+        return Err(ErrorCode::InvalidRequest);
+    }
+    let network = {
+        let hub = lock(hub);
+        let (network, role) = manage(&hub, &request.name, &key)?;
+        if request.password.is_some() && role != Role::Owner {
+            return Err(ErrorCode::Forbidden);
+        }
+        network
+    };
+    let hash = match request.password {
+        Some(password) if !validate::password(&password) => return Err(ErrorCode::InvalidPassword),
+        Some(password) => Some(
+            tokio::task::spawn_blocking(move || {
+                Argon2::default().hash_password(password.as_bytes()).map(|hash| hash.to_string())
+            })
+            .await
+            .map_err(internal)?
+            .map_err(internal)?,
+        ),
+        None => None,
+    };
+    let mut hub = lock(hub);
+    hub.db.update_network(network.id, request.locked, request.approval, hash.as_deref()).map_err(internal)?;
+    tracing::info!(network = network.name, by = ?key, "settings changed");
+    hub.notify_related(&key);
+    Ok(())
+}
+
+fn delete_network(hub: &mut Hub, key: PublicKey, request: NetworkName) -> Result<(), ErrorCode> {
+    let (network, role) = manage(hub, &request.name, &key)?;
+    if role != Role::Owner {
+        return Err(ErrorCode::Forbidden);
+    }
+    let before = hub.db.related(&key).map_err(internal)?;
+    hub.db.delete_network(network.id).map_err(internal)?;
+    tracing::info!(network = network.name, by = ?key, "network deleted");
+    hub.memberships_changed();
+    hub.notify(&before);
+    Ok(())
+}
+
+fn device_info(device: Device) -> DeviceInfo {
+    DeviceInfo { key: device.key.as_bytes().to_vec(), nickname: device.nickname, address: u32::from(device.address) }
 }
 
 fn manage(hub: &Hub, name: &str, key: &PublicKey) -> Result<(NetworkRow, Role), ErrorCode> {

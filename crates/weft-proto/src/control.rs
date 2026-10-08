@@ -11,7 +11,10 @@ pub const DISCOVERY_TOKEN_LEN: usize = 16;
 pub struct ClientMessage {
     #[prost(uint32, tag = "1")]
     pub id: u32,
-    #[prost(oneof = "ClientKind", tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17")]
+    #[prost(
+        oneof = "ClientKind",
+        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23"
+    )]
     pub kind: Option<ClientKind>,
 }
 
@@ -49,6 +52,40 @@ pub enum ClientKind {
     Unban(MemberAction),
     #[prost(message, tag = "17")]
     ListBans(NetworkName),
+    #[prost(message, tag = "18")]
+    ListRequests(NetworkName),
+    #[prost(message, tag = "19")]
+    Approve(MemberAction),
+    #[prost(message, tag = "20")]
+    Deny(MemberAction),
+    #[prost(message, tag = "21")]
+    SetRole(RoleChange),
+    #[prost(message, tag = "22")]
+    UpdateNetwork(NetworkSettings),
+    #[prost(message, tag = "23")]
+    DeleteNetwork(NetworkName),
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct RoleChange {
+    #[prost(string, tag = "1")]
+    pub network: String,
+    #[prost(string, tag = "2")]
+    pub member: String,
+    #[prost(enumeration = "Role", tag = "3")]
+    pub role: i32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct NetworkSettings {
+    #[prost(string, tag = "1")]
+    pub name: String,
+    #[prost(bool, optional, tag = "2")]
+    pub locked: Option<bool>,
+    #[prost(bool, optional, tag = "3")]
+    pub approval: Option<bool>,
+    #[prost(string, optional, tag = "4")]
+    pub password: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -98,7 +135,7 @@ pub struct InviteList {
 }
 
 #[derive(Clone, PartialEq, Message)]
-pub struct Ban {
+pub struct DeviceInfo {
     #[prost(bytes = "vec", tag = "1")]
     pub key: Vec<u8>,
     #[prost(string, tag = "2")]
@@ -108,9 +145,9 @@ pub struct Ban {
 }
 
 #[derive(Clone, PartialEq, Message)]
-pub struct BanList {
+pub struct DeviceList {
     #[prost(message, repeated, tag = "1")]
-    pub bans: Vec<Ban>,
+    pub devices: Vec<DeviceInfo>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -162,7 +199,7 @@ pub struct Empty {}
 pub struct ServerMessage {
     #[prost(uint32, tag = "1")]
     pub reply_to: u32,
-    #[prost(oneof = "ServerKind", tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
+    #[prost(oneof = "ServerKind", tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13")]
     pub kind: Option<ServerKind>,
 }
 
@@ -187,7 +224,11 @@ pub enum ServerKind {
     #[prost(message, tag = "10")]
     Joined(NetworkName),
     #[prost(message, tag = "11")]
-    Bans(BanList),
+    Bans(DeviceList),
+    #[prost(message, tag = "12")]
+    Pending(NetworkName),
+    #[prost(message, tag = "13")]
+    Requests(DeviceList),
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -240,6 +281,7 @@ pub enum ErrorCode {
     MemberNotFound = 18,
     AmbiguousMember = 19,
     TooManyInvites = 20,
+    NetworkLocked = 21,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -258,6 +300,12 @@ pub struct Network {
     pub role: i32,
     #[prost(bytes = "vec", repeated, tag = "3")]
     pub members: Vec<Vec<u8>>,
+    #[prost(bool, tag = "4")]
+    pub locked: bool,
+    #[prost(bool, tag = "5")]
+    pub approval: bool,
+    #[prost(uint32, tag = "6")]
+    pub requests: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Enumeration)]
@@ -354,7 +402,12 @@ mod tests {
     #[test]
     fn server_roundtrip() {
         let state = State {
-            networks: vec![Network { name: "lan".into(), role: Role::Owner as i32, members: vec![vec![1; 32]] }],
+            networks: vec![Network {
+                name: "lan".into(),
+                role: Role::Owner as i32,
+                members: vec![vec![1; 32]],
+                ..Default::default()
+            }],
             peers: vec![Peer {
                 key: vec![2; 32],
                 nickname: "vasya".into(),

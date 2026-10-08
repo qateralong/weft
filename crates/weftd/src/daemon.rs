@@ -7,14 +7,14 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, sleep_until};
 use weft_ipc::{
-    BanInfo, Connection, Failure, InviteInfo, MemberStatus, NetworkStatus, PeerLink, Request, Response, Status,
+    Connection, DeviceInfo, Failure, InviteInfo, MemberStatus, NetworkStatus, PeerLink, Request, Response, Status,
 };
 use weft_mesh::{Mesh, Output, PeerConfig};
 use weft_portmap::{Mapped, PortMapper};
 use weft_proto::control::{
-    Candidates, ClientKind, ClientMessage, Endpoint, ErrorCode, Invite, InviteCode, InviteRequest, MemberAction,
-    NetworkCredentials, NetworkName, PeerCandidates, PeerKey, RelayPacket, Role, ServerKind, ServerMessage, State,
-    Welcome,
+    Candidates, ClientKind, ClientMessage, DeviceList, Endpoint, ErrorCode, Invite, InviteCode, InviteRequest,
+    MemberAction, NetworkCredentials, NetworkName, NetworkSettings, PeerCandidates, PeerKey, RelayPacket, Role,
+    RoleChange, ServerKind, ServerMessage, State, Welcome,
 };
 use weft_proto::{Link, PublicKey};
 use weft_session::StaticKeypair;
@@ -220,6 +220,30 @@ impl Daemon {
                 self.request(ClientKind::Unban(MemberAction { network, member }), reply)
             }
             Request::Bans { network } => self.request(ClientKind::ListBans(NetworkName { name: network }), reply),
+            Request::Requests { network } => {
+                self.request(ClientKind::ListRequests(NetworkName { name: network }), reply)
+            }
+            Request::Approve { network, member } => {
+                self.request(ClientKind::Approve(MemberAction { network, member }), reply)
+            }
+            Request::Deny { network, member } => {
+                self.request(ClientKind::Deny(MemberAction { network, member }), reply)
+            }
+            Request::SetRole { network, member, role } => {
+                let role = match role {
+                    weft_ipc::Role::Owner => Role::Owner,
+                    weft_ipc::Role::Admin => Role::Admin,
+                    weft_ipc::Role::Member => Role::Member,
+                };
+                self.request(ClientKind::SetRole(RoleChange { network, member, role: role as i32 }), reply)
+            }
+            Request::Configure { network, locked, approval, password } => self.request(
+                ClientKind::UpdateNetwork(NetworkSettings { name: network, locked, approval, password }),
+                reply,
+            ),
+            Request::Delete { network } => {
+                self.request(ClientKind::DeleteNetwork(NetworkName { name: network }), reply)
+            }
         }
     }
 
@@ -423,16 +447,9 @@ impl Daemon {
                 Some(ServerKind::Invites(list)) => {
                     Response::Invites(list.invites.into_iter().map(|invite| self.invite_info(invite)).collect())
                 }
-                Some(ServerKind::Bans(list)) => Response::Bans(
-                    list.bans
-                        .into_iter()
-                        .map(|ban| BanInfo {
-                            nickname: ban.nickname,
-                            address: Ipv4Addr::from(ban.address),
-                            public_key: PublicKey::from_slice(&ban.key).map(|key| key.to_string()).unwrap_or_default(),
-                        })
-                        .collect(),
-                ),
+                Some(ServerKind::Pending(network)) => Response::Pending(network.name),
+                Some(ServerKind::Bans(list)) => Response::Bans(device_infos(list)),
+                Some(ServerKind::Requests(list)) => Response::Requests(device_infos(list)),
                 _ => Response::Error(Failure::Internal),
             };
             let _ = reply.send(response);
@@ -547,6 +564,9 @@ impl Daemon {
                     Role::Admin => weft_ipc::Role::Admin,
                     Role::Member => weft_ipc::Role::Member,
                 },
+                locked: network.locked,
+                approval: network.approval,
+                requests: network.requests,
                 members: network
                     .members
                     .iter()
@@ -642,6 +662,18 @@ fn failure(code: ErrorCode) -> Failure {
         ErrorCode::MemberNotFound => Failure::MemberNotFound,
         ErrorCode::AmbiguousMember => Failure::AmbiguousMember,
         ErrorCode::TooManyInvites => Failure::TooManyInvites,
+        ErrorCode::NetworkLocked => Failure::NetworkLocked,
         ErrorCode::Unspecified | ErrorCode::Internal => Failure::Internal,
     }
+}
+
+fn device_infos(list: DeviceList) -> Vec<DeviceInfo> {
+    list.devices
+        .into_iter()
+        .map(|device| DeviceInfo {
+            nickname: device.nickname,
+            address: Ipv4Addr::from(device.address),
+            public_key: PublicKey::from_slice(&device.key).map(|key| key.to_string()).unwrap_or_default(),
+        })
+        .collect()
 }

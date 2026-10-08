@@ -9,8 +9,8 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, UdpSocket};
 use weft_proto::control::{
     self, Candidates, ClientKind, ClientMessage, ErrorCode, Hello, InviteCode, InviteRequest, MemberAction,
-    NetworkCredentials, NetworkName, PROTOCOL_VERSION, PeerKey, RelayPacket, Role, ServerKind, ServerMessage, State,
-    Welcome,
+    NetworkCredentials, NetworkName, NetworkSettings, PROTOCOL_VERSION, PeerKey, RelayPacket, Role, RoleChange,
+    ServerKind, ServerMessage, State, Welcome,
 };
 use weft_proto::loom::{parse_observed, parse_relayed, relay_packet};
 use weft_proto::obfs::discover_packet;
@@ -357,8 +357,8 @@ async fn invites_kicks_and_bans() {
     let Ok(ServerKind::Bans(bans)) = a.ask(ClientKind::ListBans(NetworkName { name: "lan".into() })).await else {
         panic!()
     };
-    assert_eq!(bans.bans.len(), 1);
-    assert_eq!(bans.bans[0].nickname, "bob");
+    assert_eq!(bans.devices.len(), 1);
+    assert_eq!(bans.devices[0].nickname, "bob");
 
     a.request(ClientKind::Unban(member("lan", "bob"))).await.unwrap();
     assert_eq!(a.request(ClientKind::Unban(member("lan", "bob"))).await, Err(ErrorCode::MemberNotFound));
@@ -366,4 +366,62 @@ async fn invites_kicks_and_bans() {
 
     a.request(ClientKind::RevokeInvite(InviteCode { code: open.to_lowercase() })).await.unwrap();
     assert_eq!(c.redeem(&open).await, Err(ErrorCode::InviteNotFound));
+}
+
+#[tokio::test]
+async fn approval_roles_and_settings() {
+    let server = start().await;
+    let mut a = Client::connect(&server, 1).await;
+    let mut b = Client::connect(&server, 2).await;
+    let mut c = Client::connect(&server, 3).await;
+    a.hello("alice").await;
+    b.hello("bob").await;
+    c.hello("carol").await;
+    let lan = || NetworkName { name: "lan".into() };
+    let settings = |locked, approval, password: Option<&str>| {
+        ClientKind::UpdateNetwork(NetworkSettings {
+            name: "lan".into(),
+            locked,
+            approval,
+            password: password.map(Into::into),
+        })
+    };
+    let role = |member: &str, role: Role| {
+        ClientKind::SetRole(RoleChange { network: "lan".into(), member: member.into(), role: role as i32 })
+    };
+    a.request(ClientKind::CreateNetwork(credentials("lan", "secret"))).await.unwrap();
+    a.request(settings(None, Some(true), None)).await.unwrap();
+
+    let joined = b.ask(ClientKind::JoinNetwork(credentials("lan", "secret"))).await;
+    assert!(matches!(joined, Ok(ServerKind::Pending(_))));
+    let code = a.invite("lan", 0).await.unwrap();
+    assert!(matches!(c.ask(ClientKind::RedeemInvite(InviteCode { code })).await, Ok(ServerKind::Pending(_))));
+    a.state_where(|state| state.networks[0].requests == 2).await;
+    let Ok(ServerKind::Requests(list)) = a.ask(ClientKind::ListRequests(lan())).await else { panic!() };
+    let names: Vec<&str> = list.devices.iter().map(|device| device.nickname.as_str()).collect();
+    assert_eq!(names, ["bob", "carol"]);
+    assert_eq!(b.ask(ClientKind::ListRequests(lan())).await.err(), Some(ErrorCode::NotMember));
+
+    a.request(ClientKind::Approve(member("lan", "bob"))).await.unwrap();
+    b.state_where(|state| state.networks.len() == 1).await;
+    a.request(ClientKind::Deny(member("lan", "carol"))).await.unwrap();
+    assert_eq!(a.request(ClientKind::Deny(member("lan", "carol"))).await, Err(ErrorCode::MemberNotFound));
+
+    a.request(role("bob", Role::Admin)).await.unwrap();
+    b.state_where(|state| state.networks.first().is_some_and(|network| network.role() == Role::Admin)).await;
+    assert_eq!(b.request(role("alice", Role::Member)).await, Err(ErrorCode::Forbidden));
+    assert_eq!(b.request(settings(None, None, Some("another"))).await, Err(ErrorCode::Forbidden));
+    b.request(settings(Some(true), None, None)).await.unwrap();
+    let locked = c.ask(ClientKind::JoinNetwork(credentials("lan", "secret"))).await;
+    assert_eq!(locked.err(), Some(ErrorCode::NetworkLocked));
+
+    a.request(settings(Some(false), Some(false), Some("changed"))).await.unwrap();
+    let wrong = c.ask(ClientKind::JoinNetwork(credentials("lan", "secret"))).await;
+    assert_eq!(wrong.err(), Some(ErrorCode::WrongPassword));
+    c.request(ClientKind::JoinNetwork(credentials("lan", "changed"))).await.unwrap();
+
+    a.request(role("bob", Role::Member)).await.unwrap();
+    assert_eq!(b.request(ClientKind::DeleteNetwork(lan())).await, Err(ErrorCode::Forbidden));
+    a.request(ClientKind::DeleteNetwork(lan())).await.unwrap();
+    c.state_where(|state| state.networks.is_empty()).await;
 }

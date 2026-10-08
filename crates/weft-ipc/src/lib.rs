@@ -32,6 +32,12 @@ pub enum Request {
     Ban { network: String, member: String },
     Unban { network: String, member: String },
     Bans { network: String },
+    Requests { network: String },
+    Approve { network: String, member: String },
+    Deny { network: String, member: String },
+    SetRole { network: String, member: String, role: Role },
+    Configure { network: String, locked: Option<bool>, approval: Option<bool>, password: Option<String> },
+    Delete { network: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -39,10 +45,12 @@ pub enum Request {
 pub enum Response {
     Ok,
     Status(Status),
-    Joined(String),
     Invite(InviteInfo),
     Invites(Vec<InviteInfo>),
-    Bans(Vec<BanInfo>),
+    Joined(String),
+    Pending(String),
+    Bans(Vec<DeviceInfo>),
+    Requests(Vec<DeviceInfo>),
     Error(Failure),
 }
 
@@ -58,7 +66,7 @@ pub struct InviteInfo {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct BanInfo {
+pub struct DeviceInfo {
     pub nickname: String,
     pub address: Ipv4Addr,
     pub public_key: String,
@@ -90,6 +98,7 @@ pub enum Failure {
     MemberNotFound,
     AmbiguousMember,
     TooManyInvites,
+    NetworkLocked,
     Internal,
 }
 
@@ -115,6 +124,9 @@ pub enum Connection {
 pub struct NetworkStatus {
     pub name: String,
     pub role: Role,
+    pub locked: bool,
+    pub approval: bool,
+    pub requests: u32,
     pub members: Vec<MemberStatus>,
 }
 

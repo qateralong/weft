@@ -9,7 +9,7 @@ use weft_proto::control::Role;
 
 use crate::config::Pool;
 
-const MIGRATIONS: [&str; 2] = [
+const MIGRATIONS: [&str; 3] = [
     "
 CREATE TABLE devices (
     key BLOB PRIMARY KEY,
@@ -52,6 +52,16 @@ CREATE TABLE bans (
     PRIMARY KEY (network, device)
 );
 ",
+    "
+ALTER TABLE networks ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE networks ADD COLUMN approval INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE requests (
+    network INTEGER NOT NULL REFERENCES networks(id) ON DELETE CASCADE,
+    device BLOB NOT NULL REFERENCES devices(key),
+    created INTEGER NOT NULL,
+    PRIMARY KEY (network, device)
+);
+",
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 
@@ -81,6 +91,8 @@ pub struct NetworkRow {
     pub id: i64,
     pub name: String,
     pub password_hash: String,
+    pub locked: bool,
+    pub approval: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +100,9 @@ pub struct Membership {
     pub name: String,
     pub role: Role,
     pub members: Vec<PublicKey>,
+    pub locked: bool,
+    pub approval: bool,
+    pub requests: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,10 +189,40 @@ impl Db {
     pub fn network_by_name(&self, name: &str) -> Result<Option<NetworkRow>, DbError> {
         Ok(self
             .conn
-            .query_row("SELECT id, name, password_hash FROM networks WHERE name_key = ?1", [name_key(name)], |row| {
-                Ok(NetworkRow { id: row.get(0)?, name: row.get(1)?, password_hash: row.get(2)? })
-            })
+            .query_row(
+                "SELECT id, name, password_hash, locked, approval FROM networks WHERE name_key = ?1",
+                [name_key(name)],
+                |row| {
+                    Ok(NetworkRow {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        password_hash: row.get(2)?,
+                        locked: row.get(3)?,
+                        approval: row.get(4)?,
+                    })
+                },
+            )
             .optional()?)
+    }
+
+    pub fn update_network(
+        &mut self,
+        network: i64,
+        locked: Option<bool>,
+        approval: Option<bool>,
+        password_hash: Option<&str>,
+    ) -> Result<(), DbError> {
+        self.conn.execute(
+            "UPDATE networks SET locked = COALESCE(?2, locked), approval = COALESCE(?3, approval),
+             password_hash = COALESCE(?4, password_hash) WHERE id = ?1",
+            params![network, locked, approval, password_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_network(&mut self, network: i64) -> Result<(), DbError> {
+        self.conn.execute("DELETE FROM networks WHERE id = ?1", [network])?;
+        Ok(())
     }
 
     pub fn create_network(&mut self, name: &str, password_hash: &str, owner: &PublicKey) -> Result<i64, DbError> {
@@ -203,11 +248,41 @@ impl Db {
     }
 
     pub fn add_member(&mut self, network: i64, device: &PublicKey, role: Role) -> Result<(), DbError> {
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "INSERT OR IGNORE INTO members (network, device, role, joined) VALUES (?1, ?2, ?3, ?4)",
             params![network, device.as_bytes(), role as i32, unix_now()],
         )?;
+        tx.execute("DELETE FROM requests WHERE network = ?1 AND device = ?2", params![network, device.as_bytes()])?;
+        tx.commit()?;
         Ok(())
+    }
+
+    pub fn set_role(&mut self, network: i64, device: &PublicKey, role: Role) -> Result<(), DbError> {
+        self.conn.execute(
+            "UPDATE members SET role = ?3 WHERE network = ?1 AND device = ?2",
+            params![network, device.as_bytes(), role as i32],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_request(&mut self, network: i64, device: &PublicKey) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO requests (network, device, created) VALUES (?1, ?2, ?3)",
+            params![network, device.as_bytes(), unix_now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_request(&mut self, network: i64, device: &PublicKey) -> Result<bool, DbError> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM requests WHERE network = ?1 AND device = ?2", params![network, device.as_bytes()])?
+            > 0)
+    }
+
+    pub fn requests(&self, network: i64) -> Result<Vec<Device>, DbError> {
+        self.device_list("requests", network)
     }
 
     pub fn is_member(&self, network: i64, device: &PublicKey) -> Result<bool, DbError> {
@@ -347,6 +422,7 @@ impl Db {
             "INSERT OR IGNORE INTO bans (network, device, created) VALUES (?1, ?2, ?3)",
             params![network, device.as_bytes(), unix_now()],
         )?;
+        self.remove_request(network, device)?;
         self.remove_member(network, device)?;
         Ok(())
     }
@@ -371,40 +447,50 @@ impl Db {
     }
 
     pub fn bans(&self, network: i64) -> Result<Vec<Device>, DbError> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT d.key, d.nickname, d.address FROM bans b JOIN devices d ON d.key = b.device
-             WHERE b.network = ?1 ORDER BY b.created, d.key",
-        )?;
+        self.device_list("bans", network)
+    }
+
+    fn device_list(&self, table: &str, network: i64) -> Result<Vec<Device>, DbError> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT d.key, d.nickname, d.address FROM {table} t JOIN devices d ON d.key = t.device
+             WHERE t.network = ?1 ORDER BY t.created, t.rowid"
+        ))?;
         let rows = stmt.query_map([network], |row| {
             Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?, row.get::<_, u32>(2)?))
         })?;
-        let mut bans = Vec::new();
+        let mut devices = Vec::new();
         for row in rows {
             let (key, nickname, address) = row?;
             if let Ok(key) = PublicKey::from_slice(&key) {
-                bans.push(Device { key, nickname, address: Ipv4Addr::from(address) });
+                devices.push(Device { key, nickname, address: Ipv4Addr::from(address) });
             }
         }
-        Ok(bans)
+        Ok(devices)
     }
 
     pub fn memberships(&self, device: &PublicKey) -> Result<Vec<Membership>, DbError> {
         let mut networks = self.conn.prepare_cached(
-            "SELECT n.id, n.name, m.role FROM networks n JOIN members m ON m.network = n.id
-             WHERE m.device = ?1 ORDER BY n.name_key",
+            "SELECT n.id, n.name, m.role, n.locked, n.approval,
+             (SELECT COUNT(*) FROM requests r WHERE r.network = n.id)
+             FROM networks n JOIN members m ON m.network = n.id WHERE m.device = ?1 ORDER BY n.name_key",
         )?;
         let mut members =
             self.conn.prepare_cached("SELECT device FROM members WHERE network = ?1 ORDER BY joined, device")?;
-        let rows: Vec<(i64, String, i32)> = networks
-            .query_map([device.as_bytes()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        let rows: Vec<(i64, String, i32, bool, bool, i64)> = networks
+            .query_map([device.as_bytes()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+            })?
             .collect::<Result<_, _>>()?;
         let mut memberships = Vec::with_capacity(rows.len());
-        for (id, name, role) in rows {
+        for (id, name, role, locked, approval, requests) in rows {
             let keys: Vec<Vec<u8>> = members.query_map([id], |row| row.get(0))?.collect::<Result<_, _>>()?;
             memberships.push(Membership {
                 name,
                 role: Role::try_from(role).unwrap_or(Role::Member),
                 members: keys.iter().filter_map(|key| PublicKey::from_slice(key).ok()).collect(),
+                locked,
+                approval,
+                requests: requests as usize,
             });
         }
         Ok(memberships)
@@ -574,6 +660,33 @@ mod tests {
         let version: i32 = db.conn.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         assert!(db.bans(1).unwrap().is_empty());
+        assert!(db.requests(1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn requests_and_settings() {
+        let mut db = db_with_devices(3);
+        let id = db.create_network("lan", "hash", &key(1)).unwrap();
+        db.update_network(id, Some(true), Some(true), None).unwrap();
+        let network = db.network_by_name("lan").unwrap().unwrap();
+        assert!(network.locked && network.approval && network.password_hash == "hash");
+        db.update_network(id, Some(false), None, Some("new")).unwrap();
+        let network = db.network_by_name("lan").unwrap().unwrap();
+        assert!(!network.locked && network.approval && network.password_hash == "new");
+
+        db.add_request(id, &key(2)).unwrap();
+        db.add_request(id, &key(2)).unwrap();
+        db.add_request(id, &key(3)).unwrap();
+        assert_eq!(db.memberships(&key(1)).unwrap()[0].requests, 2);
+        db.add_member(id, &key(2), Role::Member).unwrap();
+        db.set_role(id, &key(2), Role::Admin).unwrap();
+        assert_eq!(db.role(id, &key(2)).unwrap(), Some(Role::Admin));
+        db.ban(id, &key(3)).unwrap();
+        assert!(db.requests(id).unwrap().is_empty());
+
+        db.delete_network(id).unwrap();
+        assert!(db.network_by_name("lan").unwrap().is_none());
+        assert!(db.memberships(&key(2)).unwrap().is_empty());
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use weft_i18n::Localizer;
-use weft_ipc::{BanInfo, Connection, Failure, InviteInfo, PeerLink, Request, Response, Role, Status};
+use weft_ipc::{Connection, DeviceInfo, Failure, InviteInfo, PeerLink, Request, Response, Role, Status};
 
 const MAX_EXPIRY: u64 = 365 * 24 * 3600;
 
@@ -79,6 +79,34 @@ fn cli(l: &Localizer) -> Command {
         .subcommand(command(l, "ban", "cmd-ban", vec![network(), member()]))
         .subcommand(command(l, "unban", "cmd-unban", vec![network(), member()]))
         .subcommand(command(l, "bans", "cmd-bans", vec![network()]))
+        .subcommand(command(l, "requests", "cmd-requests", vec![network()]))
+        .subcommand(command(l, "approve", "cmd-approve", vec![network(), member()]))
+        .subcommand(command(l, "deny", "cmd-deny", vec![network(), member()]))
+        .subcommand(command(l, "promote", "cmd-promote", vec![network(), member()]))
+        .subcommand(command(l, "demote", "cmd-demote", vec![network(), member()]))
+        .subcommand(command(l, "lock", "cmd-lock", vec![network()]))
+        .subcommand(command(l, "unlock", "cmd-unlock", vec![network()]))
+        .subcommand(command(
+            l,
+            "approval",
+            "cmd-approval",
+            vec![network(), positional(l, "mode", "arg-mode").required(true).value_parser(["on", "off"])],
+        ))
+        .subcommand(command(l, "password", "cmd-password", vec![network(), password()]))
+        .subcommand(command(
+            l,
+            "delete",
+            "cmd-delete",
+            vec![
+                network(),
+                Arg::new("yes")
+                    .long("yes")
+                    .short('y')
+                    .action(ArgAction::SetTrue)
+                    .help(l.tr("arg-yes"))
+                    .help_heading(l.tr("help-options")),
+            ],
+        ))
 }
 
 fn command(l: &Localizer, name: &'static str, about: &str, args: Vec<Arg>) -> Command {
@@ -169,6 +197,48 @@ fn run(l: &Localizer, matches: &ArgMatches) -> Result<(), String> {
             (request, Some(done))
         }
         Some(("bans", m)) => (Request::Bans { network: arg(m, "network").unwrap_or_default() }, None),
+        Some(("requests", m)) => (Request::Requests { network: arg(m, "network").unwrap_or_default() }, None),
+        Some((action @ ("approve" | "deny" | "promote" | "demote"), m)) => {
+            let network = arg(m, "network").unwrap_or_default();
+            let member = arg(m, "member").unwrap_or_default();
+            let done = l.tr_args(&format!("done-{action}"), &[("name", &network), ("member", &member)]);
+            let request = match action {
+                "approve" => Request::Approve { network, member },
+                "deny" => Request::Deny { network, member },
+                "promote" => Request::SetRole { network, member, role: Role::Admin },
+                _ => Request::SetRole { network, member, role: Role::Member },
+            };
+            (request, Some(done))
+        }
+        Some((action @ ("lock" | "unlock" | "approval" | "password"), m)) => {
+            let network = arg(m, "network").unwrap_or_default();
+            let (mut locked, mut approval, mut new_password) = (None, None, None);
+            let done = match action {
+                "lock" | "unlock" => {
+                    locked = Some(action == "lock");
+                    format!("done-{action}")
+                }
+                "approval" => {
+                    let mode = arg(m, "mode").unwrap_or_default();
+                    approval = Some(mode == "on");
+                    format!("done-approval-{mode}")
+                }
+                _ => {
+                    new_password = Some(password(l, arg(m, "password"), true)?);
+                    "done-password".to_string()
+                }
+            };
+            let done = l.tr_args(&done, &[("name", &network)]);
+            (Request::Configure { network, locked, approval, password: new_password }, Some(done))
+        }
+        Some(("delete", m)) => {
+            if !m.get_flag("yes") {
+                return Err(l.tr("error-confirm-delete"));
+            }
+            let network = arg(m, "network").unwrap_or_default();
+            let done = l.tr_args("done-delete", &[("name", &network)]);
+            (Request::Delete { network }, Some(done))
+        }
         _ => (Request::Status, None),
     };
 
@@ -209,8 +279,12 @@ fn run(l: &Localizer, matches: &ArgMatches) -> Result<(), String> {
             print_invites(l, &request, &invites);
             Ok(())
         }
-        Response::Bans(bans) => {
-            print_bans(l, &request, &bans);
+        Response::Pending(name) => {
+            println!("{}", l.tr_args("done-pending", &[("name", &name)]));
+            Ok(())
+        }
+        Response::Bans(devices) | Response::Requests(devices) => {
+            print_devices(l, &request, &devices);
             Ok(())
         }
         Response::Error(failure) => Err(l.tr(failure_id(failure))),
@@ -274,16 +348,20 @@ fn print_invites(l: &Localizer, request: &Request, invites: &[InviteInfo]) {
     }
 }
 
-fn print_bans(l: &Localizer, request: &Request, bans: &[BanInfo]) {
-    let Request::Bans { network } = request else { return };
-    if bans.is_empty() {
-        println!("{}", l.tr_args("bans-empty", &[("name", network)]));
+fn print_devices(l: &Localizer, request: &Request, devices: &[DeviceInfo]) {
+    let (network, list) = match request {
+        Request::Bans { network } => (network, "bans"),
+        Request::Requests { network } => (network, "requests"),
+        _ => return,
+    };
+    if devices.is_empty() {
+        println!("{}", l.tr_args(&format!("{list}-empty"), &[("name", network)]));
         return;
     }
-    println!("{}", l.tr_args("bans-title", &[("name", network)]));
-    let width = bans.iter().map(|ban| ban.nickname.chars().count()).max().unwrap_or(0);
-    for ban in bans {
-        println!("  {:<width$}  {:<15}  {}", ban.nickname, ban.address.to_string(), ban.public_key);
+    println!("{}", l.tr_args(&format!("{list}-title"), &[("name", network)]));
+    let width = devices.iter().map(|device| device.nickname.chars().count()).max().unwrap_or(0);
+    for device in devices {
+        println!("  {:<width$}  {:<15}  {}", device.nickname, device.address.to_string(), device.public_key);
     }
 }
 
@@ -330,7 +408,17 @@ fn print_status(l: &Localizer, status: &Status) {
             Role::Admin => "role-admin",
             Role::Member => "role-member",
         };
-        println!("\n{}", l.tr_args("network-title", &[("name", &network.name), ("role", &l.tr(role))]));
+        let mut title = l.tr_args("network-title", &[("name", &network.name), ("role", &l.tr(role))]);
+        if network.locked {
+            title += &format!(" · {}", l.tr("network-locked"));
+        }
+        if network.approval {
+            title += &format!(" · {}", l.tr("network-approval"));
+        }
+        if network.requests > 0 {
+            title += &format!(" · {}", l.tr_args("network-requests", &[("count", &network.requests.to_string())]));
+        }
+        println!("\n{title}");
         if network.members.is_empty() {
             println!("  {}", l.tr("network-empty"));
         }
@@ -373,6 +461,7 @@ fn failure_id(failure: Failure) -> &'static str {
         Failure::MemberNotFound => "error-member-not-found",
         Failure::AmbiguousMember => "error-ambiguous-member",
         Failure::TooManyInvites => "error-too-many-invites",
+        Failure::NetworkLocked => "error-network-locked",
         Failure::Internal => "error-internal",
     }
 }
