@@ -11,15 +11,15 @@
       {
         "label": "main",
         "title": "Weft",
-        "width": 460,
-        "height": 700,
-        "minWidth": 380,
-        "minHeight": 500,
+        "width": 440,
+        "height": 680,
+        "minWidth": 400,
+        "minHeight": 520,
         "visible": false
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
     }
   },
   "bundle": {

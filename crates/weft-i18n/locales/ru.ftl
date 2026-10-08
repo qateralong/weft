@@ -230,3 +230,5 @@ gui-no-networks = Сетей пока нет. Создайте свою или �
 gui-tray-open = Открыть Weft
 gui-tray-quit = Выход
 gui-error-permission = Нет доступа к weftd ({ $path }). Добавьте пользователя в группу «weft» и войдите в систему заново.
+gui-theme-light = Светлая тема
+gui-theme-dark = Тёмная тема

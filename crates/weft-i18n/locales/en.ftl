@@ -230,3 +230,5 @@ gui-no-networks = No networks yet. Create one or join an existing one.
 gui-tray-open = Open Weft
 gui-tray-quit = Quit
 gui-error-permission = No access to weftd ({ $path }). Add your user to the “weft” group and log in again.
+gui-theme-light = Light theme
+gui-theme-dark = Dark theme

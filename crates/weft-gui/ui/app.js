@@ -10,6 +10,48 @@ let status = null;
 let daemonError = null;
 let pollTimer = null;
 
+const ICONS = {
+  power: '<path d="M12 3v9"/><path d="M6.4 6.6a8 8 0 1 0 11.2 0"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  join: '<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/>',
+  chevron: '<path d="M6 9l6 6 6-6"/>',
+  more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/>',
+};
+const AVATAR_COLORS = ['#d9734e', '#c9a03a', '#5f9e57', '#3e9a91', '#3f7fb8', '#7867c4', '#b95f9d', '#8b7258'];
+
+function icon(name) {
+  const span = document.createElement('span');
+  span.style.display = 'contents';
+  span.innerHTML = `<svg viewBox="0 0 24 24">${ICONS[name]}</svg>`;
+  return span;
+}
+
+function stored(key, fallback) {
+  try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
+}
+
+function store(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* storage unavailable */ }
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+}
+
+function toggleTheme() {
+  const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  store('theme', theme);
+  applyTheme(theme);
+  renderHeader();
+}
+
+applyTheme(stored('theme', matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+
 const t = (id, args = {}) => (messages[id] ?? id).replace(/\{\$(\w+)\}/g, (_, name) => args[name] ?? '');
 
 function el(tag, props = {}, ...children) {
@@ -32,10 +74,9 @@ let toastTimer = null;
 function toast(text, error = false) {
   const node = document.getElementById('toast');
   node.textContent = text;
-  node.className = error ? 'error' : '';
-  node.hidden = false;
+  node.className = error ? 'error show' : 'show';
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { node.hidden = true; }, error ? 5000 : 2500);
+  toastTimer = setTimeout(() => node.classList.remove('show'), error ? 5000 : 2500);
 }
 
 async function act(command, fields, done) {
@@ -89,7 +130,11 @@ function openDialog(title, build, actions = []) {
   const body = el('div', { class: 'body' });
   const error = el('div', { class: 'error', hidden: true });
   const fail = (text) => { error.textContent = text; error.hidden = false; };
-  const close = () => dialog.close();
+  const close = () => {
+    if (!dialog.open || dialog.classList.contains('closing')) return;
+    dialog.classList.add('closing');
+    setTimeout(() => { dialog.classList.remove('closing'); dialog.close(); }, 150);
+  };
   const render = async () => {
     body.replaceChildren(error, ...nodes(await build({ close, fail, render })));
   };
@@ -109,6 +154,7 @@ function openDialog(title, build, actions = []) {
   }, label));
   dialog.replaceChildren(el('h3', {}, title), body,
     el('div', { class: 'actions' }, el('button', { onclick: close }, t(actions.length ? 'gui-cancel' : 'gui-close')), buttons));
+  dialog.oncancel = (event) => { event.preventDefault(); close(); };
   dialog.onkeydown = (event) => {
     if (event.key === 'Enter' && event.target.tagName === 'INPUT' && buttons.length) buttons[buttons.length - 1].click();
   };
@@ -338,22 +384,46 @@ function memberDialog(network, member) {
 
 /* Rendering */
 
+let seen = new Set();
+let fresh = new Set();
+const collapsed = new Set(JSON.parse(stored('collapsed', '[]')));
+
+function entering(node, key) {
+  fresh.add(key);
+  if (!seen.has(key)) {
+    node.classList.add('enter');
+    node.style.animationDelay = `${Math.min(fresh.size, 12) * 35}ms`;
+  }
+  return node;
+}
+
+function avatar(member) {
+  let hash = 0;
+  for (const char of member.nickname) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
+  const node = el('div', { class: 'avatar' }, [...member.nickname][0] ?? '?', el('span', { class: `dot ${member.link}` }));
+  node.style.background = AVATAR_COLORS[hash % AVATAR_COLORS.length];
+  return node;
+}
+
 function renderHeader() {
   const header = document.getElementById('header');
   if (!status || !status.server) return header.replaceChildren();
   const connected = status.connection !== 'disconnected';
+  const dark = document.documentElement.dataset.theme === 'dark';
   header.replaceChildren(
+    el('button', {
+      class: `power ${status.connection}`,
+      title: t(connected ? 'gui-disconnect' : 'gui-connect'),
+      onclick: () => act(connected ? 'down' : 'up', connected ? {} : { link: null, nickname: null }),
+    }, icon('power')),
     el('div', { class: 'me' },
       el('div', { class: 'name' }, status.nickname),
       el('div', { class: 'sub' },
         el('span', { class: `dot ${status.connection}` }),
         t(`state-${status.connection}`),
-        status.address && el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(status.address) }, `· ${status.address}`))),
-    el('button', { class: 'icon', title: t('gui-settings'), onclick: serverDialog }, '⚙'),
-    el('button', {
-      class: connected ? '' : 'primary',
-      onclick: () => act(connected ? 'down' : 'up', connected ? {} : { link: null, nickname: null }),
-    }, t(connected ? 'gui-disconnect' : 'gui-connect')));
+        status.address && el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(status.address) }, status.address))),
+    el('button', { class: 'icon', title: t(dark ? 'gui-theme-light' : 'gui-theme-dark'), onclick: toggleTheme }, icon(dark ? 'sun' : 'moon')),
+    el('button', { class: 'icon', title: t('gui-settings'), onclick: serverDialog }, icon('gear')));
 }
 
 function renderSetup() {
@@ -362,55 +432,70 @@ function renderSetup() {
   const connect = el('button', {
     class: 'primary',
     onclick: () => act('up', { link: link.value.trim(), nickname: nickname.value.trim() || null }),
-  }, t('gui-connect'));
-  return el('div', { class: 'card pad' },
+  }, icon('power'), t('gui-connect'));
+  return el('div', { class: 'card hero enter' },
+    el('img', { src: 'icon.png', alt: '' }),
     el('h2', {}, t('gui-setup-title')), el('p', {}, t('gui-setup-hint')), linkLabel, nickLabel, connect);
+}
+
+function toggleNetwork(card, name) {
+  if (collapsed.has(name)) collapsed.delete(name); else collapsed.add(name);
+  card.classList.toggle('collapsed', collapsed.has(name));
+  store('collapsed', JSON.stringify([...collapsed]));
 }
 
 function renderNetwork(network) {
   const manager = network.role !== 'member';
-  const tags = [t(`role-${network.role}`)];
-  if (network.locked) tags.push(t('network-locked'));
-  if (network.approval) tags.push(t('network-approval'));
-  const head = el('div', { class: 'network-head' },
-    el('div', { class: 'title' }, el('b', {}, network.name), el('div', { class: 'tags' }, tags.join(' · '))),
-    manager && el('button', { class: 'small', onclick: () => invitesDialog(network.name) }, t('gui-invites')),
-    manager && el('button', { class: 'small', onclick: () => devicesDialog(network.name, 'requests') },
-      t('gui-requests'), network.requests > 0 && ' ', network.requests > 0 && el('span', { class: 'badge' }, network.requests)),
-    el('button', { class: 'icon', title: t('gui-network-settings'), onclick: () => networkMenu(network) }, '⋯'));
+  const tags = [el('span', { class: 'tag role' }, t(`role-${network.role}`))];
+  if (network.locked) tags.push(el('span', { class: 'tag' }, t('network-locked')));
+  if (network.approval) tags.push(el('span', { class: 'tag' }, t('network-approval')));
+  const online = network.members.filter((member) => member.link !== 'offline').length;
+  const stop = (run) => (event) => { event.stopPropagation(); run(); };
+  const card = el('div', { class: `card${collapsed.has(network.name) ? ' collapsed' : ''}` });
+  const head = el('div', { class: 'network-head', onclick: () => toggleNetwork(card, network.name) },
+    el('span', { class: 'chevron' }, icon('chevron')),
+    el('div', { class: 'title' },
+      el('b', {}, network.name), ' ', el('span', { class: 'muted' }, `${online + 1}/${network.members.length + 1}`),
+      el('div', { class: 'tags' }, tags)),
+    manager && network.requests > 0 && el('button', {
+      class: 'small', title: t('gui-requests'), onclick: stop(() => devicesDialog(network.name, 'requests')),
+    }, icon('users'), el('span', { class: 'badge' }, network.requests)),
+    manager && el('button', { class: 'icon', title: t('gui-invites'), onclick: stop(() => invitesDialog(network.name)) }, icon('link')),
+    el('button', { class: 'icon', title: t('gui-network-settings'), onclick: stop(() => networkMenu(network)) }, icon('more')));
   const rows = network.members.length
-    ? network.members.map((member) => el('div', { class: 'row' },
-      el('span', { class: `dot ${member.link}` }),
-      el('span', { class: 'grow' }, member.nickname),
+    ? network.members.map((member) => entering(el('div', { class: 'row' },
+      avatar(member),
+      el('div', { class: 'grow' }, el('div', {}, member.nickname), el('div', { class: 'muted link-text' }, linkText(member))),
       el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(member.address) }, member.address),
-      el('span', { class: 'muted link' }, linkText(member)),
-      manager && el('button', { class: 'icon', onclick: () => memberDialog(network, member) }, '⋯')))
+      manager && el('button', { class: 'icon', onclick: () => memberDialog(network, member) }, icon('more'))),
+    `member:${network.name}:${member.address}`))
     : el('div', { class: 'row empty' }, t('network-empty'));
-  return el('div', { class: 'card' }, head, rows);
+  card.append(head, el('div', { class: 'members' }, el('div', {}, rows)));
+  return entering(card, `network:${network.name}`);
 }
 
 function networkMenu(network) {
   const manager = network.role !== 'member';
   openDialog(network.name, ({ close }) => {
     const item = (label, run, style = '') => el('button', {
-      class: style, style: 'width:100%;margin-bottom:8px;text-align:left',
-      onclick: () => { close(); run(); },
+      class: style,
+      onclick: () => { close(); setTimeout(run, 170); },
     }, label);
-    return [
+    return el('div', { class: 'menu' },
       manager && item(t('gui-invites'), () => invitesDialog(network.name)),
       manager && item(t('gui-requests'), () => devicesDialog(network.name, 'requests')),
       manager && item(t('gui-bans'), () => devicesDialog(network.name, 'bans')),
       manager && item(t('gui-network-settings'), () => settingsDialog(network)),
-      item(t('gui-leave'), () => act('leave', { name: network.name }, t('done-leave', { name: network.name })), 'danger'),
-    ];
+      item(t('gui-leave'), () => act('leave', { name: network.name }, t('done-leave', { name: network.name })), 'danger'));
   });
 }
 
 function render() {
+  fresh = new Set();
   renderHeader();
   const main = document.getElementById('main');
   if (daemonError) {
-    main.replaceChildren(el('div', { class: 'card pad' }, el('h2', {}, 'weftd'), el('p', {}, daemonError)));
+    main.replaceChildren(el('div', { class: 'card pad enter' }, el('h2', {}, 'weftd'), el('p', {}, daemonError)));
     return;
   }
   if (!status) return;
@@ -419,12 +504,13 @@ function render() {
     return;
   }
   const toolbar = el('div', { class: 'toolbar' },
-    el('button', { onclick: createDialog }, t('gui-create-network')),
-    el('button', { class: 'primary', onclick: joinDialog }, t('gui-join-network')));
+    el('button', { onclick: createDialog }, icon('plus'), t('gui-create-network')),
+    el('button', { class: 'primary', onclick: joinDialog }, icon('join'), t('gui-join-network')));
   const networks = status.networks.length
     ? status.networks.map(renderNetwork)
-    : status.connection === 'connected' && el('div', { class: 'card pad' }, el('p', {}, t('gui-no-networks')));
+    : status.connection === 'connected' && el('div', { class: 'card pad enter' }, el('p', {}, t('gui-no-networks')));
   main.replaceChildren(toolbar, ...nodes(networks));
+  seen = fresh;
 }
 
 function sameStatus(a, b) {
