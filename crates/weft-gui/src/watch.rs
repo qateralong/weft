@@ -202,6 +202,7 @@ mod tests {
             nickname: "me".into(),
             public_key: String::new(),
             host: None,
+            public_link: None,
             servers: vec![ServerStatus {
                 hosted: false,
                 public: false,

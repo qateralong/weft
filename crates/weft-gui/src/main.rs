@@ -6,11 +6,12 @@ use serde::Serialize;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 use weft_i18n::{Language, Localizer};
 use weft_ipc::{Failure, Request, Response};
 
+mod deploy;
 mod repair;
 mod watch;
 
@@ -73,6 +74,36 @@ async fn daemon_state() -> DaemonState {
             _ => DaemonState::Other,
         },
     }
+}
+
+/// Installs the server on a machine reachable over SSH and returns its link.
+#[tauri::command]
+async fn deploy_server(
+    app: AppHandle,
+    l: State<'_, Localizer>,
+    host: String,
+    port: Option<u16>,
+    user: String,
+    password: String,
+) -> Result<String, String> {
+    let target = deploy::Target {
+        host: host.trim().to_string(),
+        port: port.unwrap_or(22),
+        user: user.trim().to_string(),
+        password,
+        binary: None,
+    };
+    let progress = app.clone();
+    let result = deploy::deploy(&target, move |step| {
+        let _ = progress.emit("deploy-step", step.to_string());
+    })
+    .await;
+    result.map_err(|error| match error {
+        deploy::DeployError::Unreachable(reason) => l.tr_args("gui-ssh-unreachable", &[("reason", &reason)]),
+        deploy::DeployError::Login => l.tr("gui-ssh-login-failed"),
+        deploy::DeployError::Script(code) => l.tr(&format!("gui-ssh-error-{code}")),
+        deploy::DeployError::Other(reason) => l.tr_args("gui-ssh-failed", &[("reason", &reason)]),
+    })
 }
 
 #[tauri::command]
@@ -204,7 +235,8 @@ fn main() {
             set_settings,
             open_release,
             daemon_state,
-            repair
+            repair,
+            deploy_server
         ])
         .setup(move |app| {
             app.manage(SettingsStore::load(app.handle()));

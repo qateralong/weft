@@ -529,6 +529,9 @@ impl Daemon {
                     let _ = reply.send(Response::Error(Failure::InvalidLink));
                     return;
                 };
+                if public_server().is_some_and(|public| public == link.server()) {
+                    self.settings.public_server = Some(true);
+                }
                 Some(self.session_for(&link))
             }
             (None, Some(selector)) => match self.target(Some(selector), None) {
@@ -1140,6 +1143,7 @@ impl Daemon {
             public_key: self.keypair.public().to_string(),
             servers,
             host,
+            public_link: public_server().map(|link| link.to_string()),
         }
     }
 

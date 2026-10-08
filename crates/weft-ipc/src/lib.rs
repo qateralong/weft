@@ -229,6 +229,9 @@ pub struct Status {
     /// The server this device hosts, if any.
     #[serde(default)]
     pub host: Option<HostStatus>,
+    /// The public Weft server's link, for choosing it again.
+    #[serde(default)]
+    pub public_link: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
