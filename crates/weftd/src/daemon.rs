@@ -649,7 +649,7 @@ impl Daemon {
     fn member_status(&self, peer: &weft_proto::control::Peer) -> MemberStatus {
         let link = PublicKey::from_slice(&peer.key).ok().and_then(|key| self.mesh.link(&key));
         let (link, latency) = match link {
-            None if !peer.online => (PeerLink::Offline, None),
+            _ if !peer.online => (PeerLink::Offline, None),
             None | Some(weft_mesh::PeerLink::Connecting) => (PeerLink::Connecting, None),
             Some(weft_mesh::PeerLink::Relay) => (PeerLink::Relay, None),
             Some(weft_mesh::PeerLink::Direct { latency, .. }) => (PeerLink::Direct, latency),

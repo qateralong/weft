@@ -12,8 +12,12 @@ workspace = true
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 tauri = { workspace = true, features = ["tray-icon", "image-png"] }
+tauri-plugin-notification.workspace = true
+tauri-plugin-opener.workspace = true
 tauri-plugin-single-instance.workspace = true
+tokio.workspace = true
 weft-i18n.workspace = true
 weft-ipc.workspace = true
 

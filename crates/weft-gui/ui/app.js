@@ -5,7 +5,13 @@ const POLL_MS = 1500;
 const EXPIRY = [['gui-expiry-never', null], ['gui-expiry-hour', 3600], ['gui-expiry-day', 86400],
   ['gui-expiry-week', 7 * 86400], ['gui-expiry-month', 30 * 86400]];
 
+const RELEASES_API = 'https://api.github.com/repos/qateralong/weft/releases/latest';
+const UPDATE_EVERY_MS = 6 * 3600 * 1000;
+
 let messages = {};
+let appVersion = '0.0.0';
+let settings = { notifications: true, updates: true };
+let update = null;
 let status = null;
 let daemonError = null;
 let pollTimer = null;
@@ -211,10 +217,57 @@ function diagnosticsDialog() {
   });
 }
 
+function newer(tag) {
+  const parse = (text) => text.replace(/^v/, '').split('.').map((part) => parseInt(part, 10) || 0);
+  const [a, b] = [parse(tag), parse(appVersion)];
+  for (let i = 0; i < 3; i += 1) {
+    if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
+  }
+  return false;
+}
+
+async function checkUpdates() {
+  if (!settings.updates) {
+    update = null;
+    return;
+  }
+  let info = null;
+  try { info = JSON.parse(stored('update', 'null')); } catch { info = null; }
+  if (!info || Date.now() - info.at > UPDATE_EVERY_MS) {
+    try {
+      const response = await fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } });
+      if (!response.ok) return;
+      const release = await response.json();
+      info = { tag: release.tag_name, url: release.html_url, at: Date.now() };
+      store('update', JSON.stringify(info));
+    } catch {
+      return;
+    }
+  }
+  const next = info && newer(info.tag) ? info : null;
+  if (JSON.stringify(next) !== JSON.stringify(update)) {
+    update = next;
+    render();
+  }
+}
+
+function settingToggle(labelId, key) {
+  const box = el('input', {
+    type: 'checkbox', checked: settings[key],
+    onchange: async () => {
+      settings = { ...settings, [key]: box.checked };
+      try { await invoke('set_settings', { settings }); } catch (e) { toast(String(e), true); }
+      if (key === 'updates') { update = null; render(); checkUpdates(); }
+    },
+  });
+  return el('label', { class: 'check' }, box, el('span', {}, t(labelId)));
+}
+
 function serverDialog() {
   const [linkLabel, link] = field('gui-server-link', { value: status?.server ?? '', placeholder: 'weft://…' });
   const [nickLabel, nickname] = field('gui-nickname', { value: status?.nickname ?? '' });
-  openDialog(t('gui-settings'), () => [linkLabel, nickLabel], [{
+  openDialog(t('gui-settings'), () => [linkLabel, nickLabel,
+    settingToggle('gui-notifications', 'notifications'), settingToggle('gui-check-updates', 'updates')], [{
     label: t('gui-save'), primary: true,
     run: async () => {
       await request('up', { link: link.value.trim() || null, nickname: nickname.value.trim() || null });
@@ -530,13 +583,17 @@ function render() {
     main.replaceChildren(renderSetup());
     return;
   }
+  const banner = update && el('div', { class: 'card update enter' },
+    el('span', { class: 'grow' }, t('gui-update', { version: update.tag.replace(/^v/, '') })),
+    el('button', { class: 'small primary', onclick: () => invoke('open_release', { url: update.url }).catch((e) => toast(String(e), true)) },
+      t('gui-download')));
   const toolbar = el('div', { class: 'toolbar' },
     el('button', { onclick: createDialog }, icon('plus'), t('gui-create-network')),
     el('button', { class: 'primary', onclick: joinDialog }, icon('join'), t('gui-join-network')));
   const networks = status.networks.length
     ? status.networks.map(renderNetwork)
     : status.connection === 'connected' && el('div', { class: 'card pad enter' }, el('p', {}, t('gui-no-networks')));
-  main.replaceChildren(toolbar, ...nodes(networks));
+  main.replaceChildren(...nodes([banner, toolbar, networks]));
   seen = fresh;
 }
 
@@ -566,8 +623,12 @@ async function poll() {
 async function start() {
   const catalog = await invoke('catalog');
   messages = catalog.messages;
+  appVersion = catalog.version;
+  try { settings = await invoke('settings'); } catch { /* defaults */ }
   document.documentElement.lang = catalog.language;
   await poll();
+  checkUpdates();
+  setInterval(checkUpdates, UPDATE_EVERY_MS);
 }
 
 start();

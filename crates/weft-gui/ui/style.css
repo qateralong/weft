@@ -217,6 +217,18 @@ main { padding: 14px 16px 28px; }
 .dot.relay { background: var(--warn); }
 .dot.connecting { background: var(--warn); animation: blink 1.2s ease-in-out infinite; }
 
+.card.update {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px 10px 14px;
+  background: var(--accent-soft);
+  border-color: transparent;
+  font-weight: 600;
+}
+
+.card.update .grow { flex: 1; }
+
 /* Controls */
 
 button {

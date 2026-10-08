@@ -270,3 +270,14 @@ gui-diagnostics = Диагностика
 gui-save-report = Сохранить отчёт
 gui-refresh = Обновить
 done-report-saved = Отчёт сохранён: { $path }
+
+notify-online = { $nickname } в сети «{ $network }»
+notify-offline = { $nickname } вышел из сети «{ $network }»
+notify-joined = { $nickname } вступил в сеть «{ $network }»
+notify-request = Новая заявка на вход в сеть «{ $network }»
+notify-disconnected = Связь с сервером потеряна, переподключаюсь
+notify-reconnected = Связь с сервером восстановлена
+gui-notifications = Показывать уведомления
+gui-check-updates = Проверять обновления
+gui-update = Доступна версия Weft { $version }
+gui-download = Скачать

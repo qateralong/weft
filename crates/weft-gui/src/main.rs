@@ -7,12 +7,20 @@ use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, State, WindowEvent};
+use tauri_plugin_opener::OpenerExt;
 use weft_i18n::{Language, Localizer};
 use weft_ipc::{Request, Response};
+
+mod watch;
+
+use watch::{Settings, SettingsStore};
+
+const RELEASES: &str = "https://github.com/qateralong/weft/releases/";
 
 #[derive(Serialize)]
 struct Catalog {
     language: &'static str,
+    version: &'static str,
     messages: BTreeMap<String, String>,
 }
 
@@ -22,7 +30,25 @@ fn catalog(l: State<'_, Localizer>) -> Catalog {
         Language::English => "en",
         Language::Russian => "ru",
     };
-    Catalog { language, messages: l.catalog() }
+    Catalog { language, version: env!("CARGO_PKG_VERSION"), messages: l.catalog() }
+}
+
+#[tauri::command]
+fn settings(store: State<'_, SettingsStore>) -> Settings {
+    store.get()
+}
+
+#[tauri::command]
+fn set_settings(store: State<'_, SettingsStore>, settings: Settings) -> Result<(), String> {
+    store.set(settings)
+}
+
+#[tauri::command]
+fn open_release(app: AppHandle, url: String) -> Result<(), String> {
+    if !url.starts_with(RELEASES) {
+        return Err("not a Weft release page".into());
+    }
+    app.opener().open_url(url, None::<&str>).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -54,7 +80,7 @@ async fn report(l: &Localizer, logs: bool) -> Result<String, String> {
     }
 }
 
-async fn send(l: &Localizer, request: Request) -> Result<Response, String> {
+pub(crate) async fn send(l: &Localizer, request: Request) -> Result<Response, String> {
     let path = weft_ipc::socket_path();
     let response = weft_ipc::request(&path, &request).await.map_err(|error| {
         let path = path.display().to_string();
@@ -133,10 +159,22 @@ fn main() {
     let hidden = std::env::args().any(|arg| arg == "--hidden");
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show_window(app)))
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(Localizer::from_env())
-        .invoke_handler(tauri::generate_handler![catalog, request, diagnostics, save_report])
+        .invoke_handler(tauri::generate_handler![
+            catalog,
+            request,
+            diagnostics,
+            save_report,
+            settings,
+            set_settings,
+            open_release
+        ])
         .setup(move |app| {
+            app.manage(SettingsStore::load(app.handle()));
             tray(app.handle())?;
+            tauri::async_runtime::spawn(watch::run(app.handle().clone()));
             if !hidden {
                 show_window(app.handle());
             }

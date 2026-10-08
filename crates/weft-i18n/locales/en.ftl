@@ -270,3 +270,14 @@ gui-diagnostics = Diagnostics
 gui-save-report = Save report
 gui-refresh = Refresh
 done-report-saved = Report saved: { $path }
+
+notify-online = { $nickname } is online in “{ $network }”
+notify-offline = { $nickname } went offline in “{ $network }”
+notify-joined = { $nickname } joined “{ $network }”
+notify-request = New join request in “{ $network }”
+notify-disconnected = Connection to the server lost, reconnecting
+notify-reconnected = Connected to the server again
+gui-notifications = Show notifications
+gui-check-updates = Check for updates
+gui-update = Weft { $version } is available
+gui-download = Download
