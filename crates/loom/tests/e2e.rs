@@ -465,6 +465,7 @@ async fn administration_and_relay_limits() {
     assert!(matches!(request(&path, &block("nobody")).await, Ok(AdminResponse::Error(_))));
     assert_eq!(request(&path, &block("BOB")).await.unwrap(), AdminResponse::Ok);
     a.state_where(|state| state.peers.iter().all(|peer| !peer.online)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let mut again = Client::connect(&server, 2).await;
     let id = again.send(ClientKind::Hello(Hello { version: PROTOCOL_VERSION, nickname: "bob".into() })).await;
     assert!(matches!(again.reply(id).await, ServerKind::Failure(f) if f.code() == ErrorCode::Banned));
@@ -476,6 +477,7 @@ async fn administration_and_relay_limits() {
 
     let unblock = AdminRequest::Unblock { device: Ipv4Addr::from(welcome_b.address).to_string() };
     assert_eq!(request(&path, &unblock).await.unwrap(), AdminResponse::Ok);
+    tokio::time::sleep(Duration::from_millis(50)).await;
     Client::connect(&server, 2).await.hello("bob").await;
 
     let delete = AdminRequest::DeleteNetwork { name: "LAN".into() };
