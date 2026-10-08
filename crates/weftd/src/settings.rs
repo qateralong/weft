@@ -15,6 +15,18 @@ pub struct Settings {
     pub multicast_groups: Vec<Ipv4Addr>,
     /// Resolve peer names like bob.weft through the system resolver.
     pub dns: bool,
+    /// How the control connection to the server looks on the wire.
+    pub transport: Transport,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    /// TLS that looks like HTTPS, with the Noise stream inside.
+    #[default]
+    Tls,
+    /// The bare Noise stream, as in Weft 0.1.0.
+    Raw,
 }
 
 pub const MINECRAFT_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 2, 60);
@@ -29,6 +41,7 @@ impl Default for Settings {
             broadcast: true,
             multicast_groups: vec![MINECRAFT_GROUP],
             dns: true,
+            transport: Transport::Tls,
         }
     }
 }

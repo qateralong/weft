@@ -286,3 +286,7 @@ diag-dns = Peer names
 diag-dns-ok = name.weft works through the system resolver
 diag-dns-unconfigured = the system resolver is not set up for .weft (Linux needs systemd-resolved)
 diag-dns-off = turned off
+
+diag-transport = Control channel
+diag-transport-tls = TLS, looks like HTTPS
+diag-transport-raw = plain encrypted stream (transport = "raw")

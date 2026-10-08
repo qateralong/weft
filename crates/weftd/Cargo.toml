@@ -23,7 +23,7 @@ weft-ipc.workspace = true
 weft-mesh.workspace = true
 weft-portmap.workspace = true
 weft-proto.workspace = true
-weft-session = { workspace = true, features = ["tokio"] }
+weft-session = { workspace = true, features = ["tls"] }
 weft-tun.workspace = true
 
 [target.'cfg(unix)'.dependencies]

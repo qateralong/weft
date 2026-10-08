@@ -10,3 +10,7 @@ data_dir = "/var/lib/loom"
 # Relay limits in Mbit/s for peers that cannot connect directly; 0 means no limit.
 # relay_mbit = 32
 # relay_total_mbit = 0
+# Clients wrap the connection in TLS so it looks like HTTPS. A certificate for public_host
+# (for example from Let's Encrypt) makes the disguise complete; otherwise a self-signed one is used.
+# tls_cert = "/etc/loom/fullchain.pem"
+# tls_key = "/etc/loom/privkey.pem"

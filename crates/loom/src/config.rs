@@ -16,6 +16,9 @@ pub struct Config {
     pub relay_mbit: u32,
     /// Relay limit for the whole server in megabits per second, 0 for none.
     pub relay_total_mbit: u32,
+    /// PEM certificate chain for the TLS camouflage; a self-signed one is made when unset.
+    pub tls_cert: Option<PathBuf>,
+    pub tls_key: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -28,6 +31,8 @@ impl Default for Config {
             max_members: 250,
             relay_mbit: 32,
             relay_total_mbit: 0,
+            tls_cert: None,
+            tls_key: None,
         }
     }
 }

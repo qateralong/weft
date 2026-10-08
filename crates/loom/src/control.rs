@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use rand::RngExt;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
@@ -17,9 +17,11 @@ use weft_proto::control::{
 use weft_proto::{MIN_PACKET_LEN, ObfsKey, PublicKey};
 use weft_session::StaticKeypair;
 use weft_session::stream::{self, io};
+use weft_session::tls::{RECORD_HANDSHAKE, TlsAcceptor};
 
 use crate::db::{DbError, Device, InviteRow, NetworkRow, name_key, unix_now};
 use crate::hub::{Hub, MAX_CANDIDATES, SharedHub, lock};
+use crate::tls::{http_reply, is_http};
 use crate::udp;
 use crate::validate;
 
@@ -46,7 +48,13 @@ enum ConnError {
     Stale,
 }
 
-pub async fn serve(listener: TcpListener, hub: SharedHub, keypair: Arc<StaticKeypair>, socket: Arc<UdpSocket>) {
+pub async fn serve(
+    listener: TcpListener,
+    hub: SharedHub,
+    keypair: Arc<StaticKeypair>,
+    socket: Arc<UdpSocket>,
+    tls: TlsAcceptor,
+) {
     let mut next_conn = 0;
     loop {
         let (stream, addr) = match listener.accept().await {
@@ -58,26 +66,75 @@ pub async fn serve(listener: TcpListener, hub: SharedHub, keypair: Arc<StaticKey
             }
         };
         next_conn += 1;
-        let (hub, keypair, socket, conn) = (hub.clone(), keypair.clone(), socket.clone(), next_conn);
+        let (hub, keypair, socket, tls, conn) = (hub.clone(), keypair.clone(), socket.clone(), tls.clone(), next_conn);
         tokio::spawn(async move {
-            if let Err(error) = connection(stream, addr, hub, keypair, socket, conn).await {
+            if let Err(error) = accept(stream, addr, tls, hub, keypair, socket, conn).await {
                 tracing::debug!(%addr, %error, "connection closed");
             }
         });
     }
 }
 
-async fn connection(
+/// Takes TLS or the plain stream of older clients, and answers HTTP scanners like nginx would.
+async fn accept(
     stream: TcpStream,
     addr: SocketAddr,
+    tls: TlsAcceptor,
     hub: SharedHub,
     keypair: Arc<StaticKeypair>,
     socket: Arc<UdpSocket>,
     conn: u64,
 ) -> Result<(), ConnError> {
-    let udp_port = socket.local_addr()?.port();
     stream.set_nodelay(true)?;
-    let (mut reader, mut writer) = stream.into_split();
+    let mut start = [0; 4];
+    let peeked = timeout(HANDSHAKE_TIMEOUT, stream.peek(&mut start)).await.map_err(|_| ConnError::Timeout)??;
+    if peeked == 0 {
+        return Ok(());
+    }
+    if start[0] != RECORD_HANDSHAKE {
+        if is_http(&start[..peeked]) {
+            let message = "<center>The plain HTTP request was sent to HTTPS port</center>\r\n";
+            return decoy(stream, &http_reply("400 Bad Request", message)).await;
+        }
+        let (reader, writer) = stream.into_split();
+        return connection(reader, writer, addr, hub, keypair, socket, conn).await;
+    }
+    let stream = timeout(HANDSHAKE_TIMEOUT, tls.accept(stream)).await.map_err(|_| ConnError::Timeout)??;
+    let mut stream = stream;
+    let mut start = [0; 4];
+    timeout(HANDSHAKE_TIMEOUT, stream.read_exact(&mut start)).await.map_err(|_| ConnError::Timeout)??;
+    if is_http(&start) {
+        return decoy(stream, &http_reply("404 Not Found", "")).await;
+    }
+    let (reader, writer) = tokio::io::split(stream);
+    let reader = std::io::Cursor::new(start).chain(reader);
+    connection(reader, writer, addr, hub, keypair, socket, conn).await
+}
+
+/// Reads the request, answers and closes gracefully so the reply is not lost to a reset.
+async fn decoy<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, reply: &[u8]) -> Result<(), ConnError> {
+    let mut buf = [0; 4096];
+    let _ = timeout(Duration::from_millis(500), stream.read(&mut buf)).await;
+    stream.write_all(reply).await?;
+    stream.shutdown().await?;
+    let _ = timeout(Duration::from_secs(1), async { while matches!(stream.read(&mut buf).await, Ok(1..)) {} }).await;
+    Ok(())
+}
+
+async fn connection<R, W>(
+    mut reader: R,
+    mut writer: W,
+    addr: SocketAddr,
+    hub: SharedHub,
+    keypair: Arc<StaticKeypair>,
+    socket: Arc<UdpSocket>,
+    conn: u64,
+) -> Result<(), ConnError>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let udp_port = socket.local_addr()?.port();
     let own = ObfsKey::for_receiver(&keypair.public());
 
     let (mut sender, mut receiver, hello) = timeout(HANDSHAKE_TIMEOUT, async {

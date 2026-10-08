@@ -15,6 +15,8 @@ argon2.workspace = true
 clap = { workspace = true, features = ["derive"] }
 getrandom.workspace = true
 rand.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -24,7 +26,7 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 weft-proto.workspace = true
-weft-session = { workspace = true, features = ["tokio"] }
+weft-session = { workspace = true, features = ["tls"] }
 
 [dev-dependencies]
 tokio.workspace = true

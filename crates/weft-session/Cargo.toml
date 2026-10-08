@@ -12,14 +12,17 @@ workspace = true
 
 [features]
 tokio = ["dep:tokio"]
+tls = ["tokio", "dep:rustls", "dep:tokio-rustls"]
 
 [dependencies]
 blake2.workspace = true
 getrandom.workspace = true
 rand.workspace = true
+rustls = { workspace = true, optional = true }
 snow.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
 tracing.workspace = true
 weft-proto.workspace = true
 x25519-dalek.workspace = true

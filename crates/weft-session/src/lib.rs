@@ -6,6 +6,8 @@ pub mod replay;
 pub mod stream;
 pub mod tai64n;
 pub mod timers;
+#[cfg(feature = "tls")]
+pub mod tls;
 
 pub use error::Error;
 pub use keys::StaticKeypair;

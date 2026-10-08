@@ -286,3 +286,7 @@ diag-dns = Имена участников
 diag-dns-ok = имя.weft работает через системный резолвер
 diag-dns-unconfigured = системный резолвер не настроен для .weft (на Linux нужен systemd-resolved)
 diag-dns-off = выключены
+
+diag-transport = Канал управления
+diag-transport-tls = TLS, выглядит как HTTPS
+diag-transport-raw = простой шифрованный поток (transport = "raw")

@@ -10,6 +10,9 @@ pub struct Diagnostics {
     pub os: String,
     pub connection: Connection,
     pub server: Option<String>,
+    /// `tls` or `raw` for the control connection.
+    #[serde(default)]
+    pub transport: String,
     pub server_udp: Option<bool>,
     pub observed: Option<SocketAddr>,
     pub local_port: u16,
@@ -110,6 +113,10 @@ pub fn format(diagnostics: &Diagnostics, tr: &Translate<'_>) -> String {
         (tr("diag-version", &[]), format!("{} · {}", d.version, d.os)),
         (tr("diag-server", &[]), d.server.clone().unwrap_or_else(|| none.clone())),
         (tr("diag-connection", &[]), tr(connection, &[])),
+        (
+            tr("diag-transport", &[]),
+            tr(if d.transport == "raw" { "diag-transport-raw" } else { "diag-transport-tls" }, &[]),
+        ),
         (tr("diag-server-udp", &[]), tr(udp, &[])),
         (tr("diag-public", &[]), d.observed.map_or_else(|| none.clone(), |addr| addr.to_string())),
         (tr("diag-local-port", &[]), d.local_port.to_string()),
@@ -203,6 +210,7 @@ mod tests {
             os: "linux x86_64".into(),
             connection: Connection::Connected,
             server: Some("weft://example.com".into()),
+            transport: "tls".into(),
             server_udp: Some(false),
             observed: None,
             local_port: 41000,

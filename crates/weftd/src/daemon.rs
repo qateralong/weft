@@ -24,7 +24,7 @@ use weft_tun::{DEFAULT_MTU, Dns, Route, Tun, TunConfig};
 use crate::control::{Control, ControlEvent};
 use crate::dns;
 use crate::ipc::Command;
-use crate::settings::{Settings, SettingsFile, default_nickname};
+use crate::settings::{Settings, SettingsFile, Transport, default_nickname};
 
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -341,8 +341,14 @@ impl Daemon {
         let Some(link) = self.server_link() else { return };
         let nickname = self.settings.nickname.clone().unwrap_or_else(default_nickname);
         self.generation += 1;
-        self.control =
-            Some(Control::spawn(link, self.keypair.clone(), nickname, self.generation, self.control_tx.clone()));
+        self.control = Some(Control::spawn(
+            link,
+            self.settings.transport,
+            self.keypair.clone(),
+            nickname,
+            self.generation,
+            self.control_tx.clone(),
+        ));
         self.connection = Connection::Connecting;
         self.reconnect_at = None;
     }
@@ -667,6 +673,11 @@ impl Daemon {
             os: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
             connection: self.connection,
             server: self.settings.server.clone(),
+            transport: match self.settings.transport {
+                Transport::Tls => "tls",
+                Transport::Raw => "raw",
+            }
+            .to_string(),
             server_udp: report.server_udp,
             observed: report.observed,
             local_port: self.udp_port,

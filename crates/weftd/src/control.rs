@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -11,8 +11,10 @@ use weft_proto::control::{
     self, ClientKind, ClientMessage, Empty, ErrorCode, Hello, PROTOCOL_VERSION, ServerKind, ServerMessage, Welcome,
 };
 use weft_proto::{Host, Link};
-use weft_session::StaticKeypair;
 use weft_session::stream::{self, io};
+use weft_session::{StaticKeypair, tls};
+
+use crate::settings::Transport;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_INTERVAL: Duration = Duration::from_secs(30);
@@ -35,6 +37,7 @@ pub struct Control {
 impl Control {
     pub fn spawn(
         link: Link,
+        transport: Transport,
         keypair: Arc<StaticKeypair>,
         nickname: String,
         generation: u64,
@@ -42,7 +45,7 @@ impl Control {
     ) -> Self {
         let (commands, rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
-            let reason = match run(link, keypair, nickname, generation, &events, rx).await {
+            let reason = match run(link, transport, keypair, nickname, generation, &events, rx).await {
                 Ok(()) => "closed".to_string(),
                 Err(error) => error.to_string(),
             };
@@ -78,8 +81,12 @@ enum Error {
     Protocol,
 }
 
+type Reader = Box<dyn AsyncRead + Unpin + Send>;
+type Writer = Box<dyn AsyncWrite + Unpin + Send>;
+
 async fn run(
     link: Link,
+    transport: Transport,
     keypair: Arc<StaticKeypair>,
     nickname: String,
     generation: u64,
@@ -97,7 +104,18 @@ async fn run(
 
     let stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(server)).await.map_err(|_| Error::Timeout)??;
     stream.set_nodelay(true)?;
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, mut writer): (Reader, Writer) = match transport {
+        Transport::Tls => {
+            let connect = tls::connector().connect(tls::server_name(&host), stream);
+            let stream = timeout(CONNECT_TIMEOUT, connect).await.map_err(|_| Error::Timeout)??;
+            let (reader, writer) = tokio::io::split(stream);
+            (Box::new(reader), Box::new(writer))
+        }
+        Transport::Raw => {
+            let (reader, writer) = stream.into_split();
+            (Box::new(reader), Box::new(writer))
+        }
+    };
 
     let (mut sender, mut receiver, welcome) = timeout(CONNECT_TIMEOUT, async {
         let (handshake, frame) = stream::connect(&keypair, link.server_key, SystemTime::now())?;

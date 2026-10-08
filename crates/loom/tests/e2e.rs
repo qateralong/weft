@@ -4,8 +4,7 @@ use std::time::{Duration, SystemTime};
 use loom::Server;
 use loom::config::Config;
 use loom::db::Db;
-use tokio::io::AsyncWriteExt;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use weft_proto::control::{
     self, Candidates, ClientKind, ClientMessage, ErrorCode, Hello, InviteCode, InviteRequest, MemberAction,
@@ -15,23 +14,38 @@ use weft_proto::control::{
 use weft_proto::loom::{parse_observed, parse_relayed, relay_packet};
 use weft_proto::obfs::discover_packet;
 use weft_proto::{Header, ObfsKey, PublicKey};
-use weft_session::StaticKeypair;
 use weft_session::stream::{self, Receiver, Sender, io};
+use weft_session::{StaticKeypair, tls};
 
 struct Client {
     key: PublicKey,
     sender: Sender,
     receiver: Receiver,
-    reader: OwnedReadHalf,
-    writer: OwnedWriteHalf,
+    reader: Box<dyn AsyncRead + Unpin + Send>,
+    writer: Box<dyn AsyncWrite + Unpin + Send>,
     next_id: u32,
 }
 
 impl Client {
     async fn connect(server: &Server, secret: u8) -> Client {
-        let keypair = StaticKeypair::from_secret(&[secret; 32]);
+        let (reader, writer) = TcpStream::connect(server.tcp_addr).await.unwrap().into_split();
+        Self::handshake(server, secret, Box::new(reader), Box::new(writer)).await
+    }
+
+    async fn connect_tls(server: &Server, secret: u8) -> Client {
         let stream = TcpStream::connect(server.tcp_addr).await.unwrap();
-        let (mut reader, mut writer) = stream.into_split();
+        let stream = tls::connector().connect(tls::server_name("127.0.0.1"), stream).await.unwrap();
+        let (reader, writer) = tokio::io::split(stream);
+        Self::handshake(server, secret, Box::new(reader), Box::new(writer)).await
+    }
+
+    async fn handshake(
+        server: &Server,
+        secret: u8,
+        mut reader: Box<dyn AsyncRead + Unpin + Send>,
+        mut writer: Box<dyn AsyncWrite + Unpin + Send>,
+    ) -> Client {
+        let keypair = StaticKeypair::from_secret(&[secret; 32]);
         let (handshake, frame) = stream::connect(&keypair, server.public_key, SystemTime::now()).unwrap();
         writer.write_all(&frame).await.unwrap();
         let packet = io::read_handshake(&mut reader, handshake.own_obfs()).await.unwrap();
@@ -484,4 +498,31 @@ async fn administration_and_relay_limits() {
     assert_eq!(request(&path, &delete).await.unwrap(), AdminResponse::Ok);
     a.state_where(|state| state.networks.is_empty()).await;
     let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn tls_camouflage() {
+    let server = start().await;
+    let mut a = Client::connect_tls(&server, 1).await;
+    let mut b = Client::connect(&server, 2).await;
+    a.hello("alice").await;
+    b.hello("bob").await;
+    a.request(ClientKind::CreateNetwork(credentials("lan", "secret"))).await.unwrap();
+    b.request(ClientKind::JoinNetwork(credentials("lan", "secret"))).await.unwrap();
+    a.state_where(|state| state.peers.iter().any(|peer| peer.nickname == "bob" && peer.online)).await;
+
+    let reply = |mut stream: Box<dyn AsyncRead + Unpin + Send>| async move {
+        let mut text = String::new();
+        stream.read_to_string(&mut text).await.unwrap();
+        text
+    };
+    let mut plain = TcpStream::connect(server.tcp_addr).await.unwrap();
+    plain.write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n").await.unwrap();
+    assert!(reply(Box::new(plain)).await.starts_with("HTTP/1.1 400 Bad Request\r\nServer: nginx"));
+
+    let stream = TcpStream::connect(server.tcp_addr).await.unwrap();
+    let mut secure = tls::connector().connect(tls::server_name("example.com"), stream).await.unwrap();
+    secure.write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n").await.unwrap();
+    let text = reply(Box::new(secure)).await;
+    assert!(text.starts_with("HTTP/1.1 404 Not Found\r\nServer: nginx"), "{text}");
 }
