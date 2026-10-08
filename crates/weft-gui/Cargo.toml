@@ -11,16 +11,17 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+arboard.workspace = true
+dirs.workspace = true
+notify-rust.workspace = true
 russh.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { workspace = true, features = ["tray-icon", "image-png"] }
-tauri-plugin-notification.workspace = true
-tauri-plugin-opener.workspace = true
-tauri-plugin-single-instance.workspace = true
+slint.workspace = true
 tokio.workspace = true
+ureq.workspace = true
 weft-i18n.workspace = true
 weft-ipc.workspace = true
 
 [build-dependencies]
-tauri-build.workspace = true
+slint-build.workspace = true

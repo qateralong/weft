@@ -1,0 +1,486 @@
+// The Weft window and its tray icon.
+
+import { Theme, I18n, Icons, Utils } from "theme.slint";
+import { Button } from "widgets.slint";
+import { Header, NetworkView, Notice, Welcome, Toast, UpdateBanner, MemberRow, NetworkCard } from "main.slint";
+import {
+    Chooser, Step, ServerRow, InviteRow, DeviceRow, CreateDialog, JoinDialog, SettingsDialog, ServersDialog,
+    ServerMenuDialog, HostDialog, AddServerDialog, InvitesDialog, DevicesDialog, NetworkSettingsDialog,
+    NetworkMenuDialog, MemberDialog, DiagnosticsDialog,
+} from "dialogs.slint";
+
+export { Theme, I18n, Utils, Chooser, Step, ServerRow, InviteRow, DeviceRow, MemberRow, NetworkCard }
+
+export component WeftTray inherits SystemTrayIcon {
+    in property <string> open-text;
+    in property <string> connect-text;
+    in property <string> disconnect-text;
+    in property <string> quit-text;
+    callback open();
+    callback connect();
+    callback disconnect();
+    callback quit();
+    icon: @image-url("../icons/tray.png");
+    tooltip: "Weft";
+    title: "Weft";
+    clicked => {
+        root.open();
+    }
+    Menu {
+        MenuItem {
+            title: open-text;
+            activated => {
+                root.open();
+            }
+        }
+
+        MenuSeparator { }
+
+        MenuItem {
+            title: connect-text;
+            activated => {
+                root.connect();
+            }
+        }
+
+        MenuItem {
+            title: disconnect-text;
+            activated => {
+                root.disconnect();
+            }
+        }
+
+        MenuSeparator { }
+
+        MenuItem {
+            title: quit-text;
+            activated => {
+                root.quit();
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    // Main screen.
+    in property <string> phase: "starting";
+    in property <string> nickname;
+    in-out property <string> welcome-nickname;
+    in property <string> connection: "disconnected";
+    in property <string> address;
+    in property <[NetworkCard]> networks;
+    in property <string> update-version;
+    in property <string> problem-title;
+    in property <string> problem-text;
+    in property <string> problem-action;
+    in property <bool> problem-busy;
+    in property <string> empty-text;
+    in property <string> toast-text;
+    in property <bool> toast-error;
+    in property <bool> toast-shown;
+
+    // Dialogs: which one is open and what it shows.
+    in property <string> dialog;
+    in property <string> dialog-title;
+    in property <string> dialog-error;
+    in property <bool> dialog-busy;
+    in-out property <string> settings-nickname;
+    in property <[string]> languages;
+    in-out property <int> language-index;
+    in property <int> server-count;
+    in-out property <bool> notifications;
+    in-out property <bool> updates;
+    in property <[ServerRow]> servers;
+    in property <bool> menu-local;
+    in property <bool> menu-has-link;
+    in-out property <string> host-address;
+    in-out property <string> host-port;
+    in property <string> list-network;
+    in property <[InviteRow]> invites;
+    in property <string> invite-created;
+    in property <[string]> expiries;
+    in property <string> devices-kind;
+    in property <[DeviceRow]> devices;
+    in property <bool> network-owner;
+    in-out property <bool> network-locked;
+    in-out property <bool> network-approval;
+    in property <bool> network-manager;
+    in property <string> member-address;
+    in property <string> report;
+
+    callback power();
+    callback toggle-theme();
+    callback open-settings();
+    callback open-diagnostics();
+    callback create();
+    callback join();
+    callback copy(string);
+    callback toggle-network(int);
+    callback network-invites(int);
+    callback network-requests(int);
+    callback network-menu(int);
+    callback member-menu(int, int);
+    callback fix-problem();
+    callback download-update();
+    callback nickname-changed(string);
+    callback dialog-leave();
+    callback create-submit(string, string, string);
+    callback join-submit(string, string);
+    callback settings-save(string);
+    callback language-chosen(int);
+    callback open-servers();
+    callback notifications-toggled(bool);
+    callback updates-toggled(bool);
+    callback server-menu(int);
+    callback add-server();
+    callback add-server-submit();
+    callback host-settings();
+    callback copy-server-link();
+    callback remove-server();
+    callback host-save(string, string);
+    callback invite-create(string, int);
+    callback invite-revoke(string);
+    callback device-act(string, string);
+    callback network-configure(string, bool);
+    callback network-password(string);
+    callback network-delete();
+    callback network-pick(string);
+    callback member-act(string);
+    callback report-refresh();
+    callback report-save();
+
+    title: "Weft";
+    icon: @image-url("../icons/icon.png");
+    preferred-width: 440px;
+    preferred-height: 680px;
+    min-width: 380px;
+    min-height: 480px;
+    background: Theme.bg;
+    animate background { duration: 300ms; }
+    default-font-size: 14px;
+
+    VerticalLayout {
+        Header {
+            full: phase == "main";
+            nickname: nickname;
+            connection: connection;
+            address: address;
+            power => {
+                root.power();
+            }
+            copy(text) => {
+                root.copy(text);
+            }
+            diagnostics => {
+                root.open-diagnostics();
+            }
+            theme => {
+                root.toggle-theme();
+            }
+            settings => {
+                root.open-settings();
+            }
+        }
+
+        Flickable {
+            vertical-stretch: 1;
+            content-height: content.preferred-height;
+            content := VerticalLayout {
+                padding: 16px;
+                padding-top: 14px;
+                spacing: 12px;
+                alignment: start;
+                if phase == "starting": Notice {
+                    title: I18n.t("gui-starting");
+                    busy: true;
+                }
+                if phase == "problem": Notice {
+                    title: problem-title;
+                    text: problem-text;
+                    action: problem-action;
+                    action-busy: problem-busy;
+                    act => {
+                        root.fix-problem();
+                    }
+                }
+                if phase == "welcome": Welcome {
+                    nickname <=> root.welcome-nickname;
+                    nickname-changed(name) => {
+                        root.nickname-changed(name);
+                    }
+                    create => {
+                        root.create();
+                    }
+                    join => {
+                        root.join();
+                    }
+                }
+                if phase == "main" && update-version != "": UpdateBanner {
+                    version: update-version;
+                    download => {
+                        root.download-update();
+                    }
+                }
+                if phase == "main": HorizontalLayout {
+                    spacing: 10px;
+                    Button {
+                        horizontal-stretch: 1;
+                        icon: I18n.rtl ? Icons.join : Icons.plus;
+                        text: I18n.t(I18n.rtl ? "gui-join-network" : "gui-create-network");
+                        primary: I18n.rtl;
+                        clicked => {
+                            if I18n.rtl {
+                                root.join();
+                            } else {
+                                root.create();
+                            }
+                        }
+                    }
+
+                    Button {
+                        horizontal-stretch: 1;
+                        icon: I18n.rtl ? Icons.plus : Icons.join;
+                        text: I18n.t(I18n.rtl ? "gui-create-network" : "gui-join-network");
+                        primary: !I18n.rtl;
+                        clicked => {
+                            if I18n.rtl {
+                                root.create();
+                            } else {
+                                root.join();
+                            }
+                        }
+                    }
+                }
+                if phase == "main": VerticalLayout {
+                    spacing: 12px;
+                    for network[i] in networks: NetworkView {
+                        data: network;
+                        toggle => {
+                            root.toggle-network(i);
+                        }
+                        copy(text) => {
+                            root.copy(text);
+                        }
+                        invites => {
+                            root.network-invites(i);
+                        }
+                        requests => {
+                            root.network-requests(i);
+                        }
+                        menu => {
+                            root.network-menu(i);
+                        }
+                        member-menu(member) => {
+                            root.member-menu(i, member);
+                        }
+                    }
+                }
+                if phase == "main" && networks.length == 0: Notice {
+                    title: empty-text;
+                }
+            }
+        }
+    }
+
+    Toast {
+        width: min(self.preferred-width, root.width - 32px);
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - (toast-shown ? 20px : 0px);
+        animate y { duration: 250ms; easing: ease-out; }
+        text: toast-text;
+        error: toast-error;
+        shown: toast-shown;
+    }
+
+    if dialog == "create": CreateDialog {
+        error: dialog-error;
+        busy: dialog-busy;
+        leave => {
+            root.dialog-leave();
+        }
+        submit(name, password, repeat) => {
+            root.create-submit(name, password, repeat);
+        }
+    }
+    if dialog == "join": JoinDialog {
+        error: dialog-error;
+        busy: dialog-busy;
+        leave => {
+            root.dialog-leave();
+        }
+        submit(target, password) => {
+            root.join-submit(target, password);
+        }
+    }
+    if dialog == "settings": SettingsDialog {
+        error: dialog-error;
+        busy: dialog-busy;
+        nickname <=> root.settings-nickname;
+        languages: languages;
+        language <=> root.language-index;
+        servers: server-count;
+        notifications <=> root.notifications;
+        updates <=> root.updates;
+        leave => {
+            root.dialog-leave();
+        }
+        save(name) => {
+            root.settings-save(name);
+        }
+        language-chosen(index) => {
+            root.language-chosen(index);
+        }
+        open-servers => {
+            root.open-servers();
+        }
+        notifications-toggled(on) => {
+            root.notifications-toggled(on);
+        }
+        updates-toggled(on) => {
+            root.updates-toggled(on);
+        }
+    }
+    if dialog == "servers": ServersDialog {
+        error: dialog-error;
+        servers: servers;
+        leave => {
+            root.dialog-leave();
+        }
+        menu(index) => {
+            root.server-menu(index);
+        }
+        add => {
+            root.add-server();
+        }
+    }
+    if dialog == "server-menu": ServerMenuDialog {
+        title: dialog-title;
+        error: dialog-error;
+        local: menu-local;
+        has-link: menu-has-link;
+        leave => {
+            root.dialog-leave();
+        }
+        host-settings => {
+            root.host-settings();
+        }
+        copy-link => {
+            root.copy-server-link();
+        }
+        remove => {
+            root.remove-server();
+        }
+    }
+    if dialog == "host": HostDialog {
+        error: dialog-error;
+        busy: dialog-busy;
+        address <=> root.host-address;
+        port <=> root.host-port;
+        leave => {
+            root.dialog-leave();
+        }
+        save(address, port) => {
+            root.host-save(address, port);
+        }
+    }
+    if dialog == "add-server": AddServerDialog {
+        error: dialog-error;
+        busy: dialog-busy;
+        leave => {
+            root.dialog-leave();
+        }
+        action => {
+            root.add-server-submit();
+        }
+    }
+    if dialog == "invites": InvitesDialog {
+        error: dialog-error;
+        busy: dialog-busy;
+        network: list-network;
+        invites: invites;
+        created: invite-created;
+        expiries: expiries;
+        leave => {
+            root.dialog-leave();
+        }
+        create(uses, expiry) => {
+            root.invite-create(uses, expiry);
+        }
+        copy(text) => {
+            root.copy(text);
+        }
+        revoke(code) => {
+            root.invite-revoke(code);
+        }
+    }
+    if dialog == "devices": DevicesDialog {
+        error: dialog-error;
+        kind: devices-kind;
+        network: list-network;
+        devices: devices;
+        leave => {
+            root.dialog-leave();
+        }
+        act(command, key) => {
+            root.device-act(command, key);
+        }
+    }
+    if dialog == "network-settings": NetworkSettingsDialog {
+        error: dialog-error;
+        owner: network-owner;
+        locked <=> root.network-locked;
+        approval <=> root.network-approval;
+        leave => {
+            root.dialog-leave();
+        }
+        configure(key, on) => {
+            root.network-configure(key, on);
+        }
+        change-password(password) => {
+            root.network-password(password);
+        }
+        delete => {
+            root.network-delete();
+        }
+    }
+    if dialog == "network-menu": NetworkMenuDialog {
+        title: dialog-title;
+        error: dialog-error;
+        manager: network-manager;
+        leave => {
+            root.dialog-leave();
+        }
+        pick(item) => {
+            root.network-pick(item);
+        }
+    }
+    if dialog == "member": MemberDialog {
+        title: dialog-title;
+        error: dialog-error;
+        address: member-address;
+        owner: network-owner;
+        leave => {
+            root.dialog-leave();
+        }
+        act(command) => {
+            root.member-act(command);
+        }
+    }
+    if dialog == "diagnostics": DiagnosticsDialog {
+        error: dialog-error;
+        busy: dialog-busy;
+        report: report;
+        leave => {
+            root.dialog-leave();
+        }
+        refresh => {
+            root.report-refresh();
+        }
+        copy => {
+            root.copy(report);
+        }
+        save => {
+            root.report-save();
+        }
+    }
+}

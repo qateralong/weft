@@ -1,0 +1,85 @@
+// Colors, icons and translations shared by every part of the window.
+
+import { Palette } from "std-widgets.slint";
+
+export global I18n {
+    in property <int> revision;
+    in property <bool> rtl;
+    pure callback translate(string) -> string;
+    pure callback translate-with(string, string, string) -> string;
+
+    // Reading `revision` makes every text depend on the current language.
+    public pure function t(id: string) -> string {
+        return revision >= 0 ? translate(id) : "";
+    }
+
+    // A message with one variable, such as `{ $name }`.
+    public pure function ta(id: string, name: string, value: string) -> string {
+        return revision >= 0 ? translate-with(id, name, value) : "";
+    }
+}
+
+export global Utils {
+    pure callback is-link(string) -> bool;
+}
+
+export global Theme {
+    in-out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    out property <color> bg: dark ? #1c1d20 : #f4efe6;
+    out property <color> card: dark ? #26282c : #fffdf8;
+    out property <color> hover: dark ? #2d2f34 : #faf5ec;
+    out property <color> field: dark ? #1f2023 : #f4efe6;
+    out property <color> text: dark ? #e7e5e1 : #2b2620;
+    out property <color> muted: dark ? #8e9096 : #8a8073;
+    out property <color> line: dark ? #34363c : #e6ddcf;
+    out property <color> accent: dark ? #5aa6dd : #a0612f;
+    out property <color> accent-soft: dark ? #5aa6dd24 : #a0612f1f;
+    out property <color> accent-text: dark ? #10161c : #ffffff;
+    out property <color> danger: dark ? #e2705f : #c4513f;
+    out property <color> danger-soft: dark ? #e2705f1f : #c4513f1a;
+    out property <color> ok: dark ? #57c27c : #3a9d5d;
+    out property <color> warn: dark ? #e2a640 : #d38b22;
+    out property <color> off: dark ? #5b5e65 : #bdb3a5;
+    out property <color> shadow: dark ? #00000040 : #503c1e14;
+    out property <color> backdrop: #140f0a66;
+
+    public pure function state-color(state: string) -> color {
+        if state == "connected" || state == "direct" {
+            return ok;
+        }
+        if state == "connecting" || state == "relay" {
+            return warn;
+        }
+        return off;
+    }
+}
+
+export global Icons {
+    out property <string> power: "M12 3v9 M6.4 6.6a8 8 0 1 0 11.2 0";
+    out property <string> sun: "M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8z M12 2v2 M12 20v2 M4.9 4.9l1.4 1.4 M17.7 17.7l1.4 1.4 M2 12h2 M20 12h2 M4.9 19.1l1.4-1.4 M17.7 6.3l1.4-1.4";
+    out property <string> moon: "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z";
+    out property <string> gear: "M12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6z M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z";
+    out property <string> plus: "M12 5v14 M5 12h14";
+    out property <string> join: "M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4 M10 17l5-5-5-5 M15 12H3";
+    out property <string> chevron: "M6 9l6 6 6-6";
+    out property <string> chevron-forward: "M9 6l6 6-6 6";
+    out property <string> chevron-back: "M15 6l-6 6 6 6";
+    out property <string> more: "M5 11a1 1 0 1 0 0 2a1 1 0 1 0 0-2z M12 11a1 1 0 1 0 0 2a1 1 0 1 0 0-2z M19 11a1 1 0 1 0 0 2a1 1 0 1 0 0-2z";
+    out property <string> link: "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7 M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7";
+    out property <string> pulse: "M22 12h-4l-3 9L9 3l-3 9H2";
+    out property <string> users: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M9 3a4 4 0 1 0 0 8a4 4 0 1 0 0-8z M19 8v6 M22 11h-6";
+    out property <string> globe: "M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20z M2 12h20 M12 2a15 15 0 0 1 0 20a15 15 0 0 1 0-20z";
+    out property <string> cloud: "M18 10h-1.3A7 7 0 1 0 9 19h9a5 5 0 0 0 0-9z";
+    out property <string> monitor: "M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z M8 21h8 M12 17v4";
+    out property <string> check: "M20 6 9 17l-5-5";
+
+    public pure function kind(name: string) -> string {
+        if name == "online" {
+            return globe;
+        }
+        if name == "local" {
+            return monitor;
+        }
+        return cloud;
+    }
+}

@@ -1,62 +1,10 @@
+//! Desktop notifications about members and the connection, from consecutive status snapshots.
+
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
-use std::sync::Mutex;
-use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
-use tauri_plugin_notification::NotificationExt;
 use weft_i18n::Localizer;
-use weft_ipc::{Connection, NetworkStatus, PeerLink, Request, Response, Status};
-
-const POLL: Duration = Duration::from_secs(2);
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(default)]
-pub struct Settings {
-    pub notifications: bool,
-    pub updates: bool,
-    /// A language code; the system language when unset.
-    pub language: Option<String>,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self { notifications: true, updates: true, language: None }
-    }
-}
-
-pub struct SettingsStore {
-    path: Option<PathBuf>,
-    current: Mutex<Settings>,
-}
-
-impl SettingsStore {
-    pub fn load(app: &AppHandle) -> Self {
-        let path = app.path().app_config_dir().ok().map(|dir| dir.join("settings.json"));
-        let current = path
-            .as_ref()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
-        Self { path, current: Mutex::new(current) }
-    }
-
-    pub fn get(&self) -> Settings {
-        self.current.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
-    }
-
-    pub fn set(&self, settings: Settings) -> Result<(), String> {
-        let text = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
-        *self.current.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = settings;
-        let Some(path) = &self.path else { return Ok(()) };
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
-        }
-        std::fs::write(path, text).map_err(|error| error.to_string())
-    }
-}
+use weft_ipc::{Connection, NetworkStatus, PeerLink, Status};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -147,51 +95,39 @@ pub fn events(previous: &Status, next: &Status, was_connected: bool) -> Vec<Even
     events
 }
 
-pub async fn run(app: AppHandle) {
-    let mut previous: Option<Status> = None;
-    let mut was_connected = false;
-    let mut announced: HashMap<String, bool> = HashMap::new();
-    loop {
-        tokio::time::sleep(POLL).await;
-        restart_if_replaced(&app);
-        let l = app.state::<Localizer>();
-        let Ok(Response::Status(status)) = crate::send(&l, Request::Status).await else { continue };
-        if let Some(previous) = &previous
-            && app.state::<SettingsStore>().get().notifications
+/// Remembers the previous snapshot and what was already announced.
+#[derive(Default)]
+pub struct Notifier {
+    previous: Option<Status>,
+    was_connected: bool,
+    announced: HashMap<String, bool>,
+}
+
+impl Notifier {
+    /// Shows a notification for every change since the last snapshot when `enabled`.
+    pub fn observe(&mut self, status: &Status, enabled: bool, l: &Localizer) {
+        if let Some(previous) = &self.previous
+            && enabled
         {
-            for event in events(previous, &status, was_connected) {
+            for event in events(previous, status, self.was_connected) {
                 if let Some((nickname, online)) = event.presence()
-                    && announced.insert(nickname.to_string(), online) == Some(online)
+                    && self.announced.insert(nickname.to_string(), online) == Some(online)
                 {
                     continue;
                 }
-                let _ = app.notification().builder().title("Weft").body(event.text(&l)).show();
+                show(event.text(l));
             }
         }
-        was_connected |= status.connection() == Connection::Connected;
-        previous = Some(status);
+        self.was_connected |= status.connection() == Connection::Connected;
+        self.previous = Some(status.clone());
     }
 }
 
-/// After a package update the running binary is gone; start the new one in its place, keeping
-/// the window hidden or shown as it was.
-#[cfg(target_os = "linux")]
-fn restart_if_replaced(app: &AppHandle) {
-    let Ok(exe) = std::fs::read_link("/proc/self/exe") else { return };
-    let Some(path) = exe.to_str().and_then(|path| path.strip_suffix(" (deleted)")) else { return };
-    if !std::path::Path::new(path).exists() {
-        return;
-    }
-    let visible = app.get_webview_window("main").is_some_and(|window| window.is_visible().unwrap_or(false));
-    let hidden = if visible { "" } else { " --hidden" };
-    let script = format!("sleep 1; exec '{}'{hidden}", path.replace('\'', ""));
-    if std::process::Command::new("setsid").args(["-f", "sh", "-c", &script]).spawn().is_ok() {
-        app.exit(0);
-    }
+fn show(text: String) {
+    std::thread::spawn(move || {
+        let _ = notify_rust::Notification::new().appname("Weft").summary("Weft").body(&text).show();
+    });
 }
-
-#[cfg(not(target_os = "linux"))]
-fn restart_if_replaced(_app: &AppHandle) {}
 
 #[cfg(test)]
 mod tests {

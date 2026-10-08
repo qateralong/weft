@@ -1,0 +1,1009 @@
+// Dialogs over the main screen. Each one reports what the user entered through callbacks.
+
+import { Theme, I18n, Icons, Utils } from "theme.slint";
+import { Icon, IconButton, Button, DangerButton, Caption, Field, Switch, Select, MenuRow, Dot, Signal, ListBox, Separator } from "widgets.slint";
+
+export struct Step {
+    label: string,
+    state: string,
+}
+
+export struct ServerRow {
+    kind: string,
+    name: string,
+    state: string,
+    host: string,
+    ping: string,
+    level: int,
+    note: string,
+}
+
+export struct InviteRow {
+    code: string,
+    link: string,
+    details: string,
+}
+
+export struct DeviceRow {
+    nickname: string,
+    address: string,
+    key: string,
+}
+
+// Where a new network lives: servers in use plus kinds not added yet, with SSH details when needed.
+export global Chooser {
+    in property <[string]> labels;
+    in property <[string]> hints;
+    in property <[bool]> needs-ssh;
+    in-out property <int> index;
+    in-out property <string> host;
+    in-out property <string> user: "root";
+    in-out property <string> password;
+    in-out property <string> port: "22";
+    in property <[Step]> steps;
+    in property <bool> show-steps;
+    out property <bool> ssh: index >= 0 && index < needs-ssh.length && needs-ssh[index];
+}
+
+component Section inherits Text {
+    color: Theme.muted;
+    font-size: 12px;
+    font-weight: 650;
+    horizontal-alignment: I18n.rtl ? right : left;
+}
+
+component Paragraph inherits Text {
+    color: Theme.muted;
+    font-size: 13px;
+    wrap: word-wrap;
+    horizontal-alignment: I18n.rtl ? right : left;
+}
+
+export component DialogFrame inherits Rectangle {
+    in property <string> title;
+    in property <string> error;
+    in property <bool> busy;
+    in property <string> leave-text: I18n.t("gui-cancel");
+    in property <string> action-text;
+    callback leave();
+    callback action();
+    property <bool> shown;
+    init => {
+        shown = true;
+    }
+    background: shown ? Theme.backdrop : transparent;
+    animate background { duration: 200ms; }
+
+    TouchArea { }
+
+    card := Rectangle {
+        width: min(400px, root.width - 32px);
+        height: min(content.preferred-height, root.height - 48px);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2 + (shown ? 0 : 14px);
+        opacity: shown ? 1 : 0;
+        animate y, opacity { duration: 220ms; easing: ease-out; }
+        background: Theme.card;
+        border-radius: 16px;
+        border-width: 1px;
+        border-color: Theme.line;
+        drop-shadow-blur: 40px;
+        drop-shadow-offset-y: 16px;
+        drop-shadow-color: #0000004d;
+        clip: true;
+
+        keys := FocusScope {
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.leave();
+                    return accept;
+                }
+                return reject;
+            }
+
+            content := VerticalLayout {
+                padding: 18px;
+                padding-bottom: 16px;
+                spacing: 12px;
+                Text {
+                    text: title;
+                    color: Theme.text;
+                    font-size: 17px;
+                    font-weight: 650;
+                    wrap: word-wrap;
+                    horizontal-alignment: I18n.rtl ? right : left;
+                }
+
+                if error != "": Rectangle {
+                    background: Theme.danger-soft;
+                    border-radius: 8px;
+                    height: error-text.preferred-height + 16px;
+                    error-text := Text {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        text: error;
+                        color: Theme.danger;
+                        wrap: word-wrap;
+                        horizontal-alignment: I18n.rtl ? right : left;
+                    }
+                }
+
+                Flickable {
+                    preferred-height: body.preferred-height;
+                    min-height: min(body.preferred-height, 60px);
+                    content-height: body.preferred-height;
+                    body := VerticalLayout {
+                        spacing: 12px;
+                        @children
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: I18n.rtl ? start : end;
+                    spacing: 8px;
+                    if I18n.rtl && action-text != "": Button {
+                        text: action-text;
+                        primary: true;
+                        enabled: !root.busy;
+                        clicked => {
+                            root.action();
+                        }
+                    }
+                    Button {
+                        text: leave-text;
+                        clicked => {
+                            root.leave();
+                        }
+                    }
+
+                    if !I18n.rtl && action-text != "": Button {
+                        text: action-text;
+                        primary: true;
+                        enabled: !root.busy;
+                        clicked => {
+                            root.action();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component StepLine inherits HorizontalLayout {
+    in property <Step> step;
+    spacing: 10px;
+    alignment: I18n.rtl ? end : start;
+    if I18n.rtl: Text {
+        text: step.label;
+        color: step.state == "failed" ? Theme.danger : step.state == "" ? Theme.muted : Theme.text;
+    }
+    VerticalLayout {
+        alignment: center;
+        Rectangle {
+            width: 16px;
+            height: 16px;
+            border-radius: 8px;
+            border-width: step.state == "done" || step.state == "failed" ? 0 : 2px;
+            border-color: step.state == "active" ? Theme.accent : Theme.line;
+            background: step.state == "done" ? Theme.ok : step.state == "failed" ? Theme.danger : transparent;
+            opacity: step.state == "active" ? 0.4 + 0.6 * Math.abs(Math.sin(animation-tick() / 1ms / 300 * 1rad)) : 1;
+            if step.state == "done": Icon {
+                width: 12px;
+                height: 12px;
+                name: Icons.check;
+                stroke: white;
+                stroke-width: 3px;
+            }
+        }
+    }
+
+    if !I18n.rtl: Text {
+        text: step.label;
+        color: step.state == "failed" ? Theme.danger : step.state == "" ? Theme.muted : Theme.text;
+    }
+}
+
+export component ServerChooser inherits VerticalLayout {
+    in property <string> caption: I18n.t("gui-server");
+    spacing: 10px;
+    VerticalLayout {
+        spacing: 5px;
+        Caption {
+            text: caption;
+        }
+
+        Select {
+            options: Chooser.labels;
+            current <=> Chooser.index;
+        }
+    }
+
+    if Chooser.index >= 0 && Chooser.index < Chooser.hints.length && Chooser.hints[Chooser.index] != "": Paragraph {
+        text: Chooser.hints[Chooser.index];
+    }
+    if Chooser.ssh: VerticalLayout {
+        spacing: 10px;
+        Field {
+            label: I18n.t("gui-vps-host");
+            placeholder: "203.0.113.10";
+            text <=> Chooser.host;
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            Field {
+                horizontal-stretch: 3;
+                label: I18n.t("gui-vps-user");
+                text <=> Chooser.user;
+            }
+
+            Field {
+                horizontal-stretch: 1;
+                label: I18n.t("gui-vps-port");
+                text <=> Chooser.port;
+            }
+        }
+
+        Field {
+            label: I18n.t("gui-vps-password");
+            password: true;
+            text <=> Chooser.password;
+        }
+    }
+    if Chooser.show-steps: Rectangle {
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: Theme.line;
+        background: Theme.bg;
+        height: steps.preferred-height;
+        steps := VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+            for step in Chooser.steps: StepLine {
+                step: step;
+            }
+        }
+    }
+}
+
+export component CreateDialog inherits DialogFrame {
+    callback submit(string, string, string);
+    title: I18n.t("gui-create-network");
+    action-text: I18n.t("gui-create");
+    action => {
+        root.submit(name.text, password.text, repeat.text);
+    }
+    name := Field {
+        label: I18n.t("gui-network-name");
+        accepted => {
+            root.action();
+        }
+    }
+
+    password := Field {
+        label: I18n.t("gui-password");
+        password: true;
+        accepted => {
+            root.action();
+        }
+    }
+
+    repeat := Field {
+        label: I18n.t("gui-password-repeat");
+        password: true;
+        accepted => {
+            root.action();
+        }
+    }
+
+    ServerChooser { }
+}
+
+export component JoinDialog inherits DialogFrame {
+    callback submit(string, string);
+    property <bool> by-link: Utils.is-link(target.text);
+    property <string> secret;
+    title: I18n.t("gui-join-network");
+    action-text: I18n.t("gui-join");
+    action => {
+        root.submit(target.text, secret);
+    }
+    target := Field {
+        label: I18n.t("gui-name-or-link");
+        placeholder: "weft://…";
+        accepted => {
+            root.action();
+        }
+    }
+
+    if !by-link: VerticalLayout {
+        spacing: 12px;
+        Field {
+            label: I18n.t("gui-password");
+            password: true;
+            text <=> root.secret;
+            accepted => {
+                root.action();
+            }
+        }
+
+        ServerChooser { }
+    }
+}
+
+export component SettingsDialog inherits DialogFrame {
+    in-out property <string> nickname;
+    in property <[string]> languages;
+    in-out property <int> language;
+    in property <int> servers;
+    in-out property <bool> notifications;
+    in-out property <bool> updates;
+    callback save(string);
+    callback language-chosen(int);
+    callback open-servers();
+    callback notifications-toggled(bool);
+    callback updates-toggled(bool);
+    title: I18n.t("gui-settings");
+    action-text: I18n.t("gui-save");
+    action => {
+        root.save(nickname);
+    }
+    Field {
+        label: I18n.t("gui-nickname");
+        text <=> root.nickname;
+        accepted => {
+            root.action();
+        }
+    }
+
+    VerticalLayout {
+        spacing: 5px;
+        Caption {
+            text: I18n.t("gui-language");
+        }
+
+        Select {
+            options: languages;
+            current <=> root.language;
+            selected(index) => {
+                root.language-chosen(index);
+            }
+        }
+    }
+
+    MenuRow {
+        text: I18n.t("gui-servers");
+        detail: servers;
+        arrow: true;
+        clicked => {
+            root.open-servers();
+        }
+    }
+
+    Section {
+        text: I18n.t("gui-app");
+    }
+
+    Switch {
+        text: I18n.t("gui-notifications");
+        checked <=> root.notifications;
+        toggled(on) => {
+            root.notifications-toggled(on);
+        }
+    }
+
+    Switch {
+        text: I18n.t("gui-check-updates");
+        checked <=> root.updates;
+        toggled(on) => {
+            root.updates-toggled(on);
+        }
+    }
+}
+
+component ServerLine inherits Rectangle {
+    in property <ServerRow> data;
+    callback menu();
+    height: line.preferred-height;
+    property <length> text-width: self.width - 24px - 36px - 12px - 52px - 32px - 16px;
+
+    function place(start: length, size: length) -> length {
+        return I18n.rtl ? root.width - start - size : start;
+    }
+
+    line := VerticalLayout {
+        padding: 10px;
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
+        Rectangle {
+            height: 52px;
+            Rectangle {
+                x: place(0, 36px);
+                width: 36px;
+                height: 36px;
+                border-radius: 11px;
+                background: Theme.accent-soft;
+                Icon {
+                    name: Icons.kind(data.kind);
+                    stroke: Theme.accent;
+                }
+            }
+
+            VerticalLayout {
+                x: place(48px, text-width);
+                width: text-width;
+                alignment: center;
+                spacing: 2px;
+                Text {
+                    text: data.name;
+                    color: Theme.text;
+                    font-weight: 650;
+                    overflow: elide;
+                    horizontal-alignment: I18n.rtl ? right : left;
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: I18n.rtl ? end : start;
+                    if !I18n.rtl: VerticalLayout {
+                        alignment: center;
+                        Dot {
+                            state: data.state;
+                        }
+                    }
+                    Text {
+                        text: I18n.t("state-" + data.state);
+                        color: Theme.muted;
+                        font-size: 12px;
+                    }
+
+                    if I18n.rtl: VerticalLayout {
+                        alignment: center;
+                        Dot {
+                            state: data.state;
+                        }
+                    }
+                }
+
+                if data.host != "": Text {
+                    text: data.host;
+                    color: Theme.muted;
+                    font-family: "monospace";
+                    font-size: 12px;
+                    overflow: elide;
+                    horizontal-alignment: I18n.rtl ? right : left;
+                }
+            }
+
+            Signal {
+                x: place(root.width - 24px - 32px - 52px - 4px, 52px);
+                level: data.level;
+                ping: data.ping;
+            }
+
+            IconButton {
+                x: place(root.width - 24px - 32px, 32px);
+                y: 10px;
+                icon: Icons.more;
+                tooltip: I18n.t("gui-settings");
+                clicked => {
+                    root.menu();
+                }
+            }
+        }
+
+        if data.note != "": Paragraph {
+            text: data.note;
+            font-size: 12px;
+        }
+    }
+
+    Separator {
+        y: parent.height - 1px;
+    }
+}
+
+export component ServersDialog inherits DialogFrame {
+    in property <[ServerRow]> servers;
+    callback menu(int);
+    callback add();
+    title: I18n.t("gui-servers");
+    leave-text: I18n.t("gui-back");
+    ListBox {
+        for server[i] in servers: ServerLine {
+            data: server;
+            menu => {
+                root.menu(i);
+            }
+        }
+        if servers.length == 0: Rectangle {
+            height: empty.preferred-height + 28px;
+            empty := Paragraph {
+                x: 14px;
+                width: parent.width - 28px;
+                text: I18n.t("gui-no-servers");
+                horizontal-alignment: center;
+            }
+        }
+    }
+
+    Button {
+        icon: Icons.plus;
+        text: I18n.t("gui-add-server");
+        clicked => {
+            root.add();
+        }
+    }
+}
+
+export component ServerMenuDialog inherits DialogFrame {
+    in property <bool> local;
+    in property <bool> has-link;
+    callback host-settings();
+    callback copy-link();
+    callback remove();
+    leave-text: I18n.t("gui-back");
+    if local: MenuRow {
+        text: I18n.t("gui-host-advanced");
+        arrow: true;
+        clicked => {
+            root.host-settings();
+        }
+    }
+    if has-link: MenuRow {
+        text: I18n.t("gui-copy-server-link");
+        clicked => {
+            root.copy-link();
+        }
+    }
+    DangerButton {
+        text: I18n.t(local ? "gui-host-stop" : "gui-server-remove");
+        confirmed => {
+            root.remove();
+        }
+    }
+}
+
+export component HostDialog inherits DialogFrame {
+    in-out property <string> address;
+    in-out property <string> port;
+    callback save(string, string);
+    title: I18n.t("gui-host-advanced");
+    leave-text: I18n.t("gui-back");
+    action-text: I18n.t("gui-save");
+    action => {
+        root.save(address, port);
+    }
+    Paragraph {
+        text: I18n.t("gui-host-advanced-hint");
+    }
+
+    Field {
+        label: I18n.t("gui-host-address");
+        placeholder: I18n.t("gui-host-address-auto");
+        text <=> root.address;
+    }
+
+    Field {
+        label: I18n.t("gui-host-port");
+        text <=> root.port;
+    }
+}
+
+export component AddServerDialog inherits DialogFrame {
+    title: I18n.t("gui-add-server");
+    leave-text: I18n.t("gui-back");
+    action-text: I18n.t("gui-add");
+    ServerChooser {
+        caption: I18n.t("gui-server-kind");
+    }
+}
+
+export component InvitesDialog inherits DialogFrame {
+    in property <string> network;
+    in property <[InviteRow]> invites;
+    in property <string> created;
+    in property <[string]> expiries;
+    callback create(string, int);
+    callback copy(string);
+    callback revoke(string);
+    property <int> expiry: 3;
+    leave-text: I18n.t("gui-close");
+    title: I18n.t("gui-invites");
+    Section {
+        text: I18n.t("gui-new-invite");
+    }
+
+    uses := Field {
+        label: I18n.t("gui-invite-uses");
+    }
+
+    VerticalLayout {
+        spacing: 5px;
+        Caption {
+            text: I18n.t("gui-invite-expiry");
+        }
+
+        Select {
+            options: expiries;
+            current <=> root.expiry;
+        }
+    }
+
+    Button {
+        primary: true;
+        text: I18n.t("gui-create");
+        enabled: !root.busy;
+        clicked => {
+            root.create(uses.text, expiry);
+        }
+    }
+
+    if created != "": ListBox {
+        HorizontalLayout {
+            padding: 10px;
+            spacing: 10px;
+            Text {
+                text: created;
+                color: Theme.text;
+                font-family: "monospace";
+                font-size: 12px;
+                wrap: char-wrap;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+            }
+
+            VerticalLayout {
+                alignment: center;
+                Button {
+                    small: true;
+                    text: I18n.t("gui-copy");
+                    clicked => {
+                        root.copy(created);
+                    }
+                }
+            }
+        }
+    }
+    Section {
+        text: I18n.ta("invites-title", "name", network);
+    }
+
+    ListBox {
+        for invite in invites: VerticalLayout {
+            HorizontalLayout {
+                padding: 10px;
+                spacing: 8px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+                    Text {
+                        text: invite.code;
+                        color: Theme.text;
+                        font-family: "monospace";
+                        font-size: 12px;
+                        horizontal-alignment: I18n.rtl ? right : left;
+                    }
+
+                    Paragraph {
+                        text: invite.details;
+                        font-size: 12px;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Button {
+                        small: true;
+                        text: I18n.t("gui-copy");
+                        clicked => {
+                            root.copy(invite.link != "" ? invite.link : invite.code);
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Button {
+                        small: true;
+                        danger: true;
+                        text: I18n.t("gui-revoke");
+                        clicked => {
+                            root.revoke(invite.code);
+                        }
+                    }
+                }
+            }
+
+            Separator { }
+        }
+        if invites.length == 0: Rectangle {
+            height: 44px;
+            Paragraph {
+                text: I18n.ta("invites-empty", "name", network);
+                horizontal-alignment: center;
+            }
+        }
+    }
+}
+
+export component DevicesDialog inherits DialogFrame {
+    in property <string> kind;
+    in property <string> network;
+    in property <[DeviceRow]> devices;
+    callback act(string, string);
+    leave-text: I18n.t("gui-close");
+    title: I18n.t(kind == "requests" ? "gui-requests" : "gui-bans");
+    ListBox {
+        for device in devices: VerticalLayout {
+            HorizontalLayout {
+                padding: 10px;
+                spacing: 8px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+                    Text {
+                        text: device.nickname;
+                        color: Theme.text;
+                        horizontal-alignment: I18n.rtl ? right : left;
+                    }
+
+                    Text {
+                        text: device.address;
+                        color: Theme.muted;
+                        font-family: "monospace";
+                        font-size: 12px;
+                        horizontal-alignment: I18n.rtl ? right : left;
+                    }
+                }
+
+                if kind == "requests": VerticalLayout {
+                    alignment: center;
+                    Button {
+                        small: true;
+                        primary: true;
+                        text: I18n.t("gui-approve");
+                        clicked => {
+                            root.act("approve", device.key);
+                        }
+                    }
+                }
+                if kind == "requests": VerticalLayout {
+                    alignment: center;
+                    Button {
+                        small: true;
+                        danger: true;
+                        text: I18n.t("gui-deny");
+                        clicked => {
+                            root.act("deny", device.key);
+                        }
+                    }
+                }
+                if kind == "bans": VerticalLayout {
+                    alignment: center;
+                    Button {
+                        small: true;
+                        text: I18n.t("gui-unban");
+                        clicked => {
+                            root.act("unban", device.key);
+                        }
+                    }
+                }
+            }
+
+            Separator { }
+        }
+        if devices.length == 0: Rectangle {
+            height: 44px;
+            Paragraph {
+                text: I18n.ta(kind + "-empty", "name", network);
+                horizontal-alignment: center;
+            }
+        }
+    }
+}
+
+export component NetworkSettingsDialog inherits DialogFrame {
+    in property <bool> owner;
+    in-out property <bool> locked;
+    in-out property <bool> approval;
+    callback configure(string, bool);
+    callback change-password(string);
+    callback delete();
+    leave-text: I18n.t("gui-close");
+    title: I18n.t("gui-network-settings");
+    Switch {
+        text: I18n.t("gui-locked");
+        checked <=> root.locked;
+        toggled(on) => {
+            root.configure("locked", on);
+        }
+    }
+
+    Switch {
+        text: I18n.t("gui-approval");
+        checked <=> root.approval;
+        toggled(on) => {
+            root.configure("approval", on);
+        }
+    }
+
+    if owner: VerticalLayout {
+        spacing: 12px;
+        Section {
+            text: I18n.t("gui-change-password");
+        }
+
+        new-password := Field {
+            label: I18n.t("gui-new-password");
+            password: true;
+        }
+
+        Button {
+            text: I18n.t("gui-change-password");
+            clicked => {
+                root.change-password(new-password.text);
+                new-password.text = "";
+            }
+        }
+
+        Section {
+            text: I18n.t("gui-delete-network");
+        }
+
+        DangerButton {
+            text: I18n.t("gui-delete-network");
+            confirmed => {
+                root.delete();
+            }
+        }
+    }
+}
+
+export component NetworkMenuDialog inherits DialogFrame {
+    in property <bool> manager;
+    callback pick(string);
+    leave-text: I18n.t("gui-close");
+    if manager: MenuRow {
+        text: I18n.t("gui-invites");
+        arrow: true;
+        clicked => {
+            root.pick("invites");
+        }
+    }
+    if manager: MenuRow {
+        text: I18n.t("gui-requests");
+        arrow: true;
+        clicked => {
+            root.pick("requests");
+        }
+    }
+    if manager: MenuRow {
+        text: I18n.t("gui-bans");
+        arrow: true;
+        clicked => {
+            root.pick("bans");
+        }
+    }
+    if manager: MenuRow {
+        text: I18n.t("gui-network-settings");
+        arrow: true;
+        clicked => {
+            root.pick("settings");
+        }
+    }
+    DangerButton {
+        text: I18n.t("gui-leave");
+        confirmed => {
+            root.pick("leave");
+        }
+    }
+}
+
+export component MemberDialog inherits DialogFrame {
+    in property <string> address;
+    in property <bool> owner;
+    callback act(string);
+    leave-text: I18n.t("gui-close");
+    Text {
+        text: address;
+        color: Theme.muted;
+        font-family: "monospace";
+        horizontal-alignment: I18n.rtl ? right : left;
+    }
+
+    if owner: Button {
+        text: I18n.t("gui-promote");
+        clicked => {
+            root.act("promote");
+        }
+    }
+    if owner: Button {
+        text: I18n.t("gui-demote");
+        clicked => {
+            root.act("demote");
+        }
+    }
+    Button {
+        danger: true;
+        text: I18n.t("gui-kick");
+        clicked => {
+            root.act("kick");
+        }
+    }
+
+    DangerButton {
+        text: I18n.t("gui-ban");
+        confirmed => {
+            root.act("ban");
+        }
+    }
+}
+
+export component DiagnosticsDialog inherits DialogFrame {
+    in property <string> report;
+    callback refresh();
+    callback copy();
+    callback save();
+    leave-text: I18n.t("gui-close");
+    title: I18n.t("gui-diagnostics");
+    Rectangle {
+        height: min(report-text.preferred-height + 20px, 360px);
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: Theme.line;
+        background: Theme.bg;
+        Flickable {
+            x: 10px;
+            y: 10px;
+            width: parent.width - 20px;
+            height: parent.height - 20px;
+            content-height: report-text.preferred-height;
+            report-text := TextInput {
+                width: parent.width;
+                text: report;
+                read-only: true;
+                single-line: false;
+                wrap: word-wrap;
+                color: Theme.text;
+                font-family: "monospace";
+                font-size: 12px;
+                selection-background-color: Theme.accent-soft;
+            }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        Button {
+            horizontal-stretch: 1;
+            small: true;
+            text: I18n.t("gui-refresh");
+            enabled: !root.busy;
+            clicked => {
+                root.refresh();
+            }
+        }
+
+        Button {
+            horizontal-stretch: 1;
+            small: true;
+            text: I18n.t("gui-copy");
+            clicked => {
+                root.copy();
+            }
+        }
+
+        Button {
+            horizontal-stretch: 1;
+            small: true;
+            primary: true;
+            text: I18n.t("gui-save-report");
+            clicked => {
+                root.save();
+            }
+        }
+    }
+}

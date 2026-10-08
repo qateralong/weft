@@ -1,0 +1,677 @@
+// The main screen: header, networks with their members, notices.
+
+import { Theme, I18n, Icons } from "theme.slint";
+import { Icon, IconButton, Button, Dot, Signal, Avatar, Tag, Spinner, Field, Separator } from "widgets.slint";
+
+export struct MemberRow {
+    nickname: string,
+    sub: string,
+    address: string,
+    dns: string,
+    ping: string,
+    level: int,
+    link: string,
+    color: color,
+    initial: string,
+    me: bool,
+}
+
+export struct NetworkCard {
+    id: string,
+    name: string,
+    count: string,
+    tags: [string],
+    members: [MemberRow],
+    collapsed: bool,
+    requests: int,
+    manager: bool,
+}
+
+// One member: avatar, name and how they are reached, address, ping. Placed by hand so it mirrors.
+component MemberLine inherits Rectangle {
+    in property <MemberRow> data;
+    in property <bool> manager;
+    callback copy(string);
+    callback menu();
+    height: 52px;
+    background: data.me ? Theme.accent-soft : touch.has-hover ? Theme.hover : transparent;
+    animate background { duration: 150ms; }
+    property <length> pad: 12px;
+    property <length> menu-width: 32px;
+    property <length> signal-width: 52px;
+    property <length> address-width: 104px;
+    property <length> name-start: pad + 32px + 10px;
+    property <length> name-width: self.width - name-start - pad - menu-width - signal-width - address-width - 8px;
+
+    function place(start: length, size: length) -> length {
+        return I18n.rtl ? root.width - start - size : start;
+    }
+
+    touch := TouchArea { }
+
+    Avatar {
+        x: place(pad, 32px);
+        initial: data.initial;
+        tint: data.color;
+        link: data.link;
+    }
+
+    VerticalLayout {
+        x: place(name-start, name-width);
+        width: name-width;
+        alignment: center;
+        spacing: 1px;
+        HorizontalLayout {
+            alignment: I18n.rtl ? end : start;
+            spacing: 6px;
+            if data.me && I18n.rtl: VerticalLayout {
+                alignment: center;
+                Tag {
+                    text: I18n.t("gui-you");
+                }
+            }
+            name := Text {
+                text: data.nickname;
+                color: name-touch.has-hover && data.dns != "" ? Theme.accent : Theme.text;
+                font-size: 14px;
+                overflow: elide;
+                name-touch := TouchArea {
+                    mouse-cursor: data.dns != "" ? pointer : default;
+                    clicked => {
+                        if data.dns != "" {
+                            root.copy(data.dns);
+                        }
+                    }
+                }
+            }
+
+            if data.me && !I18n.rtl: VerticalLayout {
+                alignment: center;
+                Tag {
+                    text: I18n.t("gui-you");
+                }
+            }
+        }
+
+        Text {
+            text: data.sub;
+            color: Theme.muted;
+            font-size: 12px;
+            overflow: elide;
+            horizontal-alignment: I18n.rtl ? right : left;
+        }
+    }
+
+    Rectangle {
+        x: place(name-start + name-width + 4px, address-width);
+        width: address-width;
+        height: 22px;
+        border-radius: 5px;
+        background: address-touch.has-hover ? Theme.accent-soft : transparent;
+        Text {
+            text: data.address;
+            color: address-touch.has-hover ? Theme.accent : Theme.text;
+            font-family: "monospace";
+            font-size: 12px;
+        }
+
+        address-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.copy(data.address);
+            }
+        }
+    }
+
+    Signal {
+        x: place(root.width - pad - menu-width - signal-width, signal-width);
+        level: data.level;
+        ping: data.ping;
+    }
+
+    if manager && !data.me: IconButton {
+        x: place(root.width - pad - 30px, 30px);
+        icon: Icons.more;
+        clicked => {
+            root.menu();
+        }
+    }
+
+    Separator {
+        y: parent.height - 1px;
+    }
+}
+
+export component NetworkView inherits Rectangle {
+    in property <NetworkCard> data;
+    callback toggle();
+    callback copy(string);
+    callback invites();
+    callback requests();
+    callback menu();
+    callback member-menu(int);
+    property <length> head-height: 58px;
+    property <length> body-height: data.members.length * 52px;
+    height: head-height + (data.collapsed ? 0px : body-height);
+    animate height { duration: 250ms; easing: ease-in-out; }
+    background: Theme.card;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.line;
+    drop-shadow-blur: 10px;
+    drop-shadow-offset-y: 2px;
+    drop-shadow-color: Theme.shadow;
+    clip: true;
+
+    Rectangle {
+        y: 0;
+        height: head-height;
+        background: head-touch.has-hover ? Theme.hover : transparent;
+        animate background { duration: 150ms; }
+        head-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.toggle();
+            }
+        }
+
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 10px;
+            spacing: 8px;
+            // Children are listed in reading order and reversed for right-to-left languages.
+            if !I18n.rtl: VerticalLayout {
+                alignment: center;
+                Icon {
+                    name: data.collapsed ? Icons.chevron-forward : Icons.chevron;
+                    stroke: Theme.muted;
+                }
+            }
+            if I18n.rtl: HorizontalLayout {
+                spacing: 2px;
+                padding-top: 13px;
+                padding-bottom: 13px;
+                IconButton {
+                    icon: Icons.more;
+                    tooltip: I18n.t("gui-network-settings");
+                    clicked => {
+                        root.menu();
+                    }
+                }
+
+                if data.manager: IconButton {
+                    icon: Icons.link;
+                    tooltip: I18n.t("gui-invites");
+                    clicked => {
+                        root.invites();
+                    }
+                }
+                if data.manager && data.requests > 0: requests-rtl := Rectangle {
+                    width: 52px;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Theme.line;
+                    background: requests-rtl-touch.has-hover ? Theme.hover : transparent;
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 4px;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 18px;
+                                height: 18px;
+                                border-radius: 9px;
+                                background: Theme.danger;
+                                Text {
+                                    text: data.requests;
+                                    color: white;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                }
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Icon {
+                                name: Icons.users;
+                                stroke: Theme.text;
+                            }
+                        }
+                    }
+
+                    requests-rtl-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.requests();
+                        }
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: 3px;
+                horizontal-stretch: 1;
+                Text {
+                    text: data.name + "  " + data.count;
+                    color: Theme.text;
+                    font-size: 15px;
+                    font-weight: 650;
+                    overflow: elide;
+                    horizontal-alignment: I18n.rtl ? right : left;
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: I18n.rtl ? end : start;
+                    for tag[i] in data.tags: Tag {
+                        text: tag;
+                        strong: I18n.rtl ? i == data.tags.length - 1 : i == 0;
+                    }
+                }
+            }
+
+            if !I18n.rtl: HorizontalLayout {
+                spacing: 2px;
+                padding-top: 13px;
+                padding-bottom: 13px;
+                if data.manager && data.requests > 0: requests := Rectangle {
+                    width: 52px;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Theme.line;
+                    background: requests-touch.has-hover ? Theme.hover : transparent;
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 4px;
+                        VerticalLayout {
+                            alignment: center;
+                            Icon {
+                                name: Icons.users;
+                                stroke: Theme.text;
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 18px;
+                                height: 18px;
+                                border-radius: 9px;
+                                background: Theme.danger;
+                                Text {
+                                    text: data.requests;
+                                    color: white;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                }
+                            }
+                        }
+                    }
+
+                    requests-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.requests();
+                        }
+                    }
+                }
+                if data.manager: IconButton {
+                    icon: Icons.link;
+                    tooltip: I18n.t("gui-invites");
+                    clicked => {
+                        root.invites();
+                    }
+                }
+                IconButton {
+                    icon: Icons.more;
+                    tooltip: I18n.t("gui-network-settings");
+                    clicked => {
+                        root.menu();
+                    }
+                }
+            }
+            if I18n.rtl: VerticalLayout {
+                alignment: center;
+                Icon {
+                    name: data.collapsed ? Icons.chevron-back : Icons.chevron;
+                    stroke: Theme.muted;
+                }
+            }
+        }
+    }
+
+    Separator {
+        y: head-height;
+    }
+
+    for member[i] in data.members: MemberLine {
+        y: head-height + 1px + i * 52px;
+        width: root.width;
+        data: member;
+        manager: data.manager;
+        copy(text) => {
+            root.copy(text);
+        }
+        menu => {
+            root.member-menu(i);
+        }
+    }
+}
+
+export component Notice inherits Rectangle {
+    in property <string> title;
+    in property <string> text;
+    in property <string> action;
+    in property <bool> busy;
+    in property <bool> action-busy;
+    callback act();
+    background: Theme.card;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.line;
+    VerticalLayout {
+        padding: 28px;
+        spacing: 12px;
+        alignment: center;
+        if busy: HorizontalLayout {
+            alignment: center;
+            Spinner { }
+        }
+        Text {
+            text: title;
+            color: Theme.text;
+            font-size: 18px;
+            font-weight: 650;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+
+        if text != "": Text {
+            text: root.text;
+            color: Theme.muted;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+        if action != "": HorizontalLayout {
+            alignment: center;
+            Button {
+                text: action;
+                primary: true;
+                enabled: !action-busy;
+                clicked => {
+                    root.act();
+                }
+            }
+        }
+    }
+}
+
+export component Welcome inherits Rectangle {
+    in-out property <string> nickname;
+    callback nickname-changed(string);
+    callback create();
+    callback join();
+    background: Theme.card;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.line;
+    drop-shadow-blur: 10px;
+    drop-shadow-offset-y: 2px;
+    drop-shadow-color: Theme.shadow;
+    VerticalLayout {
+        padding: 24px;
+        padding-top: 28px;
+        spacing: 12px;
+        HorizontalLayout {
+            alignment: center;
+            Image {
+                source: @image-url("../icons/icon.png");
+                width: 72px;
+                height: 72px;
+            }
+        }
+
+        Text {
+            text: I18n.t("gui-welcome");
+            color: Theme.text;
+            font-size: 18px;
+            font-weight: 650;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: I18n.t("gui-welcome-hint");
+            color: Theme.muted;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+
+        Field {
+            label: I18n.t("gui-nickname");
+            text <=> root.nickname;
+            accepted => {
+                root.nickname-changed(self.text);
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            padding-top: 6px;
+            Button {
+                horizontal-stretch: 1;
+                icon: Icons.plus;
+                text: I18n.t("gui-create-network");
+                clicked => {
+                    root.nickname-changed(nickname);
+                    root.create();
+                }
+            }
+
+            Button {
+                horizontal-stretch: 1;
+                icon: Icons.join;
+                text: I18n.t("gui-join-network");
+                primary: true;
+                clicked => {
+                    root.nickname-changed(nickname);
+                    root.join();
+                }
+            }
+        }
+    }
+}
+
+export component Header inherits Rectangle {
+    in property <bool> full;
+    in property <string> nickname;
+    in property <string> connection;
+    in property <string> address;
+    callback power();
+    callback copy(string);
+    callback diagnostics();
+    callback theme();
+    callback settings();
+    height: 74px;
+    background: Theme.card;
+    animate background { duration: 300ms; }
+    drop-shadow-blur: 10px;
+    drop-shadow-color: Theme.shadow;
+
+    property <length> tools-width: 3 * 32px + 2 * 2px;
+    property <length> power-width: full ? 46px + 12px : 0px;
+    property <length> text-width: root.width - 32px - tools-width - power-width - 12px;
+
+    function place(start: length, size: length) -> length {
+        return I18n.rtl ? root.width - start - size : start;
+    }
+
+    if full: Rectangle {
+        x: place(16px, 46px);
+        width: 46px;
+        height: 46px;
+        border-radius: 23px;
+        background: connection == "connected" ? Theme.accent : Theme.bg;
+        border-width: connection == "connected" ? 0 : 2px;
+        border-color: connection == "connecting" ? Theme.warn : power-touch.has-hover ? Theme.accent : Theme.line;
+        drop-shadow-blur: connection == "connected" ? 10px : 0;
+        drop-shadow-color: Theme.accent-soft;
+        animate background, border-color { duration: 250ms; }
+        accessible-role: button;
+        accessible-label: I18n.t(connection == "disconnected" ? "gui-connect" : "gui-disconnect");
+        Icon {
+            width: 22px;
+            height: 22px;
+            name: Icons.power;
+            stroke: connection == "connected" ? Theme.accent-text : connection == "connecting" ? Theme.warn : Theme.muted;
+        }
+
+        power-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.power();
+            }
+        }
+    }
+
+    VerticalLayout {
+        x: place(16px + power-width, text-width);
+        width: text-width;
+        alignment: center;
+        spacing: 2px;
+        Text {
+            text: full ? nickname : "Weft";
+            color: Theme.text;
+            font-size: 16px;
+            font-weight: 650;
+            overflow: elide;
+            horizontal-alignment: I18n.rtl ? right : left;
+        }
+
+        if full: HorizontalLayout {
+            spacing: 6px;
+            alignment: I18n.rtl ? end : start;
+            if !I18n.rtl: VerticalLayout {
+                alignment: center;
+                Dot {
+                    state: connection;
+                }
+            }
+            Text {
+                text: I18n.t("state-" + connection);
+                color: Theme.muted;
+                font-size: 12px;
+            }
+
+            if address != "": address-text := Text {
+                text: address;
+                color: address-touch.has-hover ? Theme.accent : Theme.muted;
+                font-family: "monospace";
+                font-size: 12px;
+                address-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.copy(address);
+                    }
+                }
+            }
+            if I18n.rtl: VerticalLayout {
+                alignment: center;
+                Dot {
+                    state: connection;
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        x: place(root.width - 16px - tools-width, tools-width);
+        width: tools-width;
+        spacing: 2px;
+        padding-top: 21px;
+        padding-bottom: 21px;
+        IconButton {
+            icon: I18n.rtl ? Icons.gear : Icons.pulse;
+            tooltip: I18n.t(I18n.rtl ? "gui-settings" : "gui-diagnostics");
+            clicked => {
+                if I18n.rtl {
+                    root.settings();
+                } else {
+                    root.diagnostics();
+                }
+            }
+        }
+
+        IconButton {
+            icon: Theme.dark ? Icons.sun : Icons.moon;
+            tooltip: I18n.t(Theme.dark ? "gui-theme-light" : "gui-theme-dark");
+            clicked => {
+                root.theme();
+            }
+        }
+
+        IconButton {
+            icon: I18n.rtl ? Icons.pulse : Icons.gear;
+            tooltip: I18n.t(I18n.rtl ? "gui-diagnostics" : "gui-settings");
+            clicked => {
+                if I18n.rtl {
+                    root.diagnostics();
+                } else {
+                    root.settings();
+                }
+            }
+        }
+    }
+}
+
+export component Toast inherits Rectangle {
+    in property <string> text;
+    in property <bool> error;
+    in property <bool> shown;
+    height: label.preferred-height + 20px;
+    border-radius: 10px;
+    background: error ? Theme.danger : Theme.text;
+    opacity: shown ? 1 : 0;
+    animate opacity { duration: 200ms; }
+    label := Text {
+        x: 16px;
+        width: parent.width - 32px;
+        text: root.text;
+        color: error ? white : Theme.bg;
+        wrap: word-wrap;
+        horizontal-alignment: center;
+    }
+}
+
+export component UpdateBanner inherits Rectangle {
+    in property <string> version;
+    callback download();
+    height: 48px;
+    border-radius: 14px;
+    background: Theme.accent-soft;
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 10px;
+        spacing: 10px;
+        Text {
+            text: I18n.ta("gui-update", "version", version);
+            color: Theme.text;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            horizontal-alignment: I18n.rtl ? right : left;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            Button {
+                small: true;
+                primary: true;
+                text: I18n.t("gui-download");
+                clicked => {
+                    root.download();
+                }
+            }
+        }
+    }
+}

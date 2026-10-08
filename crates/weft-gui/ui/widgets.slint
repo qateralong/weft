@@ -1,0 +1,498 @@
+// Small building blocks drawn in the app's own style.
+
+import { Theme, I18n, Icons } from "theme.slint";
+
+export component Icon inherits Path {
+    in property <string> name;
+    commands: name;
+    width: 18px;
+    height: 18px;
+    viewbox-x: 0;
+    viewbox-y: 0;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: transparent;
+    stroke-width: 2px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+}
+
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> tooltip;
+    in property <color> tint: Theme.muted;
+    callback clicked();
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: touch.has-hover ? Theme.hover : transparent;
+    animate background { duration: 150ms; }
+    accessible-role: button;
+    accessible-label: tooltip;
+    accessible-action-default => {
+        root.clicked();
+    }
+    Icon {
+        name: icon;
+        stroke: touch.has-hover ? Theme.text : tint;
+        animate stroke { duration: 150ms; }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component Button inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> primary;
+    in property <bool> danger;
+    in property <bool> small;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: small ? 28px : 40px;
+    min-width: content.preferred-width + (small ? 18px : 26px);
+    border-radius: small ? 7px : 11px;
+    opacity: enabled ? 1 : 0.5;
+    background: primary ? (touch.has-hover && enabled ? Theme.accent.brighter(0.08) : Theme.accent)
+        : danger && touch.has-hover && enabled ? Theme.danger-soft
+        : touch.has-hover && enabled ? Theme.hover : Theme.card;
+    border-width: primary ? 0 : 1px;
+    border-color: danger && touch.has-hover ? Theme.danger : touch.has-hover && enabled ? Theme.accent : Theme.line;
+    drop-shadow-blur: small ? 0 : 8px;
+    drop-shadow-offset-y: 2px;
+    drop-shadow-color: Theme.shadow;
+    animate background, border-color { duration: 150ms; }
+    accessible-role: button;
+    accessible-label: text;
+    accessible-action-default => {
+        root.clicked();
+    }
+    content := HorizontalLayout {
+        alignment: center;
+        spacing: 7px;
+        if icon != "" && !I18n.rtl: VerticalLayout {
+            alignment: center;
+            Icon {
+                name: icon;
+                width: small ? 14px : 18px;
+                height: small ? 14px : 18px;
+                stroke: primary ? Theme.accent-text : danger ? Theme.danger : Theme.text;
+            }
+        }
+        Text {
+            text: root.text;
+            color: primary ? Theme.accent-text : danger ? Theme.danger : Theme.text;
+            font-weight: primary ? 650 : 450;
+            font-size: small ? 12px : 14px;
+            vertical-alignment: center;
+        }
+
+        if icon != "" && I18n.rtl: VerticalLayout {
+            alignment: center;
+            Icon {
+                name: icon;
+                width: small ? 14px : 18px;
+                height: small ? 14px : 18px;
+                stroke: primary ? Theme.accent-text : danger ? Theme.danger : Theme.text;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Asks for a second click within four seconds before doing something that cannot be undone.
+export component DangerButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> small;
+    callback confirmed();
+    property <bool> armed;
+    height: small ? 28px : 40px;
+    min-width: label.preferred-width + 26px;
+    border-radius: small ? 7px : 11px;
+    background: armed ? Theme.danger : touch.has-hover ? Theme.danger-soft : Theme.card;
+    border-width: 1px;
+    border-color: armed || touch.has-hover ? Theme.danger : Theme.line;
+    animate background, border-color { duration: 150ms; }
+    label := Text {
+        text: armed ? I18n.t("gui-confirm") : root.text;
+        color: armed ? white : Theme.danger;
+        font-size: small ? 12px : 14px;
+        font-weight: armed ? 650 : 450;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            if armed {
+                armed = false;
+                root.confirmed();
+            } else {
+                armed = true;
+            }
+        }
+    }
+
+    Timer {
+        interval: 4s;
+        running: armed;
+        triggered => {
+            armed = false;
+        }
+    }
+}
+
+export component Caption inherits Text {
+    color: Theme.muted;
+    font-size: 12px;
+    horizontal-alignment: I18n.rtl ? right : left;
+}
+
+export component Field inherits VerticalLayout {
+    in property <string> label;
+    in property <string> placeholder;
+    in property <bool> password;
+    in property <bool> enabled: true;
+    in-out property <string> text;
+    callback accepted();
+    callback edited(string);
+    forward-focus: input;
+    spacing: 5px;
+    if label != "": Caption {
+        text: label;
+    }
+    Rectangle {
+        height: 38px;
+        border-radius: 9px;
+        background: Theme.field;
+        border-width: 1px;
+        border-color: input.has-focus ? Theme.accent : Theme.line;
+        drop-shadow-blur: input.has-focus ? 6px : 0;
+        drop-shadow-color: Theme.accent-soft;
+        animate border-color { duration: 150ms; }
+        clip: true;
+        if text == "" && !input.has-focus: Text {
+            x: 10px;
+            width: parent.width - 20px;
+            text: placeholder;
+            color: Theme.muted;
+            horizontal-alignment: I18n.rtl ? right : left;
+        }
+        input := TextInput {
+            x: 10px;
+            width: parent.width - 20px;
+            text <=> root.text;
+            enabled: root.enabled;
+            color: Theme.text;
+            selection-background-color: Theme.accent-soft;
+            selection-foreground-color: Theme.text;
+            input-type: password ? InputType.password : InputType.text;
+            single-line: true;
+            vertical-alignment: center;
+            horizontal-alignment: I18n.rtl ? right : left;
+            accepted => {
+                root.accepted();
+            }
+            edited => {
+                root.edited(self.text);
+            }
+        }
+    }
+}
+
+export component Switch inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> checked;
+    callback toggled(bool);
+    height: 34px;
+    function flip() {
+        checked = !checked;
+        root.toggled(checked);
+    }
+    track := Rectangle {
+        x: I18n.rtl ? parent.width - 38px : 0;
+        width: 38px;
+        height: 22px;
+        border-radius: 11px;
+        background: checked ? Theme.accent : Theme.off;
+        animate background { duration: 200ms; }
+        Rectangle {
+            x: (checked != I18n.rtl) ? 19px : 3px;
+            animate x { duration: 200ms; easing: ease-out; }
+            width: 16px;
+            height: 16px;
+            border-radius: 8px;
+            background: white;
+            drop-shadow-blur: 3px;
+            drop-shadow-color: #0000004d;
+        }
+    }
+
+    Text {
+        x: I18n.rtl ? 0 : 48px;
+        width: parent.width - 48px;
+        text: root.text;
+        color: Theme.text;
+        vertical-alignment: center;
+        horizontal-alignment: I18n.rtl ? right : left;
+        wrap: word-wrap;
+    }
+
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            flip();
+        }
+    }
+}
+
+export component Select inherits Rectangle {
+    in property <[string]> options;
+    in-out property <int> current;
+    callback selected(int);
+    height: 38px;
+    border-radius: 9px;
+    background: touch.has-hover ? Theme.hover : Theme.field;
+    border-width: 1px;
+    border-color: touch.has-hover ? Theme.accent : Theme.line;
+    animate background, border-color { duration: 150ms; }
+    Text {
+        x: I18n.rtl ? 34px : 10px;
+        width: parent.width - 44px;
+        text: current >= 0 && current < options.length ? options[current] : "";
+        color: Theme.text;
+        overflow: elide;
+        horizontal-alignment: I18n.rtl ? right : left;
+    }
+
+    Icon {
+        x: I18n.rtl ? 10px : parent.width - 28px;
+        name: Icons.chevron;
+        stroke: Theme.muted;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            popup.show();
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: root.width;
+        Rectangle {
+            background: Theme.card;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.line;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 6px;
+            drop-shadow-color: Theme.shadow;
+            VerticalLayout {
+                padding: 4px;
+                for option[i] in options: Rectangle {
+                    height: 34px;
+                    border-radius: 7px;
+                    background: i == current ? Theme.accent-soft : option-touch.has-hover ? Theme.hover : transparent;
+                    Text {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        text: option;
+                        color: i == current ? Theme.accent : Theme.text;
+                        horizontal-alignment: I18n.rtl ? right : left;
+                    }
+
+                    option-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            current = i;
+                            root.selected(i);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A full-width row that opens something, like a submenu.
+export component MenuRow inherits Rectangle {
+    in property <string> text;
+    in property <string> detail;
+    in property <bool> danger;
+    in property <bool> arrow;
+    callback clicked();
+    height: 42px;
+    border-radius: 10px;
+    background: touch.has-hover ? (danger ? Theme.danger-soft : Theme.hover) : Theme.card;
+    border-width: 1px;
+    border-color: touch.has-hover ? (danger ? Theme.danger : Theme.accent) : Theme.line;
+    animate background, border-color { duration: 150ms; }
+    Text {
+        x: 12px;
+        width: parent.width - 24px;
+        text: root.text;
+        color: danger ? Theme.danger : Theme.text;
+        horizontal-alignment: I18n.rtl ? right : left;
+    }
+
+    if detail != "" || arrow: HorizontalLayout {
+        x: I18n.rtl ? 10px : parent.width - self.width - 10px;
+        width: self.preferred-width;
+        spacing: 6px;
+        if detail != "": Text {
+            text: detail;
+            color: Theme.muted;
+            vertical-alignment: center;
+        }
+        if arrow: VerticalLayout {
+            alignment: center;
+            Icon {
+                name: I18n.rtl ? Icons.chevron-back : Icons.chevron-forward;
+                stroke: Theme.muted;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component Dot inherits Rectangle {
+    in property <string> state;
+    width: 10px;
+    height: 10px;
+    border-radius: self.width / 2;
+    background: Theme.state-color(state);
+    animate background { duration: 300ms; }
+}
+
+// Four bars that grow from left to right in every language, and the round trip below them.
+export component Signal inherits VerticalLayout {
+    in property <int> level;
+    in property <string> ping;
+    in property <string> tooltip;
+    width: 52px;
+    alignment: center;
+    spacing: 2px;
+    accessible-role: text;
+    accessible-label: ping;
+    HorizontalLayout {
+        alignment: center;
+        spacing: 2px;
+        height: 16px;
+        for bar in [1, 2, 3, 4]: VerticalLayout {
+            alignment: end;
+            Rectangle {
+                width: 4px;
+                height: 4px * bar;
+                border-radius: 1.5px;
+                background: bar > level ? Theme.off.with-alpha(0.55) : level >= 3 ? Theme.ok : level == 2 ? Theme.warn : Theme.danger;
+                animate background { duration: 300ms; }
+            }
+        }
+    }
+
+    Text {
+        text: ping;
+        color: Theme.muted;
+        font-size: 11px;
+        horizontal-alignment: center;
+    }
+}
+
+export component Avatar inherits Rectangle {
+    in property <string> initial;
+    in property <color> tint;
+    in property <string> link;
+    width: 32px;
+    height: 32px;
+    border-radius: 16px;
+    background: tint;
+    Text {
+        text: initial;
+        color: white;
+        font-weight: 700;
+        font-size: 13px;
+    }
+
+    Rectangle {
+        x: I18n.rtl ? -1px : parent.width - 11px;
+        y: parent.height - 11px;
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: Theme.card;
+        Dot {
+            state: link;
+            width: 8px;
+            height: 8px;
+        }
+    }
+}
+
+export component Tag inherits Rectangle {
+    in property <string> text;
+    in property <bool> strong;
+    height: 18px;
+    border-radius: 8px;
+    background: strong ? Theme.accent-soft : Theme.bg;
+    border-width: strong ? 0 : 1px;
+    border-color: Theme.line;
+    HorizontalLayout {
+        padding-left: 7px;
+        padding-right: 7px;
+        Text {
+            text: root.text;
+            color: strong ? Theme.accent : Theme.muted;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component Spinner inherits Rectangle {
+    width: 44px;
+    height: 12px;
+    for i in [0, 1, 2]: Rectangle {
+        x: i * 16px;
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: Theme.accent;
+        opacity: 0.35 + 0.65 * Math.abs(Math.sin((animation-tick() / 1ms / 400 - i * 0.6) * 1rad));
+    }
+}
+
+// A bordered list with rows separated by lines.
+export component ListBox inherits Rectangle {
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.line;
+    clip: true;
+    VerticalLayout {
+        @children
+    }
+}
+
+export component Separator inherits Rectangle {
+    height: 1px;
+    background: Theme.line;
+}

@@ -10,9 +10,9 @@ homepage: https://github.com/qateralong/weft
 license: AGPL-3.0-or-later
 overrides:
   deb:
-    depends: [libwebkit2gtk-4.1-0, libgtk-3-0, libayatana-appindicator3-1]
+    depends: [libfontconfig1, libfreetype6, libxkbcommon0, libegl1]
   rpm:
-    depends: [webkit2gtk4.1, gtk3, libayatana-appindicator-gtk3]
+    depends: [fontconfig, freetype, libxkbcommon, libglvnd-egl]
 contents:
   - src: target/release/weftd
     dst: /usr/bin/weftd

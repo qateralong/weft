@@ -1,6 +1,6 @@
 pkgbase=weft
 pkgname=(weft weft-loom)
-pkgver=0.6.1
+pkgver=0.7.0
 pkgrel=1
 pkgdesc='Peer-to-peer virtual LAN'
 arch=(x86_64 aarch64)
@@ -8,7 +8,7 @@ url='https://github.com/qateralong/weft'
 license=(AGPL-3.0-or-later)
 # Rust links C objects from ring and sqlite itself and cannot read GCC LTO bitcode.
 options=(!lto)
-makedepends=(cargo webkit2gtk-4.1 libayatana-appindicator)
+makedepends=(cargo fontconfig libxkbcommon)
 source=("$pkgbase-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
@@ -26,7 +26,7 @@ build() {
 
 package_weft() {
     pkgdesc='Peer-to-peer virtual LAN: daemon, command line and desktop app'
-    depends=(gcc-libs glibc gtk3 webkit2gtk-4.1 libayatana-appindicator)
+    depends=(gcc-libs glibc fontconfig freetype2 libxkbcommon libglvnd)
     backup=(etc/xdg/autostart/weft.desktop)
     install=weft.install
     cd "$pkgbase-$pkgver"
