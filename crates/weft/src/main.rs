@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use weft_i18n::Localizer;
-use weft_ipc::{Connection, DeviceInfo, InviteInfo, PeerLink, Request, Response, Role, Status};
+use weft_ipc::{Connection, DeviceInfo, InviteInfo, NetworkStatus, PeerLink, Request, Response, Role, Status};
 
 const MAX_EXPIRY: u64 = 365 * 24 * 3600;
 
@@ -35,6 +35,7 @@ fn cli(l: &Localizer) -> Command {
                 .help(l.tr("arg-version"))
                 .help_heading(l.tr("help-options")),
         )
+        .arg(option(l, "server", 's', "arg-server").global(true))
         .subcommand_required(true)
         .disable_help_subcommand(true)
         .subcommand_help_heading(l.tr("help-commands"))
@@ -45,6 +46,7 @@ fn cli(l: &Localizer) -> Command {
             vec![positional(l, "link", "arg-link"), option(l, "nickname", 'n', "arg-nickname")],
         ))
         .subcommand(command(l, "down", "cmd-down", vec![]))
+        .subcommand(command(l, "remove", "cmd-remove", vec![positional(l, "host", "arg-host").required(true)]))
         .subcommand(command(l, "create", "cmd-create", vec![name(), password()]))
         .subcommand(command(
             l,
@@ -152,11 +154,31 @@ fn option(l: &Localizer, id: &'static str, short: char, help: &str) -> Arg {
         .help_heading(l.tr("help-options"))
 }
 
+/// The `--server` value, which may follow any subcommand.
+fn server_arg(matches: &ArgMatches) -> Option<String> {
+    let mut current = matches;
+    let mut found = matches.try_get_one::<String>("server").ok().flatten().cloned();
+    while let Some((_, sub)) = current.subcommand() {
+        if let Ok(Some(value)) = sub.try_get_one::<String>("server") {
+            found = Some(value.clone());
+        }
+        current = sub;
+    }
+    found
+}
+
 fn run(l: &Localizer, matches: &ArgMatches) -> Result<(), String> {
     let arg = |m: &ArgMatches, id: &str| m.get_one::<String>(id).cloned();
+    let mut server = server_arg(matches);
     let (request, done) = match matches.subcommand() {
         Some(("up", m)) => (Request::Up { link: arg(m, "link"), nickname: arg(m, "nickname") }, Some(l.tr("done-up"))),
         Some(("down", _)) => (Request::Down, Some(l.tr("done-down"))),
+        Some(("remove", m)) => {
+            let host = arg(m, "host").unwrap_or_default();
+            let done = l.tr_args("done-remove", &[("server", &host)]);
+            server = Some(host);
+            (Request::Remove, Some(done))
+        }
         Some(("create", m)) => {
             let name = arg(m, "name").unwrap_or_default();
             let password = password(l, arg(m, "password"), true)?;
@@ -258,7 +280,7 @@ fn run(l: &Localizer, matches: &ArgMatches) -> Result<(), String> {
 
     let path = weft_ipc::socket_path();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
-    let response = runtime.block_on(weft_ipc::request(&path, &request)).map_err(|error| {
+    let response = runtime.block_on(weft_ipc::request_on(&path, &request, server.as_deref())).map_err(|error| {
         let path = path.display().to_string();
         match error.kind() {
             std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
@@ -396,31 +418,39 @@ fn password(l: &Localizer, given: Option<String>, confirm: bool) -> Result<Strin
 }
 
 fn print_status(l: &Localizer, status: &Status) {
-    let state = match status.connection {
-        Connection::Disconnected => "state-disconnected",
-        Connection::Connecting => "state-connecting",
-        Connection::Connected => "state-connected",
-    };
     let none = l.tr("status-none");
-    let rows = [
-        (l.tr("status-server"), status.server.clone().unwrap_or_else(|| none.clone())),
-        (l.tr("status-state"), l.tr(state)),
-        (l.tr("status-nickname"), status.nickname.clone()),
-        (l.tr("status-address"), status.address.map_or_else(|| none.clone(), |a| a.to_string())),
-        (l.tr("status-key"), status.public_key.clone()),
-    ];
-    let width = rows.iter().map(|(label, _)| label.chars().count()).max().unwrap_or(0) + 1;
-    for (label, value) in &rows {
-        println!("{:<width$} {value}", format!("{label}:"), width = width);
+    let print_rows = |rows: &[(String, String)]| {
+        let width = rows.iter().map(|(label, _)| label.chars().count()).max().unwrap_or(0) + 1;
+        for (label, value) in rows {
+            println!("{:<width$} {value}", format!("{label}:"), width = width);
+        }
+    };
+    print_rows(&[(l.tr("status-nickname"), status.nickname.clone()), (l.tr("status-key"), status.public_key.clone())]);
+    if status.servers.is_empty() {
+        println!();
+        print_rows(&[(l.tr("status-server"), none.clone())]);
     }
-
-    if status.networks.is_empty() {
-        if status.connection == Connection::Connected {
+    for server in &status.servers {
+        let state = match server.connection {
+            Connection::Disconnected => "state-disconnected",
+            Connection::Connecting => "state-connecting",
+            Connection::Connected => "state-connected",
+        };
+        println!();
+        print_rows(&[
+            (l.tr("status-server"), server.host.clone()),
+            (l.tr("status-state"), l.tr(state)),
+            (l.tr("status-address"), server.address.map_or_else(|| none.clone(), |a| a.to_string())),
+        ]);
+        if server.networks.is_empty() && server.connection == Connection::Connected {
             println!("\n{}", l.tr("status-no-networks"));
         }
-        return;
+        print_networks(l, &server.networks);
     }
-    for network in &status.networks {
+}
+
+fn print_networks(l: &Localizer, networks: &[NetworkStatus]) {
+    for network in networks {
         let role = match network.role {
             Role::Owner => "role-owner",
             Role::Admin => "role-admin",

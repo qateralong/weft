@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,33 +9,120 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, sleep_until};
 use weft_ipc::{
     Connection, DeviceInfo, Diagnostics, Failure, InviteInfo, MemberStatus, NetworkStatus, PeerDiagnostics, PeerLink,
-    PortMapping, Request, Response, Status,
+    PortMapping, Request, Response, ServerDiagnostics, ServerStatus, Status,
 };
-use weft_mesh::{Mesh, Output, PeerConfig, SocketId};
+use weft_mesh::{Mesh, Output, PeerConfig, ServerId, SocketId};
 use weft_portmap::{Mapped, PortMapper};
 use weft_proto::control::{
-    Candidates, ClientKind, ClientMessage, DeviceList, Endpoint, ErrorCode, Invite, InviteCode, InviteRequest,
-    MemberAction, NetworkCredentials, NetworkName, NetworkSettings, PeerCandidates, PeerKey, RelayPacket, Role,
-    RoleChange, ServerKind, ServerMessage, State, Welcome,
+    Candidates, ClientKind, ClientMessage, DeviceList, Endpoint, ErrorCode, Hello, Invite, InviteCode, InviteRequest,
+    MemberAction, NetworkCredentials, NetworkName, NetworkSettings, PROTOCOL_VERSION, PeerCandidates, PeerKey,
+    RelayPacket, Role, RoleChange, ServerKind, ServerMessage, State, Welcome,
 };
-use weft_proto::{DNS_ADDRESS, Link, PublicKey};
+use weft_proto::{DNS_ADDRESS, Host, Link, PublicKey};
 use weft_session::StaticKeypair;
 use weft_tun::{DEFAULT_MTU, Dns, Route, Tun, TunConfig};
 
 use crate::control::{Control, ControlEvent};
 use crate::dns;
 use crate::ipc::Command;
-use crate::settings::{Settings, SettingsFile, Transport, default_nickname};
+use crate::settings::{ServerEntry, Settings, SettingsFile, Transport, default_nickname};
 
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const CANDIDATES_INTERVAL: Duration = Duration::from_secs(60);
 const IDLE_TICK: Duration = Duration::from_secs(3600);
+const DEFAULT_TTL: u32 = 64;
 
 pub struct Options {
     pub tun_name: String,
     pub port: Option<u16>,
     pub echo: bool,
+}
+
+/// One coordination server and the connection to it.
+struct Session {
+    id: ServerId,
+    link: Link,
+    up: bool,
+    control: Option<Control>,
+    generation: u64,
+    connection: Connection,
+    welcome: Option<Welcome>,
+    state: State,
+    candidates: Vec<SocketAddr>,
+    candidates_at: Option<Instant>,
+    pending: HashMap<u32, oneshot::Sender<Response>>,
+    up_waiters: Vec<oneshot::Sender<Response>>,
+    redeem_waiters: Vec<(String, oneshot::Sender<Response>)>,
+    backoff: Duration,
+    reconnect_at: Option<Instant>,
+}
+
+impl Session {
+    fn new(id: ServerId, link: Link, up: bool) -> Self {
+        Self {
+            id,
+            link,
+            up,
+            control: None,
+            generation: 0,
+            connection: Connection::Disconnected,
+            welcome: None,
+            state: State::default(),
+            candidates: Vec::new(),
+            candidates_at: None,
+            pending: HashMap::new(),
+            up_waiters: Vec::new(),
+            redeem_waiters: Vec::new(),
+            backoff: MIN_BACKOFF,
+            reconnect_at: None,
+        }
+    }
+
+    fn host(&self) -> String {
+        let host = match &self.link.host {
+            Host::Domain(name) => name.clone(),
+            Host::Ipv4(ip) => ip.to_string(),
+            Host::Ipv6(ip) => format!("[{ip}]"),
+        };
+        format!("{host}:{}", self.link.port)
+    }
+
+    /// How well `selector` names this server: 2 for its link or `host:port`, 1 for the host alone.
+    fn matches(&self, selector: &str) -> u8 {
+        let selector = selector.trim();
+        let host = self.host();
+        let bare = host.rsplit_once(':').map_or(host.as_str(), |(bare, _)| bare);
+        if selector.eq_ignore_ascii_case(&host) || selector.parse::<Link>().is_ok_and(|link| link.server() == self.link)
+        {
+            2
+        } else if selector.eq_ignore_ascii_case(bare) {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn has_network(&self, name: &str) -> bool {
+        let name = name.trim().to_lowercase();
+        self.state.networks.iter().any(|network| network.name.to_lowercase() == name)
+    }
+
+    fn address(&self) -> Option<Ipv4Addr> {
+        self.welcome.as_ref().map(|welcome| Ipv4Addr::from(welcome.address))
+    }
+
+    fn fail_pending(&mut self, failure: Failure) {
+        for (_, reply) in self.pending.drain() {
+            let _ = reply.send(Response::Error(failure));
+        }
+        for reply in self.up_waiters.drain(..) {
+            let _ = reply.send(Response::Error(failure));
+        }
+        for (_, reply) in self.redeem_waiters.drain(..) {
+            let _ = reply.send(Response::Error(failure));
+        }
+    }
 }
 
 pub struct Daemon {
@@ -55,21 +143,13 @@ pub struct Daemon {
     mapper: PortMapper,
     mapped: watch::Receiver<Option<Mapped>>,
     tun: Option<Tun>,
-    tun_address: Option<Ipv4Addr>,
+    /// Our virtual addresses with prefix lengths; the first one created the TUN interface.
+    addresses: Vec<(Ipv4Addr, u8)>,
     names: HashMap<String, Ipv4Addr>,
-    control: Option<Control>,
+    sessions: Vec<Session>,
+    next_server: ServerId,
     generation: u64,
-    connection: Connection,
-    welcome: Option<Welcome>,
-    state: State,
-    candidates: Vec<SocketAddr>,
-    candidates_at: Option<Instant>,
-    pending: HashMap<u32, oneshot::Sender<Response>>,
-    up_waiters: Vec<oneshot::Sender<Response>>,
-    redeem_waiters: Vec<(String, oneshot::Sender<Response>)>,
     next_id: u32,
-    backoff: Duration,
-    reconnect_at: Option<Instant>,
     control_tx: mpsc::UnboundedSender<(u64, ControlEvent)>,
     control_rx: mpsc::UnboundedReceiver<(u64, ControlEvent)>,
     commands: mpsc::Receiver<Command>,
@@ -81,8 +161,6 @@ struct ExtraSocket {
     ttl: u32,
     task: tokio::task::JoinHandle<()>,
 }
-
-const DEFAULT_TTL: u32 = 64;
 
 impl Drop for ExtraSocket {
     fn drop(&mut self) {
@@ -147,27 +225,32 @@ impl Daemon {
             mapper,
             mapped,
             tun: None,
-            tun_address: None,
+            addresses: Vec::new(),
             names: HashMap::new(),
-            control: None,
+            sessions: Vec::new(),
+            next_server: 1,
             generation: 0,
-            connection: Connection::Disconnected,
-            welcome: None,
-            state: State::default(),
-            candidates: Vec::new(),
-            candidates_at: None,
-            pending: HashMap::new(),
-            up_waiters: Vec::new(),
-            redeem_waiters: Vec::new(),
             next_id: 1,
-            backoff: MIN_BACKOFF,
-            reconnect_at: None,
             control_tx,
             control_rx,
             commands,
         };
-        if daemon.settings.up {
-            daemon.connect();
+        for entry in daemon.settings.servers.clone() {
+            match entry.link.parse::<Link>() {
+                Ok(link) => {
+                    let host = Session::new(0, link.server(), false).host();
+                    if let Some(index) = daemon.sessions.iter().position(|session| session.host() == host) {
+                        daemon.sessions.remove(index);
+                    }
+                    daemon.add_session(link.server(), entry.up);
+                }
+                Err(error) => tracing::warn!(link = entry.link, %error, "skipping an invalid server link"),
+            }
+        }
+        for index in 0..daemon.sessions.len() {
+            if daemon.sessions[index].up {
+                daemon.connect(index);
+            }
         }
         Ok(daemon)
     }
@@ -192,21 +275,18 @@ impl Daemon {
             match wake {
                 Wake::Command(None) => return,
                 Wake::Command(Some(command)) => self.on_command(command),
-                Wake::Control(Some((generation, event))) if generation == self.generation => {
-                    self.on_control(event).await
+                Wake::Control(Some((generation, event))) => {
+                    let found = self.sessions.iter().position(|session| session.generation == generation);
+                    if let Some(index) = found {
+                        self.on_control(index, event).await;
+                    }
                 }
-                Wake::Control(_) => {}
+                Wake::Control(None) => {}
                 Wake::Udp(Ok((len, from))) => {
                     if let Some(delivered) = self.mesh.receive_udp(now, 0, from, &udp_buf[..len]) {
                         self.deliver(&delivered.packet).await;
                     }
                 }
-                Wake::Extra(Some((socket, from, datagram))) => {
-                    if let Some(delivered) = self.mesh.receive_udp(now, socket, from, &datagram) {
-                        self.deliver(&delivered.packet).await;
-                    }
-                }
-                Wake::Extra(None) => {}
                 Wake::Udp(Err(error)) => tracing::debug!(%error, "udp receive failed"),
                 Wake::Udp6(Ok((len, from))) => {
                     if let Some(delivered) = self.mesh.receive_udp(now, 0, from, &udp6_buf[..len]) {
@@ -214,6 +294,12 @@ impl Daemon {
                     }
                 }
                 Wake::Udp6(Err(error)) => tracing::debug!(%error, "udp6 receive failed"),
+                Wake::Extra(Some((socket, from, datagram))) => {
+                    if let Some(delivered) = self.mesh.receive_udp(now, socket, from, &datagram) {
+                        self.deliver(&delivered.packet).await;
+                    }
+                }
+                Wake::Extra(None) => {}
                 Wake::Tun(Ok(len)) if dns::is_query(&tun_buf[..len]) => {
                     if let (Some(reply), Some(tun)) = (dns::respond(&tun_buf[..len], &self.names), &self.tun) {
                         let _ = tun.send(&reply).await;
@@ -228,7 +314,13 @@ impl Daemon {
                     tracing::warn!(%error, "tun receive failed");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                Wake::Mapped => self.candidates_at = Some(Instant::now()),
+                Wake::Mapped => {
+                    for session in &mut self.sessions {
+                        if session.connection == Connection::Connected {
+                            session.candidates_at = Some(Instant::now());
+                        }
+                    }
+                }
                 Wake::Timer => self.on_timer(),
             }
             self.flush().await;
@@ -237,77 +329,262 @@ impl Daemon {
 
     fn deadline(&self) -> Instant {
         let mesh = self.mesh.next_timeout().map(Instant::from_std);
-        [mesh, self.reconnect_at, self.candidates_at]
-            .into_iter()
-            .flatten()
-            .min()
-            .unwrap_or_else(|| Instant::now() + IDLE_TICK)
+        let sessions = self.sessions.iter().flat_map(|session| [session.reconnect_at, session.candidates_at]);
+        [mesh].into_iter().chain(sessions).flatten().min().unwrap_or_else(|| Instant::now() + IDLE_TICK)
     }
 
     fn on_command(&mut self, command: Command) {
-        let Command { request, reply } = command;
+        let Command { request, server, reply } = command;
+        let server = server.as_deref();
         match request {
-            Request::Up { link, nickname } => self.up(link, nickname, reply),
-            Request::Down => {
-                self.settings.up = false;
-                self.save_settings();
-                self.disconnect();
-                let _ = reply.send(Response::Ok);
-            }
+            Request::Up { link, nickname } => self.up(link, nickname, server, reply),
+            Request::Down => self.down(server, reply),
+            Request::Remove => self.remove(server, reply),
             Request::Status => {
                 let _ = reply.send(Response::Status(self.status()));
             }
+            Request::Diagnose { logs } => {
+                let _ = reply.send(Response::Diagnostics(Box::new(self.diagnostics(logs))));
+            }
+            Request::Redeem { link } => self.redeem(link, reply),
             Request::Create { name, password } => {
-                self.request(ClientKind::CreateNetwork(NetworkCredentials { name, password }), reply)
+                let target = self.target(server, None);
+                self.route(target, ClientKind::CreateNetwork(NetworkCredentials { name, password }), reply)
             }
             Request::Join { name, password } => {
-                self.request(ClientKind::JoinNetwork(NetworkCredentials { name, password }), reply)
+                let target = self.target(server, Some(&name));
+                self.route(target, ClientKind::JoinNetwork(NetworkCredentials { name, password }), reply)
             }
-            Request::Leave { name } => self.request(ClientKind::LeaveNetwork(NetworkName { name }), reply),
-            Request::Redeem { link } => self.redeem(link, reply),
+            Request::Leave { name } => {
+                let target = self.target(server, Some(&name));
+                self.route(target, ClientKind::LeaveNetwork(NetworkName { name }), reply)
+            }
+            Request::RevokeInvite { code } => {
+                let target = self.target(server, None);
+                self.route(target, ClientKind::RevokeInvite(InviteCode { code }), reply)
+            }
             Request::CreateInvite { network, uses, expires_in } => {
+                let target = self.target(server, Some(&network));
                 let request =
                     InviteRequest { network, max_uses: uses.unwrap_or(0), expires_in: expires_in.unwrap_or(0) };
-                self.request(ClientKind::CreateInvite(request), reply)
+                self.route(target, ClientKind::CreateInvite(request), reply)
             }
-            Request::Invites { network } => self.request(ClientKind::ListInvites(NetworkName { name: network }), reply),
-            Request::RevokeInvite { code } => self.request(ClientKind::RevokeInvite(InviteCode { code }), reply),
-            Request::Kick { network, member } => {
-                self.request(ClientKind::Kick(MemberAction { network, member }), reply)
+            Request::Invites { network } => {
+                let target = self.target(server, Some(&network));
+                self.route(target, ClientKind::ListInvites(NetworkName { name: network }), reply)
             }
-            Request::Ban { network, member } => self.request(ClientKind::Ban(MemberAction { network, member }), reply),
-            Request::Unban { network, member } => {
-                self.request(ClientKind::Unban(MemberAction { network, member }), reply)
+            Request::Bans { network } => {
+                let target = self.target(server, Some(&network));
+                self.route(target, ClientKind::ListBans(NetworkName { name: network }), reply)
             }
-            Request::Bans { network } => self.request(ClientKind::ListBans(NetworkName { name: network }), reply),
             Request::Requests { network } => {
-                self.request(ClientKind::ListRequests(NetworkName { name: network }), reply)
+                let target = self.target(server, Some(&network));
+                self.route(target, ClientKind::ListRequests(NetworkName { name: network }), reply)
+            }
+            Request::Delete { network } => {
+                let target = self.target(server, Some(&network));
+                self.route(target, ClientKind::DeleteNetwork(NetworkName { name: network }), reply)
+            }
+            Request::Kick { network, member } => {
+                let target = self.target(server, Some(&network));
+                self.route(target, ClientKind::Kick(MemberAction { network, member }), reply)
+            }
+            Request::Ban { network, member } => {
+                let target = self.target(server, Some(&network));
+                self.route(target, ClientKind::Ban(MemberAction { network, member }), reply)
+            }
+            Request::Unban { network, member } => {
+                let target = self.target(server, Some(&network));
+                self.route(target, ClientKind::Unban(MemberAction { network, member }), reply)
             }
             Request::Approve { network, member } => {
-                self.request(ClientKind::Approve(MemberAction { network, member }), reply)
+                let target = self.target(server, Some(&network));
+                self.route(target, ClientKind::Approve(MemberAction { network, member }), reply)
             }
             Request::Deny { network, member } => {
-                self.request(ClientKind::Deny(MemberAction { network, member }), reply)
+                let target = self.target(server, Some(&network));
+                self.route(target, ClientKind::Deny(MemberAction { network, member }), reply)
             }
             Request::SetRole { network, member, role } => {
+                let target = self.target(server, Some(&network));
                 let role = match role {
                     weft_ipc::Role::Owner => Role::Owner,
                     weft_ipc::Role::Admin => Role::Admin,
                     weft_ipc::Role::Member => Role::Member,
                 };
-                self.request(ClientKind::SetRole(RoleChange { network, member, role: role as i32 }), reply)
+                self.route(target, ClientKind::SetRole(RoleChange { network, member, role: role as i32 }), reply)
             }
-            Request::Configure { network, locked, approval, password } => self.request(
-                ClientKind::UpdateNetwork(NetworkSettings { name: network, locked, approval, password }),
-                reply,
-            ),
-            Request::Diagnose { logs } => {
-                let _ = reply.send(Response::Diagnostics(Box::new(self.diagnostics(logs))));
-            }
-            Request::Delete { network } => {
-                self.request(ClientKind::DeleteNetwork(NetworkName { name: network }), reply)
+            Request::Configure { network, locked, approval, password } => {
+                let target = self.target(server, Some(&network));
+                let settings = NetworkSettings { name: network, locked, approval, password };
+                self.route(target, ClientKind::UpdateNetwork(settings), reply)
             }
         }
+    }
+
+    /// Picks the server for a request: the selected one, the one that has the network, or the
+    /// only one there is.
+    fn target(&self, server: Option<&str>, network: Option<&str>) -> Result<usize, Failure> {
+        if let Some(selector) = server {
+            let best = self.sessions.iter().map(|session| session.matches(selector)).max().unwrap_or(0);
+            let found: Vec<usize> =
+                (0..self.sessions.len()).filter(|&i| best > 0 && self.sessions[i].matches(selector) == best).collect();
+            return match found[..] {
+                [index] => Ok(index),
+                [] => Err(Failure::ServerNotFound),
+                _ => Err(Failure::AmbiguousServer),
+            };
+        }
+        if let Some(name) = network {
+            let found: Vec<usize> = (0..self.sessions.len()).filter(|&i| self.sessions[i].has_network(name)).collect();
+            match found[..] {
+                [index] => return Ok(index),
+                [] => {}
+                _ => return Err(Failure::AmbiguousNetwork),
+            }
+        }
+        if self.sessions.len() == 1 {
+            return Ok(0);
+        }
+        let connected: Vec<usize> =
+            (0..self.sessions.len()).filter(|&i| self.sessions[i].connection == Connection::Connected).collect();
+        match connected[..] {
+            [index] => Ok(index),
+            _ if self.sessions.is_empty() => Err(Failure::NoServer),
+            _ => Err(Failure::AmbiguousServer),
+        }
+    }
+
+    fn route(&mut self, target: Result<usize, Failure>, kind: ClientKind, reply: oneshot::Sender<Response>) {
+        match target {
+            Ok(index) => self.request(index, kind, reply),
+            Err(failure) => {
+                let _ = reply.send(Response::Error(failure));
+            }
+        }
+    }
+
+    /// The session for this server; a new link for the same host and port replaces the old one,
+    /// as the server may have a new key.
+    fn session_for(&mut self, link: &Link) -> usize {
+        let link = link.server();
+        if let Some(index) = self.sessions.iter().position(|session| session.link == link) {
+            return index;
+        }
+        let host = Session::new(0, link.clone(), false).host();
+        match self.sessions.iter().position(|session| session.host().eq_ignore_ascii_case(&host)) {
+            Some(index) => {
+                self.disconnect_session(index);
+                self.sessions[index].link = link;
+                index
+            }
+            None => self.add_session(link, true),
+        }
+    }
+
+    fn add_session(&mut self, link: Link, up: bool) -> usize {
+        let id = self.next_server;
+        self.next_server += 1;
+        self.sessions.push(Session::new(id, link, up));
+        self.sessions.len() - 1
+    }
+
+    fn up(
+        &mut self,
+        link: Option<String>,
+        nickname: Option<String>,
+        server: Option<&str>,
+        reply: oneshot::Sender<Response>,
+    ) {
+        let mut renamed = false;
+        if let Some(nickname) = nickname {
+            let nickname = nickname.trim().to_string();
+            if !(1..=32).contains(&nickname.chars().count()) {
+                let _ = reply.send(Response::Error(Failure::InvalidNickname));
+                return;
+            }
+            renamed = self.settings.nickname.as_ref() != Some(&nickname);
+            self.settings.nickname = Some(nickname);
+        }
+        let chosen = match (link, server) {
+            (Some(link), _) => {
+                let Ok(link) = link.parse::<Link>() else {
+                    let _ = reply.send(Response::Error(Failure::InvalidLink));
+                    return;
+                };
+                Some(self.session_for(&link))
+            }
+            (None, Some(selector)) => match self.target(Some(selector), None) {
+                Ok(index) => Some(index),
+                Err(failure) => {
+                    let _ = reply.send(Response::Error(failure));
+                    return;
+                }
+            },
+            (None, None) => None,
+        };
+        if self.sessions.is_empty() {
+            let _ = reply.send(Response::Error(Failure::NoServer));
+            return;
+        }
+        let chosen: Vec<usize> = match chosen {
+            Some(index) => vec![index],
+            None => (0..self.sessions.len()).collect(),
+        };
+        for &index in &chosen {
+            self.sessions[index].up = true;
+        }
+        self.save_settings();
+        for index in 0..self.sessions.len() {
+            let session = &self.sessions[index];
+            let restart = renamed && session.up;
+            if restart || (chosen.contains(&index) && session.control.is_none()) {
+                self.disconnect_session(index);
+                self.connect(index);
+            }
+        }
+        let waiting = chosen.into_iter().find(|&index| self.sessions[index].connection != Connection::Connected);
+        match waiting {
+            Some(index) => self.sessions[index].up_waiters.push(reply),
+            None => {
+                let _ = reply.send(Response::Ok);
+            }
+        }
+    }
+
+    fn down(&mut self, server: Option<&str>, reply: oneshot::Sender<Response>) {
+        let chosen: Vec<usize> = match server {
+            Some(selector) => match self.target(Some(selector), None) {
+                Ok(index) => vec![index],
+                Err(failure) => {
+                    let _ = reply.send(Response::Error(failure));
+                    return;
+                }
+            },
+            None => (0..self.sessions.len()).collect(),
+        };
+        for index in chosen {
+            self.sessions[index].up = false;
+            self.disconnect_session(index);
+        }
+        self.save_settings();
+        self.refresh();
+        let _ = reply.send(Response::Ok);
+    }
+
+    fn remove(&mut self, server: Option<&str>, reply: oneshot::Sender<Response>) {
+        let index = match self.target(server, None) {
+            Ok(index) => index,
+            Err(failure) => {
+                let _ = reply.send(Response::Error(failure));
+                return;
+            }
+        };
+        self.disconnect_session(index);
+        self.sessions.remove(index);
+        self.save_settings();
+        self.refresh();
+        let _ = reply.send(Response::Ok);
     }
 
     fn redeem(&mut self, link: String, reply: oneshot::Sender<Response>) {
@@ -315,211 +592,208 @@ impl Daemon {
             let _ = reply.send(Response::Error(Failure::InvalidLink));
             return;
         };
-        let server = link.to_string();
-        if self.settings.server.as_ref() != Some(&server) || self.control.is_none() {
-            self.settings.server = Some(server);
-            self.settings.up = true;
-            self.save_settings();
-            self.disconnect();
-            self.connect();
-        } else if !self.settings.up {
-            self.settings.up = true;
-            self.save_settings();
-        }
-        if self.connection == Connection::Connected {
-            self.request(ClientKind::RedeemInvite(InviteCode { code }), reply);
-        } else {
-            self.redeem_waiters.push((code, reply));
-        }
-    }
-
-    fn up(&mut self, link: Option<String>, nickname: Option<String>, reply: oneshot::Sender<Response>) {
-        let mut changed = false;
-        if let Some(link) = link {
-            let Ok(link) = link.parse::<Link>() else {
-                let _ = reply.send(Response::Error(Failure::InvalidLink));
-                return;
-            };
-            let server = link.server().to_string();
-            changed |= self.settings.server.as_ref() != Some(&server);
-            self.settings.server = Some(server);
-        }
-        if let Some(nickname) = nickname {
-            let nickname = nickname.trim().to_string();
-            if !(1..=32).contains(&nickname.chars().count()) {
-                let _ = reply.send(Response::Error(Failure::InvalidNickname));
-                return;
-            }
-            changed |= self.settings.nickname.as_ref() != Some(&nickname);
-            self.settings.nickname = Some(nickname);
-        }
-        if self.settings.server.is_none() {
-            let _ = reply.send(Response::Error(Failure::NoServer));
-            return;
-        }
-        self.settings.up = true;
+        let index = self.session_for(&link);
+        self.sessions[index].up = true;
         self.save_settings();
-        if self.connection == Connection::Connected && !changed {
-            let _ = reply.send(Response::Ok);
-            return;
+        if self.sessions[index].control.is_none() {
+            self.connect(index);
         }
-        if changed || self.control.is_none() {
-            self.disconnect();
-            self.connect();
+        if self.sessions[index].connection == Connection::Connected {
+            self.request(index, ClientKind::RedeemInvite(InviteCode { code }), reply);
+        } else {
+            self.sessions[index].redeem_waiters.push((code, reply));
         }
-        self.up_waiters.push(reply);
     }
 
-    fn request(&mut self, kind: ClientKind, reply: oneshot::Sender<Response>) {
-        if self.connection != Connection::Connected {
+    fn request(&mut self, index: usize, kind: ClientKind, reply: oneshot::Sender<Response>) {
+        if self.sessions[index].connection != Connection::Connected {
             let _ = reply.send(Response::Error(Failure::NotConnected));
             return;
         }
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
-        if self.send_control(ClientMessage { id, kind: Some(kind) }) {
-            self.pending.insert(id, reply);
+        if self.send_control(index, ClientMessage { id, kind: Some(kind) }) {
+            self.sessions[index].pending.insert(id, reply);
         } else {
             let _ = reply.send(Response::Error(Failure::NotConnected));
         }
     }
 
-    fn send_control(&self, message: ClientMessage) -> bool {
-        self.control.as_ref().is_some_and(|control| control.send(message))
+    fn send_control(&self, index: usize, message: ClientMessage) -> bool {
+        self.sessions[index].control.as_ref().is_some_and(|control| control.send(message))
     }
 
-    fn connect(&mut self) {
-        let Some(link) = self.server_link() else { return };
+    fn connect(&mut self, index: usize) {
         let nickname = self.settings.nickname.clone().unwrap_or_else(default_nickname);
+        let address = self.addresses.first().map(|&(address, _)| address).or(self.settings.address);
         self.generation += 1;
-        self.control = Some(Control::spawn(
-            link,
+        let session = &mut self.sessions[index];
+        session.generation = self.generation;
+        session.control = Some(Control::spawn(
+            session.link.clone(),
             self.settings.transport,
             self.keypair.clone(),
-            nickname,
+            Hello { version: PROTOCOL_VERSION, nickname, address: address.map(u32::from) },
             self.generation,
             self.control_tx.clone(),
         ));
-        self.connection = Connection::Connecting;
-        self.reconnect_at = None;
+        session.connection = Connection::Connecting;
+        session.reconnect_at = None;
     }
 
-    fn disconnect(&mut self) {
+    /// Closes the connection and forgets what the server said; the caller refreshes shared state.
+    fn disconnect_session(&mut self, index: usize) {
         self.generation += 1;
-        self.control = None;
-        self.connection = Connection::Disconnected;
-        self.welcome = None;
-        self.reconnect_at = None;
-        self.candidates_at = None;
-        self.candidates.clear();
-        self.state = State::default();
-        self.mesh.clear_server();
-        self.mesh.update_peers(std::time::Instant::now(), Vec::new());
-        self.tun = None;
-        self.tun_address = None;
-        self.fail_pending(Failure::NotConnected);
+        let session = &mut self.sessions[index];
+        session.generation = self.generation;
+        session.control = None;
+        session.connection = Connection::Disconnected;
+        session.welcome = None;
+        session.reconnect_at = None;
+        session.candidates_at = None;
+        session.candidates.clear();
+        session.state = State::default();
+        session.fail_pending(Failure::NotConnected);
+        self.mesh.clear_server(session.id);
     }
 
-    fn server_link(&self) -> Option<Link> {
-        self.settings.server.as_deref().and_then(|link| link.parse().ok())
-    }
-
-    fn fail_pending(&mut self, failure: Failure) {
-        for (_, reply) in self.pending.drain() {
-            let _ = reply.send(Response::Error(failure));
-        }
-        for reply in self.up_waiters.drain(..) {
-            let _ = reply.send(Response::Error(failure));
-        }
-        for (_, reply) in self.redeem_waiters.drain(..) {
-            let _ = reply.send(Response::Error(failure));
-        }
-    }
-
-    async fn on_control(&mut self, event: ControlEvent) {
-        match event {
-            ControlEvent::Connected { welcome, server } => self.on_connected(welcome, server),
-            ControlEvent::Refused(code) => {
-                tracing::warn!(?code, "server refused the connection");
-                self.control = None;
-                self.connection = Connection::Disconnected;
-                self.fail_pending(failure(code));
-            }
-            ControlEvent::Message(message) => self.on_message(message).await,
-            ControlEvent::Closed(reason) => {
-                tracing::warn!(%reason, "server connection closed");
-                self.control = None;
-                self.welcome = None;
-                self.candidates_at = None;
-                self.candidates.clear();
-                self.mesh.clear_server();
-                self.fail_pending(Failure::NotConnected);
-                if self.settings.up {
-                    self.connection = Connection::Connecting;
-                    self.reconnect_at = Some(Instant::now() + self.backoff);
-                    self.backoff = (self.backoff * 2).min(MAX_BACKOFF);
-                } else {
-                    self.connection = Connection::Disconnected;
-                }
-            }
-        }
-    }
-
-    fn on_connected(&mut self, welcome: Welcome, server: SocketAddr) {
-        let address = Ipv4Addr::from(welcome.address);
-        tracing::info!(%server, %address, "connected to the server");
-        self.connection = Connection::Connected;
-        self.backoff = MIN_BACKOFF;
-        let prefix = welcome.prefix_len.min(32) as u8;
-        self.mesh.set_local(address, prefix);
-        if !self.echo && (self.tun.is_none() || self.tun_address != Some(address)) {
+    /// Rebuilds what depends on all servers: mesh peers, names, and the TUN interface.
+    fn refresh(&mut self) {
+        if self.sessions.iter().all(|session| !session.up) {
             self.tun = None;
-            self.tun_address = None;
-            let mut routes: Vec<Route> = self.settings.multicast_groups.iter().copied().map(Route::host).collect();
-            if self.settings.broadcast {
-                routes.insert(0, Route::host(Ipv4Addr::BROADCAST));
-            }
-            let dns = self.settings.dns.then(|| {
-                routes.push(Route::host(DNS_ADDRESS));
-                Dns { server: DNS_ADDRESS, domain: dns::ZONE.to_string() }
-            });
-            let config = TunConfig { name: self.tun_name.clone(), address, prefix, mtu: DEFAULT_MTU, routes, dns };
-            match Tun::create(&config) {
-                Ok(tun) => {
-                    tracing::info!(name = tun.name(), %address, "tun interface is up");
-                    self.tun = Some(tun);
-                    self.tun_address = Some(address);
-                }
-                Err(error) => tracing::error!(%error, "cannot create tun interface"),
-            }
+            self.addresses.clear();
+            self.mesh.set_locals(&[]);
         }
+        self.mesh.update_peers(std::time::Instant::now(), self.peer_configs());
         self.update_names();
-        if let (Some(link), Ok(token)) = (self.server_link(), welcome.discovery_token.as_slice().try_into()) {
-            let udp = SocketAddr::new(server.ip(), welcome.udp_port as u16);
-            self.mesh.set_server(std::time::Instant::now(), udp, link.server_key, token);
+    }
+
+    async fn on_control(&mut self, index: usize, event: ControlEvent) {
+        match event {
+            ControlEvent::Connected { welcome, server } => self.on_connected(index, welcome, server),
+            ControlEvent::Refused(code) => {
+                let session = &mut self.sessions[index];
+                tracing::warn!(server = %session.host(), ?code, "server refused the connection");
+                session.control = None;
+                session.connection = Connection::Disconnected;
+                session.fail_pending(failure(code));
+            }
+            ControlEvent::Message(message) => self.on_message(index, message).await,
+            ControlEvent::Closed(reason) => {
+                let session = &mut self.sessions[index];
+                tracing::warn!(server = %session.host(), %reason, "server connection closed");
+                session.control = None;
+                session.welcome = None;
+                session.candidates_at = None;
+                session.candidates.clear();
+                session.fail_pending(Failure::NotConnected);
+                if session.up {
+                    session.connection = Connection::Connecting;
+                    session.reconnect_at = Some(Instant::now() + session.backoff);
+                    session.backoff = (session.backoff * 2).min(MAX_BACKOFF);
+                } else {
+                    session.connection = Connection::Disconnected;
+                }
+                let id = session.id;
+                self.mesh.clear_server(id);
+            }
         }
-        self.welcome = Some(welcome);
-        self.candidates.clear();
-        self.candidates_at = Some(Instant::now());
-        for reply in self.up_waiters.drain(..) {
+    }
+
+    fn on_connected(&mut self, index: usize, welcome: Welcome, server: SocketAddr) {
+        let address = Ipv4Addr::from(welcome.address);
+        let prefix = welcome.prefix_len.min(32) as u8;
+        tracing::info!(%server, %address, "connected to the server");
+        self.attach_address(address, prefix);
+        if self.settings.address.is_none() {
+            self.settings.address = Some(address);
+            self.save_settings();
+        }
+        let session = &mut self.sessions[index];
+        session.connection = Connection::Connected;
+        session.backoff = MIN_BACKOFF;
+        if let Ok(token) = welcome.discovery_token.as_slice().try_into() {
+            let udp = SocketAddr::new(server.ip(), welcome.udp_port as u16);
+            let (id, key) = (session.id, session.link.server_key);
+            self.mesh.set_server(std::time::Instant::now(), id, udp, key, token);
+        }
+        let session = &mut self.sessions[index];
+        session.welcome = Some(welcome);
+        session.candidates.clear();
+        session.candidates_at = Some(Instant::now());
+        for reply in session.up_waiters.drain(..) {
             let _ = reply.send(Response::Ok);
         }
-        for (code, reply) in std::mem::take(&mut self.redeem_waiters) {
-            self.request(ClientKind::RedeemInvite(InviteCode { code }), reply);
+        for (code, reply) in std::mem::take(&mut session.redeem_waiters) {
+            self.request(index, ClientKind::RedeemInvite(InviteCode { code }), reply);
         }
+        self.update_names();
     }
 
-    async fn on_message(&mut self, message: ServerMessage) {
+    /// Puts the address on the TUN interface, creating it for the first server.
+    fn attach_address(&mut self, address: Ipv4Addr, prefix: u8) {
+        if self.addresses.iter().any(|&(known, _)| known == address) {
+            return;
+        }
+        let subnet = |address: Ipv4Addr, prefix: u8| {
+            u32::from(address) & u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0)
+        };
+        let clash = self.addresses.iter().find(|&&(known, known_prefix)| {
+            let prefix = prefix.min(known_prefix);
+            subnet(known, prefix) == subnet(address, prefix)
+        });
+        if let Some((known, _)) = clash {
+            tracing::warn!(%address, %known, "another server gave a different address in the same range; its peers will not work");
+            return;
+        }
+        if !self.echo {
+            match &self.tun {
+                None => match self.create_tun(address, prefix) {
+                    Ok(tun) => {
+                        tracing::info!(name = tun.name(), %address, "tun interface is up");
+                        self.tun = Some(tun);
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "cannot create tun interface");
+                        return;
+                    }
+                },
+                Some(tun) => {
+                    if let Err(error) = tun.add_address(address, prefix) {
+                        tracing::warn!(%address, %error, "cannot add an address to the tun interface");
+                        return;
+                    }
+                    tracing::info!(%address, "address added for another server");
+                }
+            }
+        }
+        self.addresses.push((address, prefix));
+        self.mesh.set_locals(&self.addresses);
+    }
+
+    fn create_tun(&self, address: Ipv4Addr, prefix: u8) -> std::io::Result<Tun> {
+        let mut routes: Vec<Route> = self.settings.multicast_groups.iter().copied().map(Route::host).collect();
+        if self.settings.broadcast {
+            routes.insert(0, Route::host(Ipv4Addr::BROADCAST));
+        }
+        let dns = self.settings.dns.then(|| {
+            routes.push(Route::host(DNS_ADDRESS));
+            Dns { server: DNS_ADDRESS, domain: dns::ZONE.to_string() }
+        });
+        Tun::create(&TunConfig { name: self.tun_name.clone(), address, prefix, mtu: DEFAULT_MTU, routes, dns })
+    }
+
+    async fn on_message(&mut self, index: usize, message: ServerMessage) {
         if message.reply_to != 0
-            && let Some(reply) = self.pending.remove(&message.reply_to)
+            && let Some(reply) = self.sessions[index].pending.remove(&message.reply_to)
         {
             let response = match message.kind {
                 Some(ServerKind::Ack(_)) => Response::Ok,
                 Some(ServerKind::Failure(f)) => Response::Error(failure(f.code())),
                 Some(ServerKind::Joined(network)) => Response::Joined(network.name),
-                Some(ServerKind::Invite(invite)) => Response::Invite(self.invite_info(invite)),
+                Some(ServerKind::Invite(invite)) => Response::Invite(self.invite_info(index, invite)),
                 Some(ServerKind::Invites(list)) => {
-                    Response::Invites(list.invites.into_iter().map(|invite| self.invite_info(invite)).collect())
+                    Response::Invites(list.invites.into_iter().map(|invite| self.invite_info(index, invite)).collect())
                 }
                 Some(ServerKind::Pending(network)) => Response::Pending(network.name),
                 Some(ServerKind::Bans(list)) => Response::Bans(device_infos(list)),
@@ -532,10 +806,8 @@ impl Daemon {
         let now = std::time::Instant::now();
         match message.kind {
             Some(ServerKind::State(state)) => {
-                self.state = state;
-                self.update_names();
-                let configs = peer_configs(&self.state);
-                self.mesh.update_peers(now, configs);
+                self.sessions[index].state = state;
+                self.refresh();
             }
             Some(ServerKind::CallMeMaybe(PeerCandidates { key, endpoints })) => {
                 if let Ok(key) = PublicKey::from_slice(&key) {
@@ -559,12 +831,14 @@ impl Daemon {
             let used = self.mesh.sockets();
             self.extra.retain(|id, _| used.contains(id));
         }
-        if self.reconnect_at.is_some_and(|at| now >= at) {
-            self.connect();
-        }
-        if self.candidates_at.is_some_and(|at| now >= at) {
-            self.candidates_at = Some(now + CANDIDATES_INTERVAL);
-            self.publish_candidates();
+        for index in 0..self.sessions.len() {
+            if self.sessions[index].reconnect_at.is_some_and(|at| now >= at) {
+                self.connect(index);
+            }
+            if self.sessions[index].candidates_at.is_some_and(|at| now >= at) {
+                self.sessions[index].candidates_at = Some(now + CANDIDATES_INTERVAL);
+                self.publish_candidates(index);
+            }
         }
     }
 
@@ -599,14 +873,12 @@ impl Daemon {
         Some(socket)
     }
 
-    fn publish_candidates(&mut self) {
-        if self.connection != Connection::Connected {
-            return;
-        }
+    fn local_candidates(&self) -> Vec<SocketAddr> {
         let tun = self.tun.as_ref().map(|tun| tun.name().to_string()).unwrap_or_else(|| self.tun_name.clone());
+        let own: Vec<IpAddr> = self.addresses.iter().map(|&(address, _)| IpAddr::V4(address)).collect();
         let mut candidates: Vec<SocketAddr> = weft_portmap::local_addresses(Some(&tun))
             .into_iter()
-            .filter(|ip| Some(*ip) != self.tun_address.map(IpAddr::V4))
+            .filter(|ip| !own.contains(ip))
             .filter(|ip| ip.is_ipv4() || self.udp6.is_some())
             .map(|ip| SocketAddr::new(ip, if ip.is_ipv4() { self.udp_port } else { self.udp6_port }))
             .collect();
@@ -615,14 +887,26 @@ impl Daemon {
             candidates.insert(0, mapped);
         }
         candidates.dedup();
-        if candidates != self.candidates {
+        candidates
+    }
+
+    fn publish_candidates(&mut self, index: usize) {
+        if self.sessions[index].connection != Connection::Connected {
+            return;
+        }
+        let candidates = self.local_candidates();
+        if candidates != self.sessions[index].candidates {
             tracing::debug!(?candidates, "publishing candidates");
             let endpoints = candidates.iter().map(|&addr| Endpoint::from(addr)).collect();
             let message = ClientMessage { id: 0, kind: Some(ClientKind::Candidates(Candidates { endpoints })) };
-            if self.send_control(message) {
-                self.candidates = candidates;
+            if self.send_control(index, message) {
+                self.sessions[index].candidates = candidates;
             }
         }
+    }
+
+    fn session_by_id(&self, id: ServerId) -> Option<usize> {
+        self.sessions.iter().position(|session| session.id == id)
     }
 
     async fn flush(&mut self) {
@@ -648,13 +932,17 @@ impl Daemon {
                         tracing::trace!(%to, socket, %error, "udp send failed");
                     }
                 }
-                Output::TcpRelay { to, packet } => {
-                    let relay = RelayPacket { address: u32::from(to), packet };
-                    self.send_control(ClientMessage { id: 0, kind: Some(ClientKind::Relay(relay)) });
+                Output::TcpRelay { server, to, packet } => {
+                    if let Some(index) = self.session_by_id(server) {
+                        let relay = RelayPacket { address: u32::from(to), packet };
+                        self.send_control(index, ClientMessage { id: 0, kind: Some(ClientKind::Relay(relay)) });
+                    }
                 }
-                Output::CallMeMaybe { peer } => {
-                    let key = PeerKey { key: peer.as_bytes().to_vec() };
-                    self.send_control(ClientMessage { id: 0, kind: Some(ClientKind::CallMeMaybe(key)) });
+                Output::CallMeMaybe { server, peer } => {
+                    if let Some(index) = self.session_by_id(server) {
+                        let key = PeerKey { key: peer.as_bytes().to_vec() };
+                        self.send_control(index, ClientMessage { id: 0, kind: Some(ClientKind::CallMeMaybe(key)) });
+                    }
                 }
             }
         }
@@ -662,7 +950,10 @@ impl Daemon {
 
     async fn deliver(&mut self, packet: &[u8]) {
         if self.echo {
-            let own = self.welcome.as_ref().map(|welcome| Ipv4Addr::from(welcome.address));
+            let destination =
+                (packet.len() >= 20).then(|| Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]));
+            let own =
+                destination.filter(|destination| self.addresses.iter().any(|&(address, _)| address == *destination));
             if let Some(reply) = own.and_then(|own| crate::echo::reply(packet, own)) {
                 let _ = self.mesh.send(std::time::Instant::now(), &reply);
             }
@@ -675,11 +966,61 @@ impl Daemon {
         }
     }
 
+    /// Peers of all servers; a device met on several servers is kept once, preferring an online entry.
+    fn peer_configs(&self) -> Vec<PeerConfig> {
+        let mut configs: HashMap<PublicKey, PeerConfig> = HashMap::new();
+        let mut owners: HashMap<Ipv4Addr, PublicKey> = HashMap::new();
+        for session in &self.sessions {
+            for peer in &session.state.peers {
+                let Ok(key) = PublicKey::from_slice(&peer.key) else { continue };
+                let address = Ipv4Addr::from(peer.address);
+                if owners.get(&address).is_some_and(|owner| *owner != key) {
+                    tracing::warn!(%address, "two peers on different servers share an address; ignoring the second");
+                    continue;
+                }
+                owners.insert(address, key);
+                let candidates =
+                    peer.endpoint.iter().chain(&peer.candidates).filter_map(|e| e.to_socket_addr()).collect();
+                let endpoint = peer.endpoint.as_ref().and_then(|endpoint| endpoint.to_socket_addr());
+                let config = PeerConfig { key, address, online: peer.online, candidates, endpoint, server: session.id };
+                match configs.entry(key) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(config);
+                    }
+                    Entry::Occupied(mut entry) if !entry.get().online && config.online => {
+                        entry.insert(config);
+                    }
+                    Entry::Occupied(_) => {}
+                }
+            }
+        }
+        configs.into_values().collect()
+    }
+
     fn status(&self) -> Status {
+        let servers = self
+            .sessions
+            .iter()
+            .map(|session| ServerStatus {
+                server: session.link.to_string(),
+                host: session.host(),
+                connection: session.connection,
+                address: session.address(),
+                networks: self.networks(session),
+            })
+            .collect();
+        Status {
+            nickname: self.settings.nickname.clone().unwrap_or_else(default_nickname),
+            public_key: self.keypair.public().to_string(),
+            servers,
+        }
+    }
+
+    fn networks(&self, session: &Session) -> Vec<NetworkStatus> {
         let own = self.keypair.public();
         let peers: HashMap<&[u8], &weft_proto::control::Peer> =
-            self.state.peers.iter().map(|peer| (peer.key.as_slice(), peer)).collect();
-        let networks = self
+            session.state.peers.iter().map(|peer| (peer.key.as_slice(), peer)).collect();
+        session
             .state
             .networks
             .iter()
@@ -701,28 +1042,20 @@ impl Daemon {
                     .map(|peer| self.member_status(peer))
                     .collect(),
             })
-            .collect();
-        Status {
-            connection: self.connection,
-            server: self.settings.server.clone(),
-            nickname: self.settings.nickname.clone().unwrap_or_else(default_nickname),
-            public_key: own.to_string(),
-            address: self.welcome.as_ref().map(|welcome| Ipv4Addr::from(welcome.address)),
-            networks,
-        }
+            .collect()
     }
 
     fn update_names(&mut self) {
         let own = self.keypair.public();
         let nickname = self.settings.nickname.clone().unwrap_or_else(default_nickname);
-        let address = self.welcome.as_ref().map(|welcome| Ipv4Addr::from(welcome.address));
+        let mine = self.addresses.iter().map(|&(address, _)| (nickname.as_str(), address));
         let peers = self
-            .state
-            .peers
+            .sessions
             .iter()
+            .flat_map(|session| &session.state.peers)
             .filter(|peer| peer.key.as_slice() != own.as_bytes())
             .map(|peer| (peer.nickname.as_str(), Ipv4Addr::from(peer.address)));
-        self.names = dns::names(address.map(|address| (nickname.as_str(), address)).into_iter().chain(peers));
+        self.names = dns::names(mine.chain(peers));
     }
 
     fn dns_name(&self, nickname: &str, address: Ipv4Addr) -> Option<String> {
@@ -733,10 +1066,9 @@ impl Daemon {
     fn diagnostics(&self, logs: bool) -> Diagnostics {
         let report = self.mesh.report(std::time::Instant::now());
         let tun = self.tun.as_ref().map(|tun| tun.name().to_string()).unwrap_or_else(|| self.tun_name.clone());
-        let local_addresses: Vec<IpAddr> = weft_portmap::local_addresses(Some(&tun))
-            .into_iter()
-            .filter(|ip| Some(*ip) != self.tun_address.map(IpAddr::V4))
-            .collect();
+        let own: Vec<IpAddr> = self.addresses.iter().map(|&(address, _)| IpAddr::V4(address)).collect();
+        let local_addresses: Vec<IpAddr> =
+            weft_portmap::local_addresses(Some(&tun)).into_iter().filter(|ip| !own.contains(ip)).collect();
         let mapped = self.mapper.current();
         let port_mapping = mapped.map(|mapped| PortMapping {
             protocol: mapped.protocol.name().to_string(),
@@ -746,12 +1078,13 @@ impl Daemon {
         let nat = weft_ipc::report::classify_nat(report.observed, self.udp_port, &local_addresses, &seen);
         let reports: HashMap<PublicKey, &weft_mesh::PeerReport> =
             report.peers.iter().map(|peer| (peer.key, peer)).collect();
-        let own = self.keypair.public();
+        let own_key = self.keypair.public();
+        let mut listed = std::collections::HashSet::new();
         let peers = self
-            .state
-            .peers
+            .sessions
             .iter()
-            .filter(|peer| peer.key.as_slice() != own.as_bytes())
+            .flat_map(|session| &session.state.peers)
+            .filter(|peer| peer.key.as_slice() != own_key.as_bytes() && listed.insert(peer.key.clone()))
             .map(|peer| {
                 let status = self.member_status(peer);
                 let report = PublicKey::from_slice(&peer.key).ok().and_then(|key| reports.get(&key).copied());
@@ -770,17 +1103,24 @@ impl Daemon {
                 }
             })
             .collect();
+        let servers = self
+            .sessions
+            .iter()
+            .map(|session| ServerDiagnostics {
+                server: session.link.to_string(),
+                connection: session.connection,
+                udp: report.servers.iter().find(|server| server.id == session.id).and_then(|server| server.udp),
+            })
+            .collect();
         Diagnostics {
             version: env!("CARGO_PKG_VERSION").to_string(),
             os: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
-            connection: self.connection,
-            server: self.settings.server.clone(),
+            servers,
             transport: match self.settings.transport {
                 Transport::Tls => "tls",
                 Transport::Raw => "raw",
             }
             .to_string(),
-            server_udp: report.server_udp,
             observed: report.observed,
             local_port: self.udp_port,
             ipv6: self.udp6.is_some() && local_addresses.iter().any(IpAddr::is_ipv6),
@@ -810,11 +1150,11 @@ impl Daemon {
         }
     }
 
-    fn invite_info(&self, invite: Invite) -> InviteInfo {
-        let link = self.server_link().map(|link| Link { invite: Some(invite.code.clone()), ..link }.to_string());
+    fn invite_info(&self, index: usize, invite: Invite) -> InviteInfo {
+        let link = Link { invite: Some(invite.code.clone()), ..self.sessions[index].link.clone() }.to_string();
         InviteInfo {
             code: invite.code,
-            link,
+            link: Some(link),
             network: invite.network,
             max_uses: (invite.max_uses > 0).then_some(invite.max_uses),
             uses: invite.uses,
@@ -823,24 +1163,16 @@ impl Daemon {
         }
     }
 
-    fn save_settings(&self) {
+    fn save_settings(&mut self) {
+        self.settings.servers = self
+            .sessions
+            .iter()
+            .map(|session| ServerEntry { link: session.link.to_string(), up: session.up })
+            .collect();
         if let Err(error) = self.settings_file.save(&self.settings) {
             tracing::error!(path = %self.settings_file.path().display(), %error, "cannot save settings");
         }
     }
-}
-
-fn peer_configs(state: &State) -> Vec<PeerConfig> {
-    state
-        .peers
-        .iter()
-        .filter_map(|peer| {
-            let key = PublicKey::from_slice(&peer.key).ok()?;
-            let candidates = peer.endpoint.iter().chain(&peer.candidates).filter_map(|e| e.to_socket_addr()).collect();
-            let endpoint = peer.endpoint.as_ref().and_then(|endpoint| endpoint.to_socket_addr());
-            Some(PeerConfig { key, address: Ipv4Addr::from(peer.address), online: peer.online, candidates, endpoint })
-        })
-        .collect()
 }
 
 fn bind_v6(port: u16) -> std::io::Result<UdpSocket> {
@@ -901,4 +1233,27 @@ fn device_infos(list: DeviceList) -> Vec<DeviceInfo> {
             public_key: PublicKey::from_slice(&device.key).map(|key| key.to_string()).unwrap_or_default(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(link: &str) -> Session {
+        Session::new(1, link.parse::<Link>().unwrap().server(), true)
+    }
+
+    #[test]
+    fn selects_servers() {
+        let key = "ci2rw2hrlkx25sxk5gbtj3vhkyaphbnb6xol2j7giyupfoz7vmfq";
+        let a = session(&format!("weft://vpn.example.com:443#k={key}"));
+        assert_eq!(a.host(), "vpn.example.com:443");
+        assert_eq!(a.matches("vpn.example.com"), 1);
+        assert_eq!(a.matches("VPN.example.com:443"), 2);
+        assert_eq!(a.matches(&format!("weft://vpn.example.com:443/ABCD#k={key}")), 2);
+        assert_eq!(a.matches("other.example.com"), 0);
+        let b = session(&format!("weft://[2001:db8::1]:7443#k={key}"));
+        assert_eq!(b.host(), "[2001:db8::1]:7443");
+        assert_eq!(b.matches("[2001:db8::1]"), 1);
+    }
 }

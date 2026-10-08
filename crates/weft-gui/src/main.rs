@@ -52,8 +52,8 @@ fn open_release(app: AppHandle, url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn request(l: State<'_, Localizer>, request: Request) -> Result<Response, String> {
-    send(&l, request).await
+async fn request(l: State<'_, Localizer>, request: Request, server: Option<String>) -> Result<Response, String> {
+    send_to(&l, request, server.as_deref()).await
 }
 
 #[tauri::command]
@@ -81,8 +81,12 @@ async fn report(l: &Localizer, logs: bool) -> Result<String, String> {
 }
 
 pub(crate) async fn send(l: &Localizer, request: Request) -> Result<Response, String> {
+    send_to(l, request, None).await
+}
+
+async fn send_to(l: &Localizer, request: Request, server: Option<&str>) -> Result<Response, String> {
     let path = weft_ipc::socket_path();
-    let response = weft_ipc::request(&path, &request).await.map_err(|error| {
+    let response = weft_ipc::request_on(&path, &request, server).await.map_err(|error| {
         let path = path.display().to_string();
         match error.kind() {
             std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {

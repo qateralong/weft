@@ -135,6 +135,17 @@ main { padding: 14px 16px 28px; }
 .hero label { text-align: left; }
 .hero button.primary { width: 100%; padding: 10px; font-size: 15px; }
 
+.server-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 18px 4px 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.server-head:first-of-type { margin-top: 4px; }
+
 .network-head {
   display: flex;
   align-items: center;

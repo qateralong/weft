@@ -75,7 +75,22 @@ function el(tag, props = {}, ...children) {
 
 const nodes = (value) => [value].flat(Infinity).filter((node) => node != null && node !== false);
 
-const request = (command, fields = {}) => invoke('request', { request: { command, ...fields } });
+const request = (command, fields = {}, server = null) => invoke('request', { request: { command, ...fields }, server });
+
+/** Connected when any server is, connecting when any tries to. */
+function overall(current) {
+  const states = (current?.servers ?? []).map((server) => server.connection);
+  if (states.includes('connected')) return 'connected';
+  return states.includes('connecting') ? 'connecting' : 'disconnected';
+}
+
+function serverPicker() {
+  const servers = status?.servers ?? [];
+  if (servers.length < 2) return [null, () => null];
+  const preferred = servers.find((server) => server.connection === 'connected') ?? servers[0];
+  const select = el('select', {}, servers.map((server) => el('option', { value: server.host, selected: server === preferred }, server.host)));
+  return [el('label', {}, el('span', {}, t('gui-server')), select), () => select.value];
+}
 
 let toastTimer = null;
 function toast(text, error = false) {
@@ -86,9 +101,9 @@ function toast(text, error = false) {
   toastTimer = setTimeout(() => node.classList.remove('show'), error ? 5000 : 2500);
 }
 
-async function act(command, fields, done) {
+async function act(command, fields, done, server = null) {
   try {
-    const response = await request(command, fields);
+    const response = await request(command, fields, server);
     if (response.result === 'joined') toast(t('done-join', { name: response.data }));
     else if (response.result === 'pending') toast(t('done-pending', { name: response.data }));
     else if (done) toast(done);
@@ -264,13 +279,47 @@ function settingToggle(labelId, key) {
 }
 
 function serverDialog() {
-  const [linkLabel, link] = field('gui-server-link', { value: status?.server ?? '', placeholder: 'weft://…' });
   const [nickLabel, nickname] = field('gui-nickname', { value: status?.nickname ?? '' });
-  openDialog(t('gui-settings'), () => [linkLabel, nickLabel,
-    settingToggle('gui-notifications', 'notifications'), settingToggle('gui-check-updates', 'updates')], [{
+  const [linkLabel, link] = field('gui-add-server', { placeholder: 'weft://…' });
+  openDialog(t('gui-settings'), ({ fail, render }) => {
+    const servers = (status?.servers ?? []).map((server) => {
+      const online = server.connection !== 'disconnected';
+      return el('div', { class: 'row' },
+        el('span', { class: `dot ${server.connection}` }),
+        el('div', { class: 'grow' }, el('div', { class: 'mono' }, server.host), el('div', { class: 'muted' }, t(`state-${server.connection}`))),
+        el('button', {
+          class: 'small',
+          onclick: async () => {
+            try { await request(online ? 'down' : 'up', online ? {} : { link: null, nickname: null }, server.host); await poll(); await render(); } catch (e) { fail(String(e)); }
+          },
+        }, t(online ? 'gui-disconnect' : 'gui-connect')),
+        dangerButton(t('gui-remove'), async () => {
+          try { await request('remove', {}, server.host); toast(t('done-remove', { server: server.host })); await poll(); await render(); } catch (e) { fail(String(e)); }
+        }));
+    });
+    const add = el('button', {
+      onclick: async () => {
+        try {
+          await request('up', { link: link.value.trim(), nickname: null });
+          link.value = '';
+          await poll();
+          await render();
+        } catch (e) { fail(String(e)); }
+      },
+    }, icon('plus'), t('gui-add'));
+    return [
+      nickLabel,
+      el('div', { class: 'section' }, t('gui-servers')),
+      el('div', { class: 'list' }, servers),
+      el('div', { style: 'margin-top:12px' }, linkLabel, add),
+      el('div', { class: 'section' }, t('gui-app')),
+      settingToggle('gui-notifications', 'notifications'), settingToggle('gui-check-updates', 'updates'),
+    ];
+  }, [{
     label: t('gui-save'), primary: true,
     run: async () => {
-      await request('up', { link: link.value.trim() || null, nickname: nickname.value.trim() || null });
+      const name = nickname.value.trim();
+      if (name && name !== status?.nickname) await request('up', { link: null, nickname: name });
       await poll();
     },
   }]);
@@ -280,11 +329,12 @@ function createDialog() {
   const [nameLabel, name] = field('gui-network-name', { maxLength: 64 });
   const [passLabel, password] = field('gui-password', { type: 'password' });
   const [repeatLabel, repeat] = field('gui-password-repeat', { type: 'password' });
-  openDialog(t('gui-create-network'), () => [nameLabel, passLabel, repeatLabel], [{
+  const [serverLabel, server] = serverPicker();
+  openDialog(t('gui-create-network'), () => [serverLabel, nameLabel, passLabel, repeatLabel], [{
     label: t('gui-create'), primary: true,
     run: async ({ fail }) => {
       if (password.value !== repeat.value) return fail(t('password-mismatch')) ?? false;
-      await request('create', { name: name.value.trim(), password: password.value });
+      await request('create', { name: name.value.trim(), password: password.value }, server());
       toast(t('done-create', { name: name.value.trim() }));
       await poll();
     },
@@ -295,14 +345,17 @@ function joinDialog() {
   const [targetLabel, target] = field('gui-name-or-link', { placeholder: 'weft://…' });
   const [passLabel, password] = field('gui-password', { type: 'password' });
   const update = () => { passLabel.hidden = target.value.trim().toLowerCase().startsWith('weft://'); };
+  const [serverLabel, server] = serverPicker();
+  const update2 = () => { if (serverLabel) serverLabel.hidden = passLabel.hidden; };
   target.addEventListener('input', update);
-  openDialog(t('gui-join-network'), () => [targetLabel, passLabel], [{
+  target.addEventListener('input', update2);
+  openDialog(t('gui-join-network'), () => [targetLabel, serverLabel, passLabel], [{
     label: t('gui-join'), primary: true,
     run: async () => {
       const value = target.value.trim();
       const response = passLabel.hidden
         ? await request('redeem', { link: value })
-        : await request('join', { name: value, password: password.value });
+        : await request('join', { name: value, password: password.value }, server());
       if (response.result === 'joined') toast(t('done-join', { name: response.data }));
       else if (response.result === 'pending') toast(t('done-pending', { name: response.data }));
       else toast(t('done-join', { name: value }));
@@ -321,7 +374,7 @@ function inviteDetails(invite) {
   return `${uses} · ${expires} · ${t('invite-by', { nickname: invite.creator })}`;
 }
 
-function invitesDialog(network) {
+function invitesDialog({ name: network, server }) {
   const [usesLabel, uses] = field('gui-invite-uses', { type: 'number', min: 1 });
   const expiry = el('select', {}, EXPIRY.map(([id, seconds], index) =>
     el('option', { value: seconds ?? '', selected: index === 3 }, t(id))));
@@ -334,7 +387,7 @@ function invitesDialog(network) {
           const response = await request('create_invite', {
             network, uses: uses.value ? Number(uses.value) : null,
             expires_in: expiry.value ? Number(expiry.value) : null,
-          });
+          }, server);
           created = response.data;
           await render();
         } catch (e) { fail(String(e)); }
@@ -345,7 +398,7 @@ function invitesDialog(network) {
       el('button', { class: 'small', onclick: () => copy(created.link ?? created.code) }, t('gui-copy'))));
     let list;
     try {
-      const invites = (await request('invites', { network })).data;
+      const invites = (await request('invites', { network }, server)).data;
       list = invites.length
         ? invites.map((invite) => el('div', { class: 'row' },
           el('div', { class: 'grow wrap' }, el('div', { class: 'mono' }, invite.code), el('div', { class: 'muted' }, inviteDetails(invite))),
@@ -353,7 +406,7 @@ function invitesDialog(network) {
           el('button', {
             class: 'small danger',
             onclick: async () => {
-              try { await request('revoke_invite', { code: invite.code }); await render(); } catch (e) { fail(String(e)); }
+              try { await request('revoke_invite', { code: invite.code }, server); await render(); } catch (e) { fail(String(e)); }
             },
           }, t('gui-revoke'))))
         : el('div', { class: 'row empty' }, t('invites-empty', { name: network }));
@@ -371,14 +424,14 @@ function invitesDialog(network) {
   });
 }
 
-function devicesDialog(network, kind) {
+function devicesDialog({ name: network, server }, kind) {
   const actions = kind === 'requests'
     ? [['gui-approve', 'approve', 'primary'], ['gui-deny', 'deny', 'danger']]
     : [['gui-unban', 'unban', '']];
   openDialog(t(kind === 'requests' ? 'gui-requests' : 'gui-bans'), async ({ fail, render }) => {
     let devices = [];
     try {
-      devices = (await request(kind, { network })).data;
+      devices = (await request(kind, { network }, server)).data;
     } catch (e) {
       fail(String(e));
     }
@@ -389,7 +442,7 @@ function devicesDialog(network, kind) {
         class: `small ${style}`,
         onclick: async () => {
           try {
-            await request(command, { network, member: device.public_key });
+            await request(command, { network, member: device.public_key }, server);
             await poll();
             await render();
           } catch (e) { fail(String(e)); }
@@ -400,14 +453,15 @@ function devicesDialog(network, kind) {
 
 function settingsDialog(network) {
   openDialog(t('gui-network-settings'), ({ fail, close }) => {
-    const current = status.networks.find((n) => n.name === network.name) ?? network;
+    const current = status.servers.find((server) => server.host === network.server)
+      ?.networks.find((n) => n.name === network.name) ?? network;
     const owner = current.role === 'owner';
     const toggle = (labelId, key) => {
       const box = el('input', {
         type: 'checkbox', checked: current[key],
         onchange: async () => {
           try {
-            await request('configure', { network: network.name, locked: null, approval: null, password: null, [key]: box.checked });
+            await request('configure', { network: network.name, locked: null, approval: null, password: null, [key]: box.checked }, network.server);
             await poll();
           } catch (e) { box.checked = !box.checked; fail(String(e)); }
         },
@@ -420,7 +474,7 @@ function settingsDialog(network) {
       parts.push(el('div', { class: 'section' }, t('gui-change-password')), passLabel, el('button', {
         onclick: async () => {
           try {
-            await request('configure', { network: network.name, locked: null, approval: null, password: password.value });
+            await request('configure', { network: network.name, locked: null, approval: null, password: password.value }, network.server);
             password.value = '';
             toast(t('done-password', { name: network.name }));
           } catch (e) { fail(String(e)); }
@@ -428,7 +482,7 @@ function settingsDialog(network) {
       }, t('gui-change-password')));
       parts.push(el('div', { class: 'section' }, t('gui-delete-network')), dangerButton(t('gui-delete-network'), async () => {
         try {
-          await request('delete', { network: network.name });
+          await request('delete', { network: network.name }, network.server);
           toast(t('done-delete', { name: network.name }));
           close();
           await poll();
@@ -451,7 +505,7 @@ function memberDialog(network, member) {
         try {
           const fields = { network: network.name, member: member.address };
           if (role) fields.role = role;
-          await request(command, fields);
+          await request(command, fields, network.server);
           toast(t(done, { name: network.name, member: member.nickname }));
           close();
           await poll();
@@ -486,21 +540,23 @@ function avatar(member) {
 
 function renderHeader() {
   const header = document.getElementById('header');
-  if (!status || !status.server) return header.replaceChildren();
-  const connected = status.connection !== 'disconnected';
+  if (!status || !status.servers.length) return header.replaceChildren();
+  const connection = overall(status);
+  const connected = connection !== 'disconnected';
+  const address = status.servers.find((server) => server.address)?.address;
   const dark = document.documentElement.dataset.theme === 'dark';
   header.replaceChildren(
     el('button', {
-      class: `power ${status.connection}`,
+      class: `power ${connection}`,
       title: t(connected ? 'gui-disconnect' : 'gui-connect'),
       onclick: () => act(connected ? 'down' : 'up', connected ? {} : { link: null, nickname: null }),
     }, icon('power')),
     el('div', { class: 'me' },
       el('div', { class: 'name' }, status.nickname),
       el('div', { class: 'sub' },
-        el('span', { class: `dot ${status.connection}` }),
-        t(`state-${status.connection}`),
-        status.address && el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(status.address) }, status.address))),
+        el('span', { class: `dot ${connection}` }),
+        t(`state-${connection}`),
+        address && el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(address) }, address))),
     el('button', { class: 'icon', title: t('gui-diagnostics'), onclick: diagnosticsDialog }, icon('pulse')),
     el('button', { class: 'icon', title: t(dark ? 'gui-theme-light' : 'gui-theme-dark'), onclick: toggleTheme }, icon(dark ? 'sun' : 'moon')),
     el('button', { class: 'icon', title: t('gui-settings'), onclick: serverDialog }, icon('gear')));
@@ -531,16 +587,17 @@ function renderNetwork(network) {
   if (network.approval) tags.push(el('span', { class: 'tag' }, t('network-approval')));
   const online = network.members.filter((member) => member.link !== 'offline').length;
   const stop = (run) => (event) => { event.stopPropagation(); run(); };
-  const card = el('div', { class: `card${collapsed.has(network.name) ? ' collapsed' : ''}` });
-  const head = el('div', { class: 'network-head', onclick: () => toggleNetwork(card, network.name) },
+  const id = `${network.server}/${network.name}`;
+  const card = el('div', { class: `card${collapsed.has(id) ? ' collapsed' : ''}` });
+  const head = el('div', { class: 'network-head', onclick: () => toggleNetwork(card, id) },
     el('span', { class: 'chevron' }, icon('chevron')),
     el('div', { class: 'title' },
       el('b', {}, network.name), ' ', el('span', { class: 'muted' }, `${online + 1}/${network.members.length + 1}`),
       el('div', { class: 'tags' }, tags)),
     manager && network.requests > 0 && el('button', {
-      class: 'small', title: t('gui-requests'), onclick: stop(() => devicesDialog(network.name, 'requests')),
+      class: 'small', title: t('gui-requests'), onclick: stop(() => devicesDialog(network, 'requests')),
     }, icon('users'), el('span', { class: 'badge' }, network.requests)),
-    manager && el('button', { class: 'icon', title: t('gui-invites'), onclick: stop(() => invitesDialog(network.name)) }, icon('link')),
+    manager && el('button', { class: 'icon', title: t('gui-invites'), onclick: stop(() => invitesDialog(network)) }, icon('link')),
     el('button', { class: 'icon', title: t('gui-network-settings'), onclick: stop(() => networkMenu(network)) }, icon('more')));
   const rows = network.members.length
     ? network.members.map((member) => entering(el('div', { class: 'row' },
@@ -550,10 +607,10 @@ function renderNetwork(network) {
         el('div', { class: 'muted link-text' }, linkText(member))),
       el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(member.address) }, member.address),
       manager && el('button', { class: 'icon', onclick: () => memberDialog(network, member) }, icon('more'))),
-    `member:${network.name}:${member.address}`))
+    `member:${id}:${member.address}`))
     : el('div', { class: 'row empty' }, t('network-empty'));
   card.append(head, el('div', { class: 'members' }, el('div', {}, rows)));
-  return entering(card, `network:${network.name}`);
+  return entering(card, `network:${id}`);
 }
 
 function networkMenu(network) {
@@ -564,11 +621,11 @@ function networkMenu(network) {
       onclick: () => { close(); setTimeout(run, 170); },
     }, label);
     return el('div', { class: 'menu' },
-      manager && item(t('gui-invites'), () => invitesDialog(network.name)),
-      manager && item(t('gui-requests'), () => devicesDialog(network.name, 'requests')),
-      manager && item(t('gui-bans'), () => devicesDialog(network.name, 'bans')),
+      manager && item(t('gui-invites'), () => invitesDialog(network)),
+      manager && item(t('gui-requests'), () => devicesDialog(network, 'requests')),
+      manager && item(t('gui-bans'), () => devicesDialog(network, 'bans')),
       manager && item(t('gui-network-settings'), () => settingsDialog(network)),
-      item(t('gui-leave'), () => act('leave', { name: network.name }, t('done-leave', { name: network.name })), 'danger'));
+      item(t('gui-leave'), () => act('leave', { name: network.name }, t('done-leave', { name: network.name }), network.server), 'danger'));
   });
 }
 
@@ -581,7 +638,7 @@ function render() {
     return;
   }
   if (!status) return;
-  if (!status.server) {
+  if (!status.servers.length) {
     main.replaceChildren(renderSetup());
     return;
   }
@@ -592,10 +649,17 @@ function render() {
   const toolbar = el('div', { class: 'toolbar' },
     el('button', { onclick: createDialog }, icon('plus'), t('gui-create-network')),
     el('button', { class: 'primary', onclick: joinDialog }, icon('join'), t('gui-join-network')));
-  const networks = status.networks.length
-    ? status.networks.map(renderNetwork)
-    : status.connection === 'connected' && el('div', { class: 'card pad enter' }, el('p', {}, t('gui-no-networks')));
-  main.replaceChildren(...nodes([banner, toolbar, networks]));
+  const several = status.servers.length > 1;
+  const networks = status.servers.map((server) => [
+    several && el('div', { class: 'server-head' },
+      el('span', { class: `dot ${server.connection}` }),
+      el('span', { class: 'mono grow' }, server.host),
+      server.address && el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(server.address) }, server.address)),
+    server.networks.map((network) => renderNetwork({ ...network, server: server.host })),
+  ]);
+  const empty = status.servers.every((server) => !server.networks.length) && overall(status) === 'connected'
+    && el('div', { class: 'card pad enter' }, el('p', {}, t('gui-no-networks')));
+  main.replaceChildren(...nodes([banner, toolbar, networks, empty]));
   seen = fresh;
 }
 

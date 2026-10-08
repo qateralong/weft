@@ -294,3 +294,21 @@ diag-transport-raw = plain encrypted stream (transport = "raw")
 diag-ipv6 = IPv6
 diag-ipv6-yes = available: peers with IPv6 connect directly, without NAT
 diag-ipv6-no = not available
+error-ambiguous-server = Several servers are connected; choose one with --server
+error-server-not-found = No such server; see “weft status”
+error-ambiguous-network = Networks with this name exist on several servers; choose one with --server
+
+cmd-remove = Forget a server on this device
+arg-server = Server to use when several are connected: host or link
+arg-host = Server host, host:port or link
+value-server = SERVER
+value-host = SERVER
+usage-remove = weft remove <SERVER>
+done-remove = Server { $server } removed
+
+gui-server = Server
+gui-servers = Servers
+gui-add-server = Add a server by its link
+gui-add = Add
+gui-remove = Remove
+gui-app = App

@@ -7,16 +7,30 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// Older single-server settings, moved into `servers` on load.
+    #[serde(skip_serializing)]
     pub server: Option<String>,
-    pub nickname: Option<String>,
-    pub port: Option<u16>,
+    #[serde(skip_serializing)]
     pub up: bool,
+    pub nickname: Option<String>,
+    /// The virtual address asked from every server, so it is the same everywhere.
+    pub address: Option<Ipv4Addr>,
+    pub port: Option<u16>,
     pub broadcast: bool,
     pub multicast_groups: Vec<Ipv4Addr>,
     /// Resolve peer names like bob.weft through the system resolver.
     pub dns: bool,
     /// How the control connection to the server looks on the wire.
     pub transport: Transport,
+    pub servers: Vec<ServerEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerEntry {
+    pub link: String,
+    /// Whether to stay connected.
+    #[serde(default)]
+    pub up: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,12 +50,14 @@ impl Default for Settings {
         Self {
             server: None,
             nickname: None,
+            address: None,
             port: None,
             up: false,
             broadcast: true,
             multicast_groups: vec![MINECRAFT_GROUP],
             dns: true,
             transport: Transport::Tls,
+            servers: Vec::new(),
         }
     }
 }
@@ -57,7 +73,17 @@ impl SettingsFile {
 
     pub fn load(&self) -> io::Result<Settings> {
         match std::fs::read_to_string(&self.path) {
-            Ok(text) => toml::from_str(&text).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
+            Ok(text) => {
+                let mut settings: Settings =
+                    toml::from_str(&text).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                if let Some(link) = settings.server.take()
+                    && settings.servers.is_empty()
+                {
+                    settings.servers.push(ServerEntry { link, up: settings.up });
+                }
+                settings.up = false;
+                Ok(settings)
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Settings::default()),
             Err(error) => Err(error),
         }
@@ -101,18 +127,22 @@ mod tests {
         let file = SettingsFile::new(dir.join("weftd.toml"));
         assert_eq!(file.load().unwrap(), Settings::default());
         let settings = Settings {
-            server: Some("weft://x#k=y".into()),
             nickname: Some("n".into()),
             port: Some(4000),
-            up: true,
+            servers: vec![
+                ServerEntry { link: "weft://x#k=y".into(), up: true },
+                ServerEntry { link: "weft://z#k=y".into(), up: false },
+            ],
             ..Settings::default()
         };
         file.save(&settings).unwrap();
         assert_eq!(file.load().unwrap(), settings);
-        std::fs::write(file.path(), "up = true\n").unwrap();
+        std::fs::write(file.path(), "server = \"weft://old#k=y\"\nup = true\n").unwrap();
         let loaded = file.load().unwrap();
         assert!(loaded.broadcast);
         assert_eq!(loaded.multicast_groups, vec![MINECRAFT_GROUP]);
+        assert_eq!(loaded.servers, vec![ServerEntry { link: "weft://old#k=y".into(), up: true }]);
+        assert!(loaded.server.is_none() && !loaded.up);
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(!default_nickname().is_empty());
     }

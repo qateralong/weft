@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::sync::{mpsc, oneshot};
-use weft_ipc::{Failure, Request, Response};
+use weft_ipc::{Envelope, Failure, Request, Response};
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(unix)]
@@ -15,6 +15,7 @@ const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
 
 pub struct Command {
     pub request: Request,
+    pub server: Option<String>,
     pub reply: oneshot::Sender<Response>,
 }
 
@@ -137,9 +138,9 @@ pub fn cleanup(_path: &Path) {}
 async fn client<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, commands: mpsc::Sender<Command>) {
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
-    while let Ok(Some(request)) = weft_ipc::receive::<Request, _>(&mut reader).await {
+    while let Ok(Some(Envelope { request, server })) = weft_ipc::receive::<Envelope, _>(&mut reader).await {
         let (reply, response) = oneshot::channel();
-        if commands.send(Command { request, reply }).await.is_err() {
+        if commands.send(Command { request, server, reply }).await.is_err() {
             return;
         }
         let response = match tokio::time::timeout(REPLY_TIMEOUT, response).await {

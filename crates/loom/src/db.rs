@@ -173,6 +173,17 @@ impl Db {
     }
 
     pub fn upsert_device(&mut self, key: &PublicKey, nickname: &str, pool: &Pool) -> Result<Device, DbError> {
+        self.upsert_device_preferring(key, nickname, pool, None)
+    }
+
+    /// Registers a device; a new one gets `preferred` when it is a free address of the pool.
+    pub fn upsert_device_preferring(
+        &mut self,
+        key: &PublicKey,
+        nickname: &str,
+        pool: &Pool,
+        preferred: Option<Ipv4Addr>,
+    ) -> Result<Device, DbError> {
         let now = unix_now();
         let tx = self.conn.transaction()?;
         let existing: Option<u32> = tx
@@ -187,7 +198,21 @@ impl Db {
                 address
             }
             None => {
-                let address = free_address(&tx, pool)?;
+                let wanted = preferred.map(u32::from).filter(|&address| {
+                    (pool.first_host()..=pool.last_host()).contains(&address)
+                        && address != u32::from(weft_proto::DNS_ADDRESS)
+                });
+                let wanted = match wanted {
+                    Some(address) if !address_taken(&tx, address)? => Some(address),
+                    _ => None,
+                };
+                let address = match wanted {
+                    Some(address) => address,
+                    None => match keyed_address(&tx, pool, key)? {
+                        Some(address) => address,
+                        None => free_address(&tx, pool)?,
+                    },
+                };
                 tx.execute(
                     "INSERT INTO devices (key, nickname, address, created, last_seen) VALUES (?1, ?2, ?3, ?4, ?4)",
                     params![key.as_bytes(), nickname, address, now],
@@ -627,6 +652,30 @@ pub fn name_key(name: &str) -> String {
     name.to_lowercase()
 }
 
+const KEYED_PROBES: u32 = 64;
+
+/// An address derived from the key, so a device gets the same address on every server with the
+/// same pool and devices from different servers rarely clash on a client that uses both.
+fn keyed_address(conn: &Connection, pool: &Pool, key: &PublicKey) -> Result<Option<u32>, DbError> {
+    let hosts = pool.last_host() - pool.first_host() + 1;
+    let bytes = key.as_bytes();
+    let start = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) % hosts;
+    for step in 0..KEYED_PROBES.min(hosts) {
+        let candidate = pool.first_host() + (start + step) % hosts;
+        if candidate == u32::from(weft_proto::DNS_ADDRESS) {
+            continue;
+        }
+        if !address_taken(conn, candidate)? {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn address_taken(conn: &Connection, address: u32) -> Result<bool, DbError> {
+    Ok(conn.query_row("SELECT 1 FROM devices WHERE address = ?1", [address], |_| Ok(())).optional()?.is_some())
+}
+
 fn free_address(conn: &Connection, pool: &Pool) -> Result<u32, DbError> {
     let mut stmt = conn.prepare("SELECT address FROM devices WHERE address BETWEEN ?1 AND ?2 ORDER BY address")?;
     let mut candidate = pool.first_host();
@@ -671,27 +720,39 @@ mod tests {
     }
 
     #[test]
-    fn addresses_are_stable_and_sequential() {
+    fn addresses_are_stable_and_follow_the_key() {
         let mut db = Db::open_in_memory().unwrap();
         let a = db.upsert_device(&key(1), "a", &Pool::DEFAULT).unwrap();
         let b = db.upsert_device(&key(2), "b", &Pool::DEFAULT).unwrap();
         let a_again = db.upsert_device(&key(1), "renamed", &Pool::DEFAULT).unwrap();
-        assert_eq!(a.address, Ipv4Addr::new(100, 64, 0, 1));
-        assert_eq!(b.address, Ipv4Addr::new(100, 64, 0, 2));
+        assert_ne!(a.address, b.address);
         assert_eq!(a_again.address, a.address);
         assert_eq!(a_again.nickname, "renamed");
+        let mut other_server = Db::open_in_memory().unwrap();
+        other_server.upsert_device(&key(9), "x", &Pool::DEFAULT).unwrap();
+        assert_eq!(other_server.upsert_device(&key(1), "a", &Pool::DEFAULT).unwrap().address, a.address);
+        assert!(
+            Pool::DEFAULT.first_host() <= u32::from(a.address) && u32::from(a.address) <= Pool::DEFAULT.last_host()
+        );
+        let wanted = Ipv4Addr::new(100, 64, 7, 7);
+        let c = db.upsert_device_preferring(&key(3), "c", &Pool::DEFAULT, Some(wanted)).unwrap();
+        assert_eq!(c.address, wanted);
+        let d = db.upsert_device_preferring(&key(4), "d", &Pool::DEFAULT, Some(wanted)).unwrap();
+        assert_ne!(d.address, wanted);
+        let outside = db.upsert_device_preferring(&key(5), "e", &Pool::DEFAULT, Some(Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(Pool::DEFAULT.first_host() <= u32::from(outside.unwrap().address));
     }
 
     #[test]
     fn skips_the_dns_address() {
         let mut db = Db::open_in_memory().unwrap();
         let pool: Pool = "100.100.100.96/29".parse().unwrap();
-        let addresses: Vec<Ipv4Addr> =
+        let mut addresses: Vec<Ipv4Addr> =
             (1..=5).map(|n| db.upsert_device(&key(n), "d", &pool).unwrap().address).collect();
-        assert_eq!(
-            addresses[2..],
-            [Ipv4Addr::new(100, 100, 100, 99), Ipv4Addr::new(100, 100, 100, 101), Ipv4Addr::new(100, 100, 100, 102)]
-        );
+        addresses.sort();
+        let expected: Vec<Ipv4Addr> = [97, 98, 99, 101, 102].map(|n| Ipv4Addr::new(100, 100, 100, n)).to_vec();
+        assert_eq!(addresses, expected);
+        assert!(matches!(db.upsert_device(&key(6), "d", &pool), Err(DbError::PoolExhausted)));
     }
 
     #[test]

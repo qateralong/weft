@@ -152,6 +152,29 @@ for _ in $(seq 45); do
     sleep 1
 done
 weft a status | grep -Eq '^Status: +connected'
+echo "--- a second server"
+cat > "$WORK/loom2.toml" <<CONF
+listen = "10.99.0.1:7444"
+data_dir = "$WORK/loom2"
+CONF
+LINK2=$("$BIN/loom" --config "$WORK/loom2.toml" link --host 10.99.0.1)
+RUST_LOG=${RUST_LOG:-info} "$BIN/loom" --config "$WORK/loom2.toml" > "$WORK/loom2.log" 2>&1 &
+pids+=($!)
+sleep 1
+weft a up "$LINK2"
+weft b up "$LINK2"
+weft a create games --password secret && exit 1
+weft a create games --password secret --server 10.99.0.1:7444
+weft b join games --password secret --server 10.99.0.1 && exit 1
+weft b join games --password secret --server 10.99.0.1:7444
+weft a status
+[ "$(weft a status | grep -c '^Server')" = 2 ]
+[ "$(weft b status | awk -F': *' '/^Address/ {print $2}' | sort -u)" = "$addr_b" ]
+weft a invite create games | grep -q '^weft://10.99.0.1:7444/'
+sleep 3
+ping_b 2
+weft a remove 10.99.0.1:7444
+[ "$(weft a status | grep -c '^Server')" = 1 ]
 echo "--- all checks passed"
 if [ -n "${SHOW_LOGS:-}" ]; then
     show_logs

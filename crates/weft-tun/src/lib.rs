@@ -85,6 +85,11 @@ impl Tun {
         self.dns_configured
     }
 
+    /// Adds an address from another server's pool.
+    pub fn add_address(&self, address: Ipv4Addr, prefix: u8) -> io::Result<()> {
+        self.device.add_address_v4(address, prefix)
+    }
+
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.device.recv(buf).await
     }

@@ -178,7 +178,8 @@ where
         let device = if blocked {
             Err(DbError::Blocked)
         } else {
-            hub.db.upsert_device(&key, nickname.as_deref().unwrap_or_default(), &pool)
+            let preferred = greeting.address.map(Ipv4Addr::from);
+            hub.db.upsert_device_preferring(&key, nickname.as_deref().unwrap_or_default(), &pool, preferred)
         };
         match device {
             Ok(device) => {

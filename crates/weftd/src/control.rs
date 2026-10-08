@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use weft_proto::control::{
-    self, ClientKind, ClientMessage, Empty, ErrorCode, Hello, PROTOCOL_VERSION, ServerKind, ServerMessage, Welcome,
+    self, ClientKind, ClientMessage, Empty, ErrorCode, Hello, ServerKind, ServerMessage, Welcome,
 };
 use weft_proto::{Host, Link};
 use weft_session::stream::{self, io};
@@ -39,13 +39,13 @@ impl Control {
         link: Link,
         transport: Transport,
         keypair: Arc<StaticKeypair>,
-        nickname: String,
+        hello: Hello,
         generation: u64,
         events: mpsc::UnboundedSender<(u64, ControlEvent)>,
     ) -> Self {
         let (commands, rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
-            let reason = match run(link, transport, keypair, nickname, generation, &events, rx).await {
+            let reason = match run(link, transport, keypair, hello, generation, &events, rx).await {
                 Ok(()) => "closed".to_string(),
                 Err(error) => error.to_string(),
             };
@@ -88,7 +88,7 @@ async fn run(
     link: Link,
     transport: Transport,
     keypair: Arc<StaticKeypair>,
-    nickname: String,
+    hello: Hello,
     generation: u64,
     events: &mpsc::UnboundedSender<(u64, ControlEvent)>,
     mut commands: mpsc::UnboundedReceiver<ClientMessage>,
@@ -122,10 +122,7 @@ async fn run(
         writer.write_all(&frame).await?;
         let packet = io::read_handshake(&mut reader, handshake.own_obfs()).await?;
         let (mut sender, mut receiver) = handshake.finish(&packet)?.split();
-        let hello = ClientMessage {
-            id: HELLO_ID,
-            kind: Some(ClientKind::Hello(Hello { version: PROTOCOL_VERSION, nickname: nickname.clone() })),
-        };
+        let hello = ClientMessage { id: HELLO_ID, kind: Some(ClientKind::Hello(hello)) };
         writer.write_all(&sender.seal(&control::encode(&hello))?).await?;
         let reply: ServerMessage = control::decode(&io::read_message(&mut reader, &mut receiver).await?)?;
         Ok::<_, Error>((sender, receiver, reply))

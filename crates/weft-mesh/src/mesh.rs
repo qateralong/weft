@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -41,6 +41,9 @@ const SPRAY_COOLDOWN: Duration = Duration::from_secs(300);
 const SPRAY_AFTER: u32 = 2;
 const MIN_SPRAY_PORT: u16 = 1024;
 
+/// Identifies one of the coordination servers the device is connected to.
+pub type ServerId = u32;
+
 /// Index of a local UDP socket; 0 is the main socket, the others only exist while spraying.
 pub type SocketId = u16;
 
@@ -66,6 +69,8 @@ pub struct PeerConfig {
     pub candidates: Vec<SocketAddr>,
     /// The peer's address as the server sees it.
     pub endpoint: Option<SocketAddr>,
+    /// The server that relays for this peer and passes call-me-maybe.
+    pub server: ServerId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,10 +83,12 @@ pub enum Output {
         ttl: Option<u8>,
     },
     TcpRelay {
+        server: ServerId,
         to: Ipv4Addr,
         packet: Vec<u8>,
     },
     CallMeMaybe {
+        server: ServerId,
         peer: PublicKey,
     },
 }
@@ -101,10 +108,18 @@ pub enum PeerLink {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report {
-    /// Whether UDP to the server answered recently; `None` before the first answer is due.
-    pub server_udp: Option<bool>,
+    /// Our address as any server sees it.
     pub observed: Option<SocketAddr>,
+    pub servers: Vec<ServerReport>,
     pub peers: Vec<PeerReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerReport {
+    pub id: ServerId,
+    /// Whether UDP to the server answered recently; `None` before the first answer is due.
+    pub udp: Option<bool>,
+    pub observed: Option<SocketAddr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,8 +151,8 @@ pub struct Mesh {
     peers: HashMap<PeerId, Peer>,
     by_key: HashMap<PublicKey, PeerId>,
     by_address: HashMap<Ipv4Addr, PeerId>,
-    server: Option<Server>,
-    local: Option<Local>,
+    servers: BTreeMap<ServerId, Server>,
+    locals: Vec<Local>,
     flood: Bucket,
     outputs: VecDeque<Output>,
     rng: StdRng,
@@ -168,6 +183,7 @@ struct Peer {
     disco: DiscoKey,
     candidates: Vec<SocketAddr>,
     endpoint: Option<SocketAddr>,
+    server: ServerId,
     paths: HashMap<Via, Path>,
     best: Option<Via>,
     probe_at: Option<Instant>,
@@ -224,8 +240,8 @@ impl Mesh {
             peers: HashMap::new(),
             by_key: HashMap::new(),
             by_address: HashMap::new(),
-            server: None,
-            local: None,
+            servers: BTreeMap::new(),
+            locals: Vec::new(),
             flood: Bucket::default(),
             outputs: VecDeque::new(),
             rng,
@@ -256,30 +272,38 @@ impl Mesh {
     }
 
     pub fn observed(&self) -> Option<SocketAddr> {
-        self.server.as_ref().and_then(|server| server.observed)
+        self.servers.values().find_map(|server| server.observed)
     }
 
-    pub fn set_server(&mut self, now: Instant, udp: SocketAddr, key: PublicKey, token: Token) {
-        self.server = Some(Server {
-            udp,
-            obfs: ObfsKey::for_receiver(&key),
-            token,
-            observed: None,
-            udp_fresh_until: None,
-            discover_at: now,
-            since: now,
-        });
+    pub fn set_server(&mut self, now: Instant, id: ServerId, udp: SocketAddr, key: PublicKey, token: Token) {
+        self.servers.insert(
+            id,
+            Server {
+                udp,
+                obfs: ObfsKey::for_receiver(&key),
+                token,
+                observed: None,
+                udp_fresh_until: None,
+                discover_at: now,
+                since: now,
+            },
+        );
         self.tick(now);
     }
 
-    pub fn set_local(&mut self, address: Ipv4Addr, prefix: u8) {
-        let host_bits = u32::MAX.checked_shr(u32::from(prefix)).unwrap_or(0);
-        let broadcast = Ipv4Addr::from(u32::from(address) | host_bits);
-        self.local = Some(Local { address, broadcast });
+    /// Our virtual addresses with their prefix lengths, one per distinct server pool.
+    pub fn set_locals(&mut self, addresses: &[(Ipv4Addr, u8)]) {
+        self.locals = addresses
+            .iter()
+            .map(|&(address, prefix)| {
+                let host_bits = u32::MAX.checked_shr(u32::from(prefix)).unwrap_or(0);
+                Local { address, broadcast: Ipv4Addr::from(u32::from(address) | host_bits) }
+            })
+            .collect();
     }
 
-    pub fn clear_server(&mut self) {
-        self.server = None;
+    pub fn clear_server(&mut self, id: ServerId) {
+        self.servers.remove(&id);
     }
 
     pub fn update_peers(&mut self, now: Instant, configs: Vec<PeerConfig>) {
@@ -315,6 +339,7 @@ impl Mesh {
             }
             self.by_address.insert(config.address, id);
             peer.endpoint = config.endpoint;
+            peer.server = config.server;
             let mut candidates = config.candidates;
             candidates.dedup();
             if peer.candidates != candidates {
@@ -344,7 +369,7 @@ impl Mesh {
 
     pub fn send(&mut self, now: Instant, packet: &[u8]) -> Result<(), SendError> {
         let destination = ipv4_destination(packet).ok_or(SendError::Invalid)?;
-        if flood::is_flood(destination, self.local.map(|local| local.broadcast)) {
+        if flood::is_flood(destination, None) || self.locals.iter().any(|local| destination == local.broadcast) {
             return self.flood(now, packet);
         }
         let &id = self.by_address.get(&destination).ok_or(SendError::NoRoute)?;
@@ -390,7 +415,7 @@ impl Mesh {
             }
             Header::Observed => None,
             Header::Relayed => {
-                let from_server = socket == 0 && self.server.as_ref().is_some_and(|server| server.udp == from);
+                let from_server = socket == 0 && self.servers.values().any(|server| server.udp == from);
                 let (source, inner) = parse_relayed(&packet).filter(|_| from_server)?;
                 self.on_relayed(now, source, inner)
             }
@@ -416,9 +441,10 @@ impl Mesh {
         for id in ids {
             self.tick_peer(now, id);
         }
-        if let Some(server) = &mut self.server
-            && now >= server.discover_at
-        {
+        for server in self.servers.values_mut() {
+            if now < server.discover_at {
+                continue;
+            }
             let jitter = self.rng.random_range(0..=2 * DISCOVER_JITTER.as_millis() as u64);
             server.discover_at = now + DISCOVER_INTERVAL - DISCOVER_JITTER + Duration::from_millis(jitter);
             let mut packet = discover_packet(&server.token, self.rng.random_range(0..=64), self.rng.random());
@@ -443,8 +469,8 @@ impl Mesh {
             let pings = peer.pings.values().map(|&(_, sent)| sent + PING_TIMEOUT).min();
             [peer.probe_at, path_check, pings, peer.spray.map(|spray| spray.next)]
         });
-        let server = self.server.as_ref().map(|server| server.discover_at);
-        peers.flatten().chain(server).chain(self.node.next_timeout()).min()
+        let servers = self.servers.values().map(|server| server.discover_at);
+        peers.flatten().chain(servers).chain(self.node.next_timeout()).min()
     }
 
     pub fn poll_output(&mut self) -> Option<Output> {
@@ -452,10 +478,15 @@ impl Mesh {
     }
 
     pub fn report(&self, now: Instant) -> Report {
-        let server_udp = self.server.as_ref().and_then(|server| {
-            let fresh = server.udp_fresh_until.is_some_and(|until| now < until);
-            (fresh || server.observed.is_some() || now >= server.since + UDP_CHECK).then_some(fresh)
-        });
+        let servers = self
+            .servers
+            .iter()
+            .map(|(&id, server)| {
+                let fresh = server.udp_fresh_until.is_some_and(|until| now < until);
+                let udp = (fresh || server.observed.is_some() || now >= server.since + UDP_CHECK).then_some(fresh);
+                ServerReport { id, udp, observed: server.observed }
+            })
+            .collect();
         let mut peers: Vec<PeerReport> = self
             .peers
             .values()
@@ -469,7 +500,7 @@ impl Mesh {
             })
             .collect();
         peers.sort_by_key(|peer| peer.key);
-        Report { server_udp, observed: self.observed(), peers }
+        Report { observed: self.observed(), servers, peers }
     }
 
     pub fn link(&self, key: &PublicKey) -> Option<PeerLink> {
@@ -499,6 +530,7 @@ impl Mesh {
                 disco,
                 candidates: Vec::new(),
                 endpoint: config.endpoint,
+                server: config.server,
                 paths: HashMap::new(),
                 best: None,
                 probe_at: Some(now),
@@ -561,10 +593,10 @@ impl Mesh {
         }
         peer.attempts += 1;
         peer.probe_at = Some(now + if peer.attempts == 1 { PROBE_RETRY } else { PROBE_BACKOFF });
-        let key = peer.key;
+        let (key, server) = (peer.key, peer.server);
         let spray = peer.attempts >= SPRAY_AFTER;
-        if self.server.is_some() {
-            self.outputs.push_back(Output::CallMeMaybe { peer: key });
+        if self.servers.contains_key(&server) {
+            self.outputs.push_back(Output::CallMeMaybe { server, peer: key });
         } else {
             self.burst(now, id);
         }
@@ -575,14 +607,13 @@ impl Mesh {
 
     /// Whether our NAT gave the main socket a different public port than the local one.
     fn port_changing(&self) -> bool {
-        let observed = self.server.as_ref().and_then(|server| server.observed);
-        observed.zip(self.udp_port).is_some_and(|(observed, port)| observed.port() != port)
+        self.observed().zip(self.udp_port).is_some_and(|(observed, port)| observed.port() != port)
     }
 
     fn start_spray(&mut self, now: Instant, id: PeerId) {
         let own = self.port_changing();
-        let has_server = self.server.is_some();
         let Some(peer) = self.peers.get_mut(&id) else { return };
+        let has_server = self.servers.contains_key(&peer.server);
         let cooling = peer.sprayed_at.is_some_and(|at| now < at + SPRAY_COOLDOWN);
         if !has_server || !peer.online || peer.best.is_some() || peer.spray.is_some() || cooling {
             return;
@@ -673,8 +704,8 @@ impl Mesh {
     }
 
     fn on_observed(&mut self, now: Instant, from: SocketAddr, packet: &[u8]) {
-        let Some(server) = self.server.as_mut().filter(|server| server.udp == from) else { return };
-        let Some((_, observed)) = parse_observed(packet).filter(|(token, _)| *token == server.token) else {
+        let Some((token, observed)) = parse_observed(packet) else { return };
+        let Some(server) = self.servers.values_mut().find(|server| server.udp == from && server.token == token) else {
             return;
         };
         tracing::trace!(%observed, "observed by the server");
@@ -711,9 +742,9 @@ impl Mesh {
             return None;
         }
         let destination = ipv4_destination(&packet)?;
-        let accepted = self
-            .local
-            .is_none_or(|local| destination == local.address || flood::is_flood(destination, Some(local.broadcast)));
+        let accepted = self.locals.iter().any(|local| destination == local.address || destination == local.broadcast)
+            || self.locals.is_empty()
+            || flood::is_flood(destination, None);
         if !accepted {
             tracing::debug!(peer = %peer.address, %destination, "dropped packet for a foreign destination");
             return None;
@@ -774,14 +805,15 @@ impl Mesh {
                 });
                 continue;
             }
-            let Some(server) = &self.server else { continue };
+            let Some(server) = self.servers.get(&peer.server) else { continue };
             if server.udp_fresh_until.is_some_and(|until| now < until) {
                 let mut packet = relay_packet(&server.token, peer.address, &transmit.datagram);
                 if server.obfs.seal(&mut packet).is_ok() {
                     self.outputs.push_back(Output::Udp { socket: 0, to: server.udp, datagram: packet, ttl: None });
                 }
             } else {
-                self.outputs.push_back(Output::TcpRelay { to: peer.address, packet: transmit.datagram });
+                let server = peer.server;
+                self.outputs.push_back(Output::TcpRelay { server, to: peer.address, packet: transmit.datagram });
             }
         }
     }

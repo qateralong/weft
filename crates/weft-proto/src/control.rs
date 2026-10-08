@@ -176,6 +176,9 @@ pub struct Hello {
     pub version: u32,
     #[prost(string, tag = "2")]
     pub nickname: String,
+    /// The address this device has on other servers, wanted here too.
+    #[prost(fixed32, optional, tag = "3")]
+    pub address: Option<u32>,
 }
 
 #[derive(Clone, PartialEq, Message)]

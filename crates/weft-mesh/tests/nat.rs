@@ -61,7 +61,7 @@ impl World {
         let token = self.loom.register(key, address);
         let now = self.net.now();
         let mut mesh = Mesh::with_seed(keypair, now, SystemTime::now(), u64::from(n));
-        mesh.set_server(now, self.loom.addr, self.loom.public_key(), token);
+        mesh.set_server(now, 0, self.loom.addr, self.loom.public_key(), token);
         let local: SocketAddr = local.parse().unwrap();
         mesh.set_udp_port(local.port());
         self.net.add_host(local, nat);
@@ -81,6 +81,7 @@ impl World {
                 online: true,
                 candidates: self.loom.endpoint(agent.address).into_iter().chain([agent.local]).collect::<Vec<_>>(),
                 endpoint: self.loom.endpoint(agent.address),
+                server: 0,
             })
             .collect();
         self.agents[i].mesh.update_peers(now, configs);
@@ -121,7 +122,7 @@ impl World {
                             }
                             self.net.send(from, to, datagram)
                         }
-                        Output::TcpRelay { to, packet } => {
+                        Output::TcpRelay { to, packet, .. } => {
                             let source = self.agents[i].address;
                             match self.loom.relay_tcp(source, to, &packet) {
                                 Some(Delivery::Udp { to, datagram }) => self.net.send(self.loom.addr, to, datagram),
@@ -129,7 +130,7 @@ impl World {
                                 None => {}
                             }
                         }
-                        Output::CallMeMaybe { peer } => {
+                        Output::CallMeMaybe { peer, .. } => {
                             let caller = self.agents[i].key;
                             if let Some(j) = self.agents.iter().position(|agent| agent.key == peer) {
                                 let of_i = self.candidates(i);
@@ -404,7 +405,7 @@ fn broadcast_and_multicast_reach_every_peer() {
     let agents: Vec<usize> = (0..3).map(|i| world.agent(&format!("198.51.100.{}:5000", 10 + i), None)).collect();
     for &i in &agents {
         let address = world.agents[i].address;
-        world.agents[i].mesh.set_local(address, 10);
+        world.agents[i].mesh.set_locals(&[(address, 10)]);
     }
     world.run_for(Duration::from_secs(5));
 
@@ -434,7 +435,7 @@ fn packets_for_a_foreign_destination_are_dropped() {
     let mut world = World::new();
     let a = world.agent("198.51.100.10:5000", None);
     let b = world.agent("198.51.100.20:5000", None);
-    world.agents[b].mesh.set_local(Ipv4Addr::new(100, 64, 0, 99), 10);
+    world.agents[b].mesh.set_locals(&[(Ipv4Addr::new(100, 64, 0, 99), 10)]);
     world.run_for(Duration::from_secs(5));
     let now = world.net.now();
     let (from, to) = (world.agents[a].address, world.agents[b].address);

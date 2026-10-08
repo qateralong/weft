@@ -8,12 +8,11 @@ use crate::{Connection, PeerLink};
 pub struct Diagnostics {
     pub version: String,
     pub os: String,
-    pub connection: Connection,
-    pub server: Option<String>,
+    pub servers: Vec<ServerDiagnostics>,
     /// `tls` or `raw` for the control connection.
     #[serde(default)]
     pub transport: String,
-    pub server_udp: Option<bool>,
+    /// Our address as a server sees it.
     pub observed: Option<SocketAddr>,
     pub local_port: u16,
     pub local_addresses: Vec<IpAddr>,
@@ -27,6 +26,14 @@ pub struct Diagnostics {
     pub nat: Nat,
     pub peers: Vec<PeerDiagnostics>,
     pub logs: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ServerDiagnostics {
+    pub server: String,
+    pub connection: Connection,
+    /// Whether UDP to the server works; `None` while it is being checked.
+    pub udp: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -86,16 +93,6 @@ pub type Translate<'a> = dyn Fn(&str, &[(&str, &str)]) -> String + 'a;
 pub fn format(diagnostics: &Diagnostics, tr: &Translate<'_>) -> String {
     let d = diagnostics;
     let none = tr("status-none", &[]);
-    let connection = match d.connection {
-        Connection::Disconnected => "state-disconnected",
-        Connection::Connecting => "state-connecting",
-        Connection::Connected => "state-connected",
-    };
-    let udp = match d.server_udp {
-        Some(true) => "diag-udp-ok",
-        Some(false) => "diag-udp-blocked",
-        None => "diag-udp-unknown",
-    };
     let mapping = match &d.port_mapping {
         Some(mapping) => match mapping.external {
             Some(external) => format!("{} {external}", mapping.protocol),
@@ -112,15 +109,30 @@ pub fn format(diagnostics: &Diagnostics, tr: &Translate<'_>) -> String {
         Nat::Symmetric => "diag-nat-symmetric",
     };
     let addresses: Vec<String> = d.local_addresses.iter().map(ToString::to_string).collect();
-    let rows = [
-        (tr("diag-version", &[]), format!("{} · {}", d.version, d.os)),
-        (tr("diag-server", &[]), d.server.clone().unwrap_or_else(|| none.clone())),
-        (tr("diag-connection", &[]), tr(connection, &[])),
+    let mut rows = vec![(tr("diag-version", &[]), format!("{} · {}", d.version, d.os))];
+    if d.servers.is_empty() {
+        rows.push((tr("diag-server", &[]), none.clone()));
+    }
+    for server in &d.servers {
+        let connection = match server.connection {
+            Connection::Disconnected => "state-disconnected",
+            Connection::Connecting => "state-connecting",
+            Connection::Connected => "state-connected",
+        };
+        let udp = match server.udp {
+            Some(true) => "diag-udp-ok",
+            Some(false) => "diag-udp-blocked",
+            None => "diag-udp-unknown",
+        };
+        rows.push((tr("diag-server", &[]), server.server.clone()));
+        rows.push((tr("diag-connection", &[]), tr(connection, &[])));
+        rows.push((tr("diag-server-udp", &[]), tr(udp, &[])));
+    }
+    rows.extend([
         (
             tr("diag-transport", &[]),
             tr(if d.transport == "raw" { "diag-transport-raw" } else { "diag-transport-tls" }, &[]),
         ),
-        (tr("diag-server-udp", &[]), tr(udp, &[])),
         (tr("diag-public", &[]), d.observed.map_or_else(|| none.clone(), |addr| addr.to_string())),
         (tr("diag-local-port", &[]), d.local_port.to_string()),
         (tr("diag-local-addresses", &[]), if addresses.is_empty() { none.clone() } else { addresses.join(", ") }),
@@ -138,7 +150,7 @@ pub fn format(diagnostics: &Diagnostics, tr: &Translate<'_>) -> String {
                 &[],
             ),
         ),
-    ];
+    ]);
     let width = rows.iter().map(|(label, _)| label.chars().count()).max().unwrap_or(0) + 1;
     let mut text = String::new();
     for (label, value) in &rows {
@@ -212,10 +224,12 @@ mod tests {
         let diagnostics = Diagnostics {
             version: "0.1.0".into(),
             os: "linux x86_64".into(),
-            connection: Connection::Connected,
-            server: Some("weft://example.com".into()),
+            servers: vec![ServerDiagnostics {
+                server: "weft://example.com".into(),
+                connection: Connection::Connected,
+                udp: Some(false),
+            }],
             transport: "tls".into(),
-            server_udp: Some(false),
             observed: None,
             local_port: 41000,
             local_addresses: vec![],

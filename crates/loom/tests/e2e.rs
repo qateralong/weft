@@ -90,7 +90,9 @@ impl Client {
     }
 
     async fn hello(&mut self, nickname: &str) -> Welcome {
-        let id = self.send(ClientKind::Hello(Hello { version: PROTOCOL_VERSION, nickname: nickname.into() })).await;
+        let id = self
+            .send(ClientKind::Hello(Hello { version: PROTOCOL_VERSION, nickname: nickname.into(), address: None }))
+            .await;
         match self.reply(id).await {
             ServerKind::Welcome(welcome) => welcome,
             other => panic!("unexpected {other:?}"),
@@ -153,11 +155,12 @@ async fn networks_membership_and_discovery() {
     let mut b = Client::connect(&server, 2).await;
 
     let welcome_a = a.hello("alice").await;
-    assert_eq!(Ipv4Addr::from(welcome_a.address), Ipv4Addr::new(100, 64, 0, 1));
+    let pool = Ipv4Addr::new(100, 64, 0, 0).to_bits()..=Ipv4Addr::new(100, 127, 255, 254).to_bits();
+    assert!(pool.contains(&welcome_a.address));
     assert_eq!(welcome_a.prefix_len, 10);
     assert_eq!(welcome_a.udp_port, u32::from(server.udp_addr.port()));
     let welcome_b = b.hello("bob").await;
-    assert_eq!(Ipv4Addr::from(welcome_b.address), Ipv4Addr::new(100, 64, 0, 2));
+    assert!(pool.contains(&welcome_b.address) && welcome_b.address != welcome_a.address);
 
     a.request(ClientKind::CreateNetwork(credentials("Φίλοι", "secret"))).await.unwrap();
     assert_eq!(
@@ -221,11 +224,11 @@ async fn wrong_passwords_are_rate_limited() {
 async fn invalid_hello_is_refused() {
     let server = start().await;
     let mut a = Client::connect(&server, 1).await;
-    let id = a.send(ClientKind::Hello(Hello { version: 999, nickname: "x".into() })).await;
+    let id = a.send(ClientKind::Hello(Hello { version: 999, nickname: "x".into(), address: None })).await;
     assert!(matches!(a.reply(id).await, ServerKind::Failure(f) if f.code() == ErrorCode::UnsupportedVersion));
 
     let mut b = Client::connect(&server, 2).await;
-    let id = b.send(ClientKind::Hello(Hello { version: PROTOCOL_VERSION, nickname: " ".into() })).await;
+    let id = b.send(ClientKind::Hello(Hello { version: PROTOCOL_VERSION, nickname: " ".into(), address: None })).await;
     assert!(matches!(b.reply(id).await, ServerKind::Failure(f) if f.code() == ErrorCode::InvalidNickname));
 }
 
@@ -481,7 +484,8 @@ async fn administration_and_relay_limits() {
     a.state_where(|state| state.peers.iter().all(|peer| !peer.online)).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut again = Client::connect(&server, 2).await;
-    let id = again.send(ClientKind::Hello(Hello { version: PROTOCOL_VERSION, nickname: "bob".into() })).await;
+    let id =
+        again.send(ClientKind::Hello(Hello { version: PROTOCOL_VERSION, nickname: "bob".into(), address: None })).await;
     assert!(matches!(again.reply(id).await, ServerKind::Failure(f) if f.code() == ErrorCode::Banned));
     let Ok(AdminResponse::Devices(devices)) = request(&path, &AdminRequest::Devices).await else { panic!() };
     assert_eq!(

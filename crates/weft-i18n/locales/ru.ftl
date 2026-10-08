@@ -294,3 +294,21 @@ diag-transport-raw = простой шифрованный поток (transport
 diag-ipv6 = IPv6
 diag-ipv6-yes = есть: участники с IPv6 соединяются напрямую, без NAT
 diag-ipv6-no = нет
+error-ambiguous-server = Подключено несколько серверов; выберите нужный через --server
+error-server-not-found = Такого сервера нет; список в «weft status»
+error-ambiguous-network = Сеть с таким названием есть на нескольких серверах; выберите сервер через --server
+
+cmd-remove = Забыть сервер на этом устройстве
+arg-server = Сервер, если подключено несколько: хост или ссылка
+arg-host = Хост сервера, хост:порт или ссылка
+value-server = СЕРВЕР
+value-host = СЕРВЕР
+usage-remove = weft remove <СЕРВЕР>
+done-remove = Сервер { $server } удалён
+
+gui-server = Сервер
+gui-servers = Серверы
+gui-add-server = Добавить сервер по ссылке
+gui-add = Добавить
+gui-remove = Удалить
+gui-app = Приложение

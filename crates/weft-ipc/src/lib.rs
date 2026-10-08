@@ -8,7 +8,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWr
 
 pub mod report;
 
-pub use report::{Diagnostics, Nat, PeerDiagnostics, PortMapping};
+pub use report::{Diagnostics, Nat, PeerDiagnostics, PortMapping, ServerDiagnostics};
 
 pub const SOCKET_ENV: &str = "WEFT_SOCKET";
 #[cfg(target_os = "macos")]
@@ -22,27 +22,92 @@ const MAX_LINE: u64 = 1 << 20;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Request {
-    Up { link: Option<String>, nickname: Option<String> },
+    Up {
+        link: Option<String>,
+        nickname: Option<String>,
+    },
     Down,
-    Create { name: String, password: String },
-    Join { name: String, password: String },
-    Leave { name: String },
+    /// Forgets the selected server.
+    Remove,
+    Create {
+        name: String,
+        password: String,
+    },
+    Join {
+        name: String,
+        password: String,
+    },
+    Leave {
+        name: String,
+    },
     Status,
-    Redeem { link: String },
-    CreateInvite { network: String, uses: Option<u32>, expires_in: Option<u64> },
-    Invites { network: String },
-    RevokeInvite { code: String },
-    Kick { network: String, member: String },
-    Ban { network: String, member: String },
-    Unban { network: String, member: String },
-    Bans { network: String },
-    Requests { network: String },
-    Approve { network: String, member: String },
-    Deny { network: String, member: String },
-    SetRole { network: String, member: String, role: Role },
-    Configure { network: String, locked: Option<bool>, approval: Option<bool>, password: Option<String> },
-    Delete { network: String },
-    Diagnose { logs: bool },
+    Redeem {
+        link: String,
+    },
+    CreateInvite {
+        network: String,
+        uses: Option<u32>,
+        expires_in: Option<u64>,
+    },
+    Invites {
+        network: String,
+    },
+    RevokeInvite {
+        code: String,
+    },
+    Kick {
+        network: String,
+        member: String,
+    },
+    Ban {
+        network: String,
+        member: String,
+    },
+    Unban {
+        network: String,
+        member: String,
+    },
+    Bans {
+        network: String,
+    },
+    Requests {
+        network: String,
+    },
+    Approve {
+        network: String,
+        member: String,
+    },
+    Deny {
+        network: String,
+        member: String,
+    },
+    SetRole {
+        network: String,
+        member: String,
+        role: Role,
+    },
+    Configure {
+        network: String,
+        locked: Option<bool>,
+        approval: Option<bool>,
+        password: Option<String>,
+    },
+    Delete {
+        network: String,
+    },
+    Diagnose {
+        logs: bool,
+    },
+}
+
+/// A request with an optional server: a link, `host` or `host:port`. Without it the daemon picks
+/// the server from the network name, or the only server there is.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Envelope {
+    #[serde(flatten)]
+    pub request: Request,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -105,6 +170,9 @@ pub enum Failure {
     AmbiguousMember,
     TooManyInvites,
     NetworkLocked,
+    AmbiguousServer,
+    ServerNotFound,
+    AmbiguousNetwork,
     Internal,
 }
 
@@ -135,6 +203,9 @@ impl Failure {
             Failure::AmbiguousMember => "error-ambiguous-member",
             Failure::TooManyInvites => "error-too-many-invites",
             Failure::NetworkLocked => "error-network-locked",
+            Failure::AmbiguousServer => "error-ambiguous-server",
+            Failure::ServerNotFound => "error-server-not-found",
+            Failure::AmbiguousNetwork => "error-ambiguous-network",
             Failure::Internal => "error-internal",
         }
     }
@@ -142,15 +213,30 @@ impl Failure {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Status {
-    pub connection: Connection,
-    pub server: Option<String>,
     pub nickname: String,
     pub public_key: String,
+    pub servers: Vec<ServerStatus>,
+}
+
+impl Status {
+    /// Connected when any server is, connecting when any tries to.
+    pub fn connection(&self) -> Connection {
+        self.servers.iter().map(|server| server.connection).max().unwrap_or(Connection::Disconnected)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ServerStatus {
+    /// The server link.
+    pub server: String,
+    /// `host:port`, for display and for selecting the server.
+    pub host: String,
+    pub connection: Connection,
     pub address: Option<Ipv4Addr>,
     pub networks: Vec<NetworkStatus>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Connection {
     Disconnected,
@@ -215,8 +301,13 @@ pub async fn receive<T: DeserializeOwned, R: AsyncBufRead + Unpin>(reader: &mut 
 }
 
 pub async fn request(path: &Path, request: &Request) -> io::Result<Response> {
+    request_on(path, request, None).await
+}
+
+pub async fn request_on(path: &Path, request: &Request, server: Option<&str>) -> io::Result<Response> {
     let (reader, mut writer) = tokio::io::split(connect(path).await?);
-    send(&mut writer, request).await?;
+    let envelope = Envelope { request: request.clone(), server: server.map(str::to_string) };
+    send(&mut writer, &envelope).await?;
     receive(&mut tokio::io::BufReader::new(reader)).await?.ok_or_else(|| io::ErrorKind::UnexpectedEof.into())
 }
 
@@ -250,6 +341,12 @@ mod tests {
         assert_eq!(text, r#"{"command":"join","name":"lan","password":"pw"}"#);
         assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), request);
         assert_eq!(serde_json::to_string(&Request::Status).unwrap(), r#"{"command":"status"}"#);
+        let envelope = Envelope { request: request.clone(), server: Some("vpn.example.com".into()) };
+        let text = serde_json::to_string(&envelope).unwrap();
+        assert_eq!(text, r#"{"command":"join","name":"lan","password":"pw","server":"vpn.example.com"}"#);
+        assert_eq!(serde_json::from_str::<Envelope>(&text).unwrap(), envelope);
+        let plain: Envelope = serde_json::from_str(r#"{"command":"status"}"#).unwrap();
+        assert_eq!(plain, Envelope { request: Request::Status, server: None });
         assert_eq!(
             serde_json::to_string(&Response::Error(Failure::WrongPassword)).unwrap(),
             r#"{"result":"error","data":"wrong_password"}"#
@@ -269,8 +366,8 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (reader, mut writer) = stream.into_split();
-            let request: Request = receive(&mut BufReader::new(reader)).await.unwrap().unwrap();
-            assert_eq!(request, Request::Down);
+            let envelope: Envelope = receive(&mut BufReader::new(reader)).await.unwrap().unwrap();
+            assert_eq!(envelope.request, Request::Down);
             send(&mut writer, &Response::Ok).await.unwrap();
         });
         assert_eq!(super::request(&path, &Request::Down).await.unwrap(), Response::Ok);

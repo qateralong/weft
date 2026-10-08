@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 use weft_i18n::Localizer;
-use weft_ipc::{Connection, PeerLink, Request, Response, Status};
+use weft_ipc::{Connection, NetworkStatus, PeerLink, Request, Response, Status};
 
 const POLL: Duration = Duration::from_secs(2);
 
@@ -97,31 +97,39 @@ impl Event {
 /// Compares two status snapshots taken a few seconds apart; `was_connected` tells whether the
 /// connection to the server ever came up before `previous`.
 pub fn events(previous: &Status, next: &Status, was_connected: bool) -> Vec<Event> {
-    let connected = |status: &Status| status.connection == Connection::Connected;
+    let connected = |status: &Status| status.connection() == Connection::Connected;
     match (connected(previous), connected(next)) {
-        (true, false) if next.server.is_some() => return vec![Event::Disconnected],
-        (false, true) if was_connected && previous.server.is_some() => return vec![Event::Reconnected],
+        (true, false) if !next.servers.is_empty() => return vec![Event::Disconnected],
+        (false, true) if was_connected && !previous.servers.is_empty() => return vec![Event::Reconnected],
         (true, true) => {}
         _ => return Vec::new(),
     }
 
     let online = |link: PeerLink| link != PeerLink::Offline;
-    let before: HashMap<(&str, Ipv4Addr), PeerLink> = previous
-        .networks
+    let networks = |status: &'_ Status| -> Vec<(String, NetworkStatus)> {
+        status
+            .servers
+            .iter()
+            .flat_map(|server| {
+                server.networks.iter().map(|network| (format!("{}/{}", server.host, network.name), network.clone()))
+            })
+            .collect()
+    };
+    let (old, new) = (networks(previous), networks(next));
+    let before: HashMap<(&str, Ipv4Addr), PeerLink> = old
         .iter()
-        .flat_map(|network| network.members.iter().map(move |m| ((network.name.as_str(), m.address), m.link)))
+        .flat_map(|(id, network)| network.members.iter().map(move |m| ((id.as_str(), m.address), m.link)))
         .collect();
     let mut events = Vec::new();
     let mut reported = HashSet::new();
-    for network in &next.networks {
-        let known = previous.networks.iter().find(|n| n.name == network.name);
-        let Some(known) = known else { continue };
+    for (id, network) in &new {
+        let Some((_, known)) = old.iter().find(|(known, _)| known == id) else { continue };
         if network.requests > known.requests {
             events.push(Event::Request { network: network.name.clone() });
         }
         for member in &network.members {
             let (nickname, network) = (member.nickname.clone(), network.name.clone());
-            let event = match before.get(&(network.as_str(), member.address)) {
+            let event = match before.get(&(id.as_str(), member.address)) {
                 None => Some(Event::Joined { nickname, network }),
                 Some(&link) if !online(link) && online(member.link) => Some(Event::Online { nickname, network }),
                 Some(&link) if online(link) && !online(member.link) => Some(Event::Offline { nickname, network }),
@@ -157,40 +165,43 @@ pub async fn run(app: AppHandle) {
                 let _ = app.notification().builder().title("Weft").body(event.text(&l)).show();
             }
         }
-        was_connected |= status.connection == Connection::Connected;
+        was_connected |= status.connection() == Connection::Connected;
         previous = Some(status);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use weft_ipc::{MemberStatus, NetworkStatus, Role};
+    use weft_ipc::{MemberStatus, Role, ServerStatus};
 
     use super::*;
 
     fn status(connection: Connection, members: &[(&str, u8, PeerLink)], requests: u32) -> Status {
         Status {
-            connection,
-            server: Some("weft://example.com".into()),
             nickname: "me".into(),
             public_key: String::new(),
-            address: Some(Ipv4Addr::new(100, 64, 0, 1)),
-            networks: vec![NetworkStatus {
-                name: "lan".into(),
-                role: Role::Owner,
-                locked: false,
-                approval: true,
-                requests,
-                members: members
-                    .iter()
-                    .map(|&(nickname, host, link)| MemberStatus {
-                        nickname: nickname.into(),
-                        dns: None,
-                        address: Ipv4Addr::new(100, 64, 0, host),
-                        link,
-                        latency_ms: None,
-                    })
-                    .collect(),
+            servers: vec![ServerStatus {
+                server: "weft://example.com".into(),
+                host: "example.com:443".into(),
+                connection,
+                address: Some(Ipv4Addr::new(100, 64, 0, 1)),
+                networks: vec![NetworkStatus {
+                    name: "lan".into(),
+                    role: Role::Owner,
+                    locked: false,
+                    approval: true,
+                    requests,
+                    members: members
+                        .iter()
+                        .map(|&(nickname, host, link)| MemberStatus {
+                            nickname: nickname.into(),
+                            dns: None,
+                            address: Ipv4Addr::new(100, 64, 0, host),
+                            link,
+                            latency_ms: None,
+                        })
+                        .collect(),
+                }],
             }],
         }
     }
