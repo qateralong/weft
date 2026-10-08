@@ -3,6 +3,9 @@ use std::net::Ipv4Addr;
 
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
+pub use dns::Dns;
+
+mod dns;
 mod routes;
 #[cfg(windows)]
 mod windows;
@@ -20,6 +23,7 @@ pub struct TunConfig {
     pub prefix: u8,
     pub mtu: u16,
     pub routes: Vec<Route>,
+    pub dns: Option<Dns>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +48,7 @@ impl TunConfig {
 pub struct Tun {
     device: AsyncDevice,
     name: String,
+    dns_configured: bool,
 }
 
 impl Tun {
@@ -59,14 +64,25 @@ impl Tun {
         let device = builder.build_async()?;
         let name = device.name().unwrap_or_else(|_| config.name.clone());
         #[cfg(windows)]
-        windows::configure(&name, &config.network(), &config.routes);
+        let dns_configured = {
+            windows::configure(&name, &config.network(), &config.routes, config.dns.as_ref());
+            config.dns.is_some()
+        };
         #[cfg(not(windows))]
-        routes::apply(&name, &config.routes);
-        Ok(Self { device, name })
+        let dns_configured = {
+            routes::apply(&name, &config.routes);
+            config.dns.as_ref().is_some_and(|dns| dns::apply(&name, dns))
+        };
+        Ok(Self { device, name, dns_configured })
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Whether the system resolver was told to send peer names to the daemon.
+    pub fn dns_configured(&self) -> bool {
+        self.dns_configured
     }
 
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
@@ -90,6 +106,7 @@ mod tests {
             prefix: 10,
             mtu: 1280,
             routes: Vec::new(),
+            dns: None,
         };
         assert_eq!(config.network(), "100.64.0.0/10");
         let config = TunConfig { address: Ipv4Addr::new(10, 1, 2, 3), prefix: 24, ..config };

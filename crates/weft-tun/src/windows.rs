@@ -13,7 +13,7 @@ pub fn wintun_path() -> Option<String> {
 /// Marks the adapter as a private network, allows inbound traffic from the pool on it,
 /// allows inbound UDP for the daemon so peers can reach it directly, and steers limited
 /// broadcast and the given multicast groups into the adapter.
-pub fn configure(alias: &str, network: &str, routes: &[crate::Route]) {
+pub fn configure(alias: &str, network: &str, routes: &[crate::Route], dns: Option<&crate::Dns>) {
     let alias = alias.replace('\'', "''");
     let program = std::env::current_exe().map(|path| path.to_string_lossy().replace('\'', "''")).unwrap_or_default();
     let mut extra = String::new();
@@ -25,6 +25,9 @@ pub fn configure(alias: &str, network: &str, routes: &[crate::Route]) {
                 "\n        New-NetRoute -DestinationPrefix '{route}' -InterfaceAlias '{alias}' -RouteMetric 0 -PolicyStore ActiveStore | Out-Null"
             ));
         }
+    }
+    if let Some(dns) = dns {
+        extra.push_str(&crate::dns::script(dns));
     }
     let script = format!(
         "$ErrorActionPreference = 'SilentlyContinue'

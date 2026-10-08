@@ -185,6 +185,7 @@ mod tests {
                     .iter()
                     .map(|&(nickname, host, link)| MemberStatus {
                         nickname: nickname.into(),
+                        dns: None,
                         address: Ipv4Addr::new(100, 64, 0, host),
                         link,
                         latency_ms: None,

@@ -13,6 +13,8 @@ pub struct Settings {
     pub up: bool,
     pub broadcast: bool,
     pub multicast_groups: Vec<Ipv4Addr>,
+    /// Resolve peer names like bob.weft through the system resolver.
+    pub dns: bool,
 }
 
 pub const MINECRAFT_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 2, 60);
@@ -26,6 +28,7 @@ impl Default for Settings {
             up: false,
             broadcast: true,
             multicast_groups: vec![MINECRAFT_GROUP],
+            dns: true,
         }
     }
 }

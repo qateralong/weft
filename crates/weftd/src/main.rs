@@ -1,5 +1,6 @@
 mod control;
 mod daemon;
+mod dns;
 mod echo;
 mod ipc;
 mod logs;

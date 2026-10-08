@@ -633,10 +633,16 @@ fn free_address(conn: &Connection, pool: &Pool) -> Result<u32, DbError> {
     let taken = stmt.query_map([pool.first_host(), pool.last_host()], |row| row.get::<_, u32>(0))?;
     for address in taken {
         let address = address?;
+        if candidate == u32::from(weft_proto::DNS_ADDRESS) {
+            candidate += 1;
+        }
         if address > candidate {
             break;
         }
-        candidate = address + 1;
+        candidate = candidate.max(address + 1);
+    }
+    if candidate == u32::from(weft_proto::DNS_ADDRESS) {
+        candidate += 1;
     }
     if candidate > pool.last_host() {
         return Err(DbError::PoolExhausted);
@@ -674,6 +680,18 @@ mod tests {
         assert_eq!(b.address, Ipv4Addr::new(100, 64, 0, 2));
         assert_eq!(a_again.address, a.address);
         assert_eq!(a_again.nickname, "renamed");
+    }
+
+    #[test]
+    fn skips_the_dns_address() {
+        let mut db = Db::open_in_memory().unwrap();
+        let pool: Pool = "100.100.100.96/29".parse().unwrap();
+        let addresses: Vec<Ipv4Addr> =
+            (1..=5).map(|n| db.upsert_device(&key(n), "d", &pool).unwrap().address).collect();
+        assert_eq!(
+            addresses[2..],
+            [Ipv4Addr::new(100, 100, 100, 99), Ipv4Addr::new(100, 100, 100, 101), Ipv4Addr::new(100, 100, 100, 102)]
+        );
     }
 
     #[test]

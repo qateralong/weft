@@ -65,6 +65,20 @@ if [ "$windows" = 1 ]; then
 else
     ping -c 3 "$addr_b"
 fi
+echo "--- resolve bob.weft through the system resolver"
+resolve() {
+    case "$(uname -s)" in
+        Linux) getent hosts bob.weft | awk '{print $1}' ;;
+        Darwin) dscacheutil -q host -a name bob.weft | awk '/^ip_address/ {print $2}' ;;
+        *) powershell.exe -NoProfile -Command "(Resolve-DnsName bob.weft -Type A -DnsOnly -ErrorAction SilentlyContinue).IPAddress" | tr -d '\r' ;;
+    esac
+}
+for _ in $(seq 20); do
+    [ "$(resolve | head -1)" = "$addr_b" ] && break
+    sleep 1
+done
+weft_a netcheck | grep '^Peer names'
+[ "$(resolve | head -1)" = "$addr_b" ]
 echo "--- e2e passed"
 if [ -n "${SHOW_LOGS:-}" ]; then
     show_logs

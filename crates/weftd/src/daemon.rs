@@ -17,11 +17,12 @@ use weft_proto::control::{
     MemberAction, NetworkCredentials, NetworkName, NetworkSettings, PeerCandidates, PeerKey, RelayPacket, Role,
     RoleChange, ServerKind, ServerMessage, State, Welcome,
 };
-use weft_proto::{Link, PublicKey};
+use weft_proto::{DNS_ADDRESS, Link, PublicKey};
 use weft_session::StaticKeypair;
-use weft_tun::{DEFAULT_MTU, Route, Tun, TunConfig};
+use weft_tun::{DEFAULT_MTU, Dns, Route, Tun, TunConfig};
 
 use crate::control::{Control, ControlEvent};
+use crate::dns;
 use crate::ipc::Command;
 use crate::settings::{Settings, SettingsFile, default_nickname};
 
@@ -49,6 +50,7 @@ pub struct Daemon {
     mapped: watch::Receiver<Option<Mapped>>,
     tun: Option<Tun>,
     tun_address: Option<Ipv4Addr>,
+    names: HashMap<String, Ipv4Addr>,
     control: Option<Control>,
     generation: u64,
     connection: Connection,
@@ -110,6 +112,7 @@ impl Daemon {
             mapped,
             tun: None,
             tun_address: None,
+            names: HashMap::new(),
             control: None,
             generation: 0,
             connection: Connection::Disconnected,
@@ -160,6 +163,11 @@ impl Daemon {
                     }
                 }
                 Wake::Udp(Err(error)) => tracing::debug!(%error, "udp receive failed"),
+                Wake::Tun(Ok(len)) if dns::is_query(&tun_buf[..len]) => {
+                    if let (Some(reply), Some(tun)) = (dns::respond(&tun_buf[..len], &self.names), &self.tun) {
+                        let _ = tun.send(&reply).await;
+                    }
+                }
                 Wake::Tun(Ok(len)) => {
                     if let Err(error) = self.mesh.send(now, &tun_buf[..len]) {
                         tracing::trace!(%error, "packet not sent");
@@ -414,7 +422,11 @@ impl Daemon {
             if self.settings.broadcast {
                 routes.insert(0, Route::host(Ipv4Addr::BROADCAST));
             }
-            let config = TunConfig { name: self.tun_name.clone(), address, prefix, mtu: DEFAULT_MTU, routes };
+            let dns = self.settings.dns.then(|| {
+                routes.push(Route::host(DNS_ADDRESS));
+                Dns { server: DNS_ADDRESS, domain: dns::ZONE.to_string() }
+            });
+            let config = TunConfig { name: self.tun_name.clone(), address, prefix, mtu: DEFAULT_MTU, routes, dns };
             match Tun::create(&config) {
                 Ok(tun) => {
                     tracing::info!(name = tun.name(), %address, "tun interface is up");
@@ -424,6 +436,7 @@ impl Daemon {
                 Err(error) => tracing::error!(%error, "cannot create tun interface"),
             }
         }
+        self.update_names();
         if let (Some(link), Ok(token)) = (self.server_link(), welcome.discovery_token.as_slice().try_into()) {
             let udp = SocketAddr::new(server.ip(), welcome.udp_port as u16);
             self.mesh.set_server(std::time::Instant::now(), udp, link.server_key, token);
@@ -463,6 +476,7 @@ impl Daemon {
         match message.kind {
             Some(ServerKind::State(state)) => {
                 self.state = state;
+                self.update_names();
                 let configs = peer_configs(&self.state);
                 self.mesh.update_peers(now, configs);
             }
@@ -590,6 +604,24 @@ impl Daemon {
         }
     }
 
+    fn update_names(&mut self) {
+        let own = self.keypair.public();
+        let nickname = self.settings.nickname.clone().unwrap_or_else(default_nickname);
+        let address = self.welcome.as_ref().map(|welcome| Ipv4Addr::from(welcome.address));
+        let peers = self
+            .state
+            .peers
+            .iter()
+            .filter(|peer| peer.key.as_slice() != own.as_bytes())
+            .map(|peer| (peer.nickname.as_str(), Ipv4Addr::from(peer.address)));
+        self.names = dns::names(address.map(|address| (nickname.as_str(), address)).into_iter().chain(peers));
+    }
+
+    fn dns_name(&self, nickname: &str, address: Ipv4Addr) -> Option<String> {
+        let label = dns::label(nickname)?;
+        (self.names.get(&label) == Some(&address)).then(|| format!("{label}.{}", dns::ZONE))
+    }
+
     fn diagnostics(&self, logs: bool) -> Diagnostics {
         let report = self.mesh.report(std::time::Instant::now());
         let tun = self.tun.as_ref().map(|tun| tun.name().to_string()).unwrap_or_else(|| self.tun_name.clone());
@@ -639,6 +671,7 @@ impl Daemon {
             observed: report.observed,
             local_port: self.udp_port,
             local_addresses,
+            dns: self.settings.dns.then(|| self.tun.as_ref().map(Tun::dns_configured)).flatten(),
             port_mapping,
             nat,
             peers,
@@ -655,6 +688,7 @@ impl Daemon {
             Some(weft_mesh::PeerLink::Direct { latency, .. }) => (PeerLink::Direct, latency),
         };
         MemberStatus {
+            dns: self.dns_name(&peer.nickname, Ipv4Addr::from(peer.address)),
             nickname: peer.nickname.clone(),
             address: Ipv4Addr::from(peer.address),
             link,

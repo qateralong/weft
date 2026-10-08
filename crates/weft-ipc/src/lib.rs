@@ -179,6 +179,8 @@ pub enum Role {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MemberStatus {
     pub nickname: String,
+    #[serde(default)]
+    pub dns: Option<String>,
     pub address: Ipv4Addr,
     pub link: PeerLink,
     pub latency_ms: Option<u32>,

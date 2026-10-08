@@ -545,7 +545,9 @@ function renderNetwork(network) {
   const rows = network.members.length
     ? network.members.map((member) => entering(el('div', { class: 'row' },
       avatar(member),
-      el('div', { class: 'grow' }, el('div', {}, member.nickname), el('div', { class: 'muted link-text' }, linkText(member))),
+      el('div', { class: 'grow' },
+        el('div', member.dns ? { class: 'dns-name', title: member.dns, onclick: () => copy(member.dns) } : {}, member.nickname),
+        el('div', { class: 'muted link-text' }, linkText(member))),
       el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(member.address) }, member.address),
       manager && el('button', { class: 'icon', onclick: () => memberDialog(network, member) }, icon('more'))),
     `member:${network.name}:${member.address}`))

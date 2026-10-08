@@ -209,6 +209,8 @@ main { padding: 14px 16px 28px; }
 .avatar .dot { position: absolute; right: -1px; bottom: -1px; border: 2px solid var(--card); }
 
 .mono { font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, monospace; font-size: 12px; user-select: text; -webkit-user-select: text; }
+.dns-name { cursor: pointer; display: inline; }
+.dns-name:hover { color: var(--accent); }
 .address { cursor: pointer; border-radius: 5px; padding: 1px 4px; }
 .address:hover { color: var(--accent); background: var(--accent-soft); }
 

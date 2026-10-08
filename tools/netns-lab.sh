@@ -95,6 +95,14 @@ for _ in $(seq 20); do
 done
 weft a status | grep '^Status'
 ping_b 2
+echo "--- peer names through the daemon resolver"
+addr_a=$(weft a status | awk -F': *' '/^Address/ {print $2}')
+dig_a() { nsenter --net=/run/netns/a dig +short +time=2 +tries=2 @100.100.100.100 "$@"; }
+[ "$(dig_a bob.weft)" = "$addr_b" ]
+[ "$(dig_a ALICE.weft)" = "$addr_a" ]
+[ -z "$(dig_a nobody.weft)" ]
+weft a netcheck | grep '^Peer names'
+nsenter --net=/run/netns/a ping -q -c 1 -W 2 "$addr_b" > /dev/null
 echo "--- kick, ban and unban"
 weft a invite list lan
 weft b invite create lan && exit 1

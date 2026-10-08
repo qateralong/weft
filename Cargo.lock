@@ -2626,7 +2626,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "loom"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "argon2",
  "clap",
@@ -5666,7 +5666,7 @@ dependencies = [
 
 [[package]]
 name = "weft"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "clap",
  "rpassword",
@@ -5677,7 +5677,7 @@ dependencies = [
 
 [[package]]
 name = "weft-gui"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -5693,7 +5693,7 @@ dependencies = [
 
 [[package]]
 name = "weft-i18n"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "fluent-bundle",
  "sys-locale",
@@ -5702,7 +5702,7 @@ dependencies = [
 
 [[package]]
 name = "weft-ipc"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -5711,7 +5711,7 @@ dependencies = [
 
 [[package]]
 name = "weft-mesh"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "blake2 0.11.0",
  "chacha20poly1305 0.11.0",
@@ -5727,7 +5727,7 @@ dependencies = [
 
 [[package]]
 name = "weft-portmap"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "crab_nat",
  "igd-next",
@@ -5738,7 +5738,7 @@ dependencies = [
 
 [[package]]
 name = "weft-proto"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "blake2 0.11.0",
  "chacha20 0.10.2",
@@ -5749,7 +5749,7 @@ dependencies = [
 
 [[package]]
 name = "weft-session"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "blake2 0.11.0",
  "getrandom 0.4.3",
@@ -5765,7 +5765,7 @@ dependencies = [
 
 [[package]]
 name = "weft-sim"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "rand 0.10.3",
  "weft-proto",
@@ -5774,7 +5774,7 @@ dependencies = [
 
 [[package]]
 name = "weft-tun"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "tracing",
  "tun-rs",
@@ -5782,9 +5782,10 @@ dependencies = [
 
 [[package]]
 name = "weftd"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "clap",
+ "idna",
  "nix 0.30.1",
  "serde",
  "thiserror 2.0.21",

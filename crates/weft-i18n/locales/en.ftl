@@ -281,3 +281,8 @@ gui-notifications = Show notifications
 gui-check-updates = Check for updates
 gui-update = Weft { $version } is available
 gui-download = Download
+
+diag-dns = Peer names
+diag-dns-ok = name.weft works through the system resolver
+diag-dns-unconfigured = the system resolver is not set up for .weft (Linux needs systemd-resolved)
+diag-dns-off = turned off

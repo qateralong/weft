@@ -14,6 +14,9 @@ pub struct Diagnostics {
     pub observed: Option<SocketAddr>,
     pub local_port: u16,
     pub local_addresses: Vec<IpAddr>,
+    /// Whether the system resolver sends `.weft` names to the daemon; `None` when names are off.
+    #[serde(default)]
+    pub dns: Option<bool>,
     pub port_mapping: Option<PortMapping>,
     pub nat: Nat,
     pub peers: Vec<PeerDiagnostics>,
@@ -113,6 +116,17 @@ pub fn format(diagnostics: &Diagnostics, tr: &Translate<'_>) -> String {
         (tr("diag-local-addresses", &[]), if addresses.is_empty() { none.clone() } else { addresses.join(", ") }),
         (tr("diag-mapping", &[]), mapping),
         (tr("diag-nat", &[]), tr(nat, &[])),
+        (
+            tr("diag-dns", &[]),
+            tr(
+                match d.dns {
+                    Some(true) => "diag-dns-ok",
+                    Some(false) => "diag-dns-unconfigured",
+                    None => "diag-dns-off",
+                },
+                &[],
+            ),
+        ),
     ];
     let width = rows.iter().map(|(label, _)| label.chars().count()).max().unwrap_or(0) + 1;
     let mut text = String::new();
@@ -193,6 +207,7 @@ mod tests {
             observed: None,
             local_port: 41000,
             local_addresses: vec![],
+            dns: None,
             port_mapping: None,
             nat: Nat::Unknown,
             peers: vec![PeerDiagnostics {

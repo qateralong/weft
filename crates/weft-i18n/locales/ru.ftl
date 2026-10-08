@@ -281,3 +281,8 @@ gui-notifications = Показывать уведомления
 gui-check-updates = Проверять обновления
 gui-update = Доступна версия Weft { $version }
 gui-download = Скачать
+
+diag-dns = Имена участников
+diag-dns-ok = имя.weft работает через системный резолвер
+diag-dns-unconfigured = системный резолвер не настроен для .weft (на Linux нужен systemd-resolved)
+diag-dns-off = выключены

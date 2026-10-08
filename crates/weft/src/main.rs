@@ -441,6 +441,7 @@ fn print_status(l: &Localizer, status: &Status) {
             println!("  {}", l.tr("network-empty"));
         }
         let width = network.members.iter().map(|m| m.nickname.chars().count()).max().unwrap_or(0);
+        let names = network.members.iter().map(|m| m.dns.as_deref().map_or(0, str::len)).max().unwrap_or(0);
         for member in &network.members {
             let link = match (member.link, member.latency_ms) {
                 (PeerLink::Offline, _) => l.tr("link-offline"),
@@ -449,7 +450,12 @@ fn print_status(l: &Localizer, status: &Status) {
                 (PeerLink::Direct, Some(ms)) => l.tr_args("link-direct-latency", &[("ms", &ms.to_string())]),
                 (PeerLink::Direct, None) => l.tr("link-direct"),
             };
-            println!("  {:<width$}  {:<15}  {link}", member.nickname, member.address.to_string());
+            let name = member.dns.as_deref().unwrap_or("");
+            if names == 0 {
+                println!("  {:<width$}  {:<15}  {link}", member.nickname, member.address.to_string());
+            } else {
+                println!("  {:<width$}  {:<15}  {name:<names$}  {link}", member.nickname, member.address.to_string());
+            }
         }
     }
 }
