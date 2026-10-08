@@ -462,14 +462,16 @@ async fn administration_and_relay_limits() {
     a.request(ClientKind::CreateNetwork(credentials("lan", "secret"))).await.unwrap();
     b.request(ClientKind::JoinNetwork(credentials("lan", "secret"))).await.unwrap();
 
-    for _ in 0..100 {
+    let started = std::time::Instant::now();
+    for _ in 0..400 {
         a.send(ClientKind::Relay(RelayPacket { address: welcome_b.address, packet: vec![7; 1200] })).await;
     }
     a.request(ClientKind::Ping(control::Empty {})).await.unwrap();
     let Ok(AdminResponse::Stats(stats)) = request(&path, &AdminRequest::Stats).await else { panic!() };
     assert_eq!((stats.devices, stats.online, stats.networks), (2, 2, 1));
-    assert_eq!(stats.relay.packets + stats.relay.dropped, 100);
-    assert!(stats.relay.dropped > 0 && stats.relay.bytes < 100_000, "{:?}", stats.relay);
+    assert_eq!(stats.relay.packets + stats.relay.dropped, 400);
+    let allowed = 64 * 1024 + (125_000.0 * started.elapsed().as_secs_f64()) as u64 + 1200;
+    assert!(stats.relay.dropped > 0 && stats.relay.bytes <= allowed, "{:?} > {allowed}", stats.relay);
     assert_eq!(stats.top_relay[0].nickname, "alice");
 
     let Ok(AdminResponse::Networks(networks)) = request(&path, &AdminRequest::Networks).await else { panic!() };
