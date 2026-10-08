@@ -7,7 +7,8 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, sleep_until};
 use weft_ipc::{
-    Connection, DeviceInfo, Failure, InviteInfo, MemberStatus, NetworkStatus, PeerLink, Request, Response, Status,
+    Connection, DeviceInfo, Diagnostics, Failure, InviteInfo, MemberStatus, NetworkStatus, PeerDiagnostics, PeerLink,
+    PortMapping, Request, Response, Status,
 };
 use weft_mesh::{Mesh, Output, PeerConfig};
 use weft_portmap::{Mapped, PortMapper};
@@ -241,6 +242,9 @@ impl Daemon {
                 ClientKind::UpdateNetwork(NetworkSettings { name: network, locked, approval, password }),
                 reply,
             ),
+            Request::Diagnose { logs } => {
+                let _ = reply.send(Response::Diagnostics(Box::new(self.diagnostics(logs))));
+            }
             Request::Delete { network } => {
                 self.request(ClientKind::DeleteNetwork(NetworkName { name: network }), reply)
             }
@@ -583,6 +587,62 @@ impl Daemon {
             public_key: own.to_string(),
             address: self.welcome.as_ref().map(|welcome| Ipv4Addr::from(welcome.address)),
             networks,
+        }
+    }
+
+    fn diagnostics(&self, logs: bool) -> Diagnostics {
+        let report = self.mesh.report(std::time::Instant::now());
+        let tun = self.tun.as_ref().map(|tun| tun.name().to_string()).unwrap_or_else(|| self.tun_name.clone());
+        let local_addresses: Vec<IpAddr> = weft_portmap::local_addresses(Some(&tun))
+            .into_iter()
+            .filter(|ip| Some(*ip) != self.tun_address.map(IpAddr::V4))
+            .collect();
+        let mapped = self.mapper.current();
+        let port_mapping = mapped.map(|mapped| PortMapping {
+            protocol: mapped.protocol.name().to_string(),
+            external: mapped.endpoint(report.observed.map(|addr| addr.ip())),
+        });
+        let seen: Vec<SocketAddr> = report.peers.iter().filter_map(|peer| peer.observed).collect();
+        let nat = weft_ipc::report::classify_nat(report.observed, self.udp_port, &local_addresses, &seen);
+        let reports: HashMap<PublicKey, &weft_mesh::PeerReport> =
+            report.peers.iter().map(|peer| (peer.key, peer)).collect();
+        let own = self.keypair.public();
+        let peers = self
+            .state
+            .peers
+            .iter()
+            .filter(|peer| peer.key.as_slice() != own.as_bytes())
+            .map(|peer| {
+                let status = self.member_status(peer);
+                let report = PublicKey::from_slice(&peer.key).ok().and_then(|key| reports.get(&key).copied());
+                let endpoint = match report.map(|report| report.link) {
+                    Some(weft_mesh::PeerLink::Direct { addr, .. }) => Some(addr),
+                    _ => None,
+                };
+                PeerDiagnostics {
+                    nickname: status.nickname,
+                    address: status.address,
+                    link: status.link,
+                    endpoint,
+                    latency_ms: status.latency_ms,
+                    candidates: peer.candidates.iter().filter_map(|endpoint| endpoint.to_socket_addr()).collect(),
+                    observed: report.and_then(|report| report.observed),
+                }
+            })
+            .collect();
+        Diagnostics {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            os: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+            connection: self.connection,
+            server: self.settings.server.clone(),
+            server_udp: report.server_udp,
+            observed: report.observed,
+            local_port: self.udp_port,
+            local_addresses,
+            port_mapping,
+            nat,
+            peers,
+            logs: if logs { crate::logs::recent() } else { Vec::new() },
         }
     }
 

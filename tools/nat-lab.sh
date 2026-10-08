@@ -103,6 +103,21 @@ weft a status | grep -E 'bob'
 weft b status | grep -E 'alice'
 weft a status | grep -q "$pattern"
 weft b status | grep -q "$pattern"
+echo "--- netcheck a"
+for _ in $(seq 15); do
+    weft a netcheck | grep -q '^UDP to server: *checking' || break
+    sleep 1
+done
+weft a netcheck | tee "$WORK/netcheck"
+if [ -n "${BLOCK_LOOM_UDP_A:-}" ]; then
+    grep -q '^UDP to server: *no answer' "$WORK/netcheck"
+else
+    grep -q '^UDP to server: *works' "$WORK/netcheck"
+fi
+case "$EXPECT" in
+    direct) grep -Eq '^NAT: .*good for direct links' "$WORK/netcheck" && grep -q 'bob (.*): direct' "$WORK/netcheck" ;;
+    relay) grep -q 'bob (.*): through the server' "$WORK/netcheck" ;;
+esac
 nsenter --net=/run/netns/a ping -q -c 3 -W 2 "$addr_b"
 echo "--- LAN game discovery from a to b"
 addr_a=$(weft a status | awk -F': *' '/^Address/ {print $2}')

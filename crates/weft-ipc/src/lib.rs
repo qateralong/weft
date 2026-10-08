@@ -6,6 +6,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+pub mod report;
+
+pub use report::{Diagnostics, Nat, PeerDiagnostics, PortMapping};
+
 pub const SOCKET_ENV: &str = "WEFT_SOCKET";
 #[cfg(target_os = "macos")]
 pub const DEFAULT_SOCKET: &str = "/var/run/weft/weftd.sock";
@@ -38,6 +42,7 @@ pub enum Request {
     SetRole { network: String, member: String, role: Role },
     Configure { network: String, locked: Option<bool>, approval: Option<bool>, password: Option<String> },
     Delete { network: String },
+    Diagnose { logs: bool },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -51,6 +56,7 @@ pub enum Response {
     Pending(String),
     Bans(Vec<DeviceInfo>),
     Requests(Vec<DeviceInfo>),
+    Diagnostics(Box<Diagnostics>),
     Error(Failure),
 }
 

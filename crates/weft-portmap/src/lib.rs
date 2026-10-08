@@ -14,9 +14,27 @@ const RETRY_AFTER: Duration = Duration::from_secs(300);
 const DESCRIPTION: &str = "weft";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Protocol {
+    Pcp,
+    NatPmp,
+    Upnp,
+}
+
+impl Protocol {
+    pub fn name(self) -> &'static str {
+        match self {
+            Protocol::Pcp => "PCP",
+            Protocol::NatPmp => "NAT-PMP",
+            Protocol::Upnp => "UPnP",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mapped {
     pub port: u16,
     pub ip: Option<IpAddr>,
+    pub protocol: Protocol,
 }
 
 impl Mapped {
@@ -99,11 +117,11 @@ async fn map(local_port: NonZeroU16) -> Option<(Lease, Mapped)> {
                 .await;
         match result {
             Ok(mapping) => {
-                let ip = match mapping.mapping_type() {
-                    PortMappingType::Pcp { external_ip, .. } => Some(external_ip),
-                    PortMappingType::NatPmp => None,
+                let (ip, protocol) = match mapping.mapping_type() {
+                    PortMappingType::Pcp { external_ip, .. } => (Some(external_ip), Protocol::Pcp),
+                    PortMappingType::NatPmp => (None, Protocol::NatPmp),
                 };
-                let mapped = Mapped { port: mapping.external_port().get(), ip };
+                let mapped = Mapped { port: mapping.external_port().get(), ip, protocol };
                 return Some((Lease::Pmp(mapping), mapped));
             }
             Err(error) => tracing::debug!(%error, "pcp and nat-pmp failed"),
@@ -120,7 +138,7 @@ async fn map(local_port: NonZeroU16) -> Option<(Lease, Mapped)> {
         .map_err(|error| tracing::debug!(%error, "upnp mapping failed"))
         .ok()?;
     let ip = gateway.get_external_ip().await.ok();
-    Some((Lease::Upnp { gateway, local, port }, Mapped { port, ip }))
+    Some((Lease::Upnp { gateway, local, port }, Mapped { port, ip, protocol: Protocol::Upnp }))
 }
 
 async fn renew(lease: &mut Lease) -> bool {

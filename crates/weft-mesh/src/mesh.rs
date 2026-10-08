@@ -20,6 +20,7 @@ pub const PROBE_BACKOFF: Duration = Duration::from_secs(40);
 pub const DISCOVER_INTERVAL: Duration = Duration::from_secs(20);
 pub const DISCOVER_JITTER: Duration = Duration::from_secs(5);
 pub const SERVER_UDP_FRESH: Duration = Duration::from_secs(60);
+const UDP_CHECK: Duration = Duration::from_secs(10);
 const MAX_PATHS: usize = 32;
 const MAX_DISCO_PADDING: usize = 32;
 
@@ -49,6 +50,23 @@ pub enum PeerLink {
     Connecting,
     Relay,
     Direct { addr: SocketAddr, latency: Option<Duration> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Report {
+    /// Whether UDP to the server answered recently; `None` before the first answer is due.
+    pub server_udp: Option<bool>,
+    pub observed: Option<SocketAddr>,
+    pub peers: Vec<PeerReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerReport {
+    pub key: PublicKey,
+    pub link: PeerLink,
+    pub candidates: Vec<SocketAddr>,
+    /// Our address as this peer sees it.
+    pub observed: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -91,6 +109,7 @@ struct Server {
     observed: Option<SocketAddr>,
     udp_fresh_until: Option<Instant>,
     discover_at: Instant,
+    since: Instant,
 }
 
 struct Peer {
@@ -105,6 +124,7 @@ struct Peer {
     probe_at: Option<Instant>,
     attempts: u32,
     pings: HashMap<TxId, (SocketAddr, Instant)>,
+    observed: Option<SocketAddr>,
 }
 
 #[derive(Default)]
@@ -161,6 +181,7 @@ impl Mesh {
             observed: None,
             udp_fresh_until: None,
             discover_at: now,
+            since: now,
         });
         self.tick(now);
     }
@@ -332,6 +353,27 @@ impl Mesh {
         self.outputs.pop_front()
     }
 
+    pub fn report(&self, now: Instant) -> Report {
+        let server_udp = self.server.as_ref().and_then(|server| {
+            let fresh = server.udp_fresh_until.is_some_and(|until| now < until);
+            (fresh || server.observed.is_some() || now >= server.since + UDP_CHECK).then_some(fresh)
+        });
+        let mut peers: Vec<PeerReport> = self
+            .peers
+            .values()
+            .filter_map(|peer| {
+                Some(PeerReport {
+                    key: peer.key,
+                    link: self.link(&peer.key)?,
+                    candidates: peer.candidates.clone(),
+                    observed: peer.observed,
+                })
+            })
+            .collect();
+        peers.sort_by_key(|peer| peer.key);
+        Report { server_udp, observed: self.observed(), peers }
+    }
+
     pub fn link(&self, key: &PublicKey) -> Option<PeerLink> {
         let id = *self.by_key.get(key)?;
         let peer = self.peers.get(&id)?;
@@ -361,6 +403,7 @@ impl Mesh {
                 probe_at: Some(now),
                 attempts: 0,
                 pings: HashMap::new(),
+                observed: None,
             },
         );
         self.by_key.insert(config.key, id);
@@ -525,11 +568,12 @@ impl Mesh {
                     self.ping(now, id, from);
                 }
             }
-            Message::Pong { tx, .. } => {
+            Message::Pong { tx, observed } => {
                 let Some((addr, sent)) = peer.pings.remove(&tx) else { return };
                 if addr != from {
                     return;
                 }
+                peer.observed = Some(observed);
                 heard(peer, from, now, Some(now.duration_since(sent)));
             }
         }

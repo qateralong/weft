@@ -2,6 +2,7 @@ mod control;
 mod daemon;
 mod echo;
 mod ipc;
+mod logs;
 mod service;
 mod settings;
 
@@ -132,12 +133,21 @@ fn run_service(options: Options) -> Result<(), BoxError> {
 }
 
 fn init_logging(file: Option<PathBuf>) {
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    let builder = tracing_subscriber::fmt().with_env_filter(filter);
-    match file.and_then(|path| std::fs::OpenOptions::new().create(true).append(true).open(path).ok()) {
-        Some(file) => builder.with_ansi(false).with_writer(std::sync::Mutex::new(file)).init(),
-        None => builder.with_writer(std::io::stderr).init(),
-    }
+    let (writer, ansi) =
+        match file.and_then(|path| std::fs::OpenOptions::new().create(true).append(true).open(path).ok()) {
+            Some(file) => (BoxMakeWriter::new(std::sync::Mutex::new(file)), false),
+            None => (BoxMakeWriter::new(std::io::stderr), true),
+        };
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_ansi(ansi).with_writer(writer))
+        .with(tracing_subscriber::fmt::layer().with_ansi(false).with_writer(logs::Recent))
+        .init();
 }
 
 async fn shutdown() {

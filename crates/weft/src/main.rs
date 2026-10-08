@@ -107,6 +107,19 @@ fn cli(l: &Localizer) -> Command {
                     .help_heading(l.tr("help-options")),
             ],
         ))
+        .subcommand(command(
+            l,
+            "netcheck",
+            "cmd-netcheck",
+            vec![
+                Arg::new("logs")
+                    .long("logs")
+                    .short('l')
+                    .action(ArgAction::SetTrue)
+                    .help(l.tr("arg-logs"))
+                    .help_heading(l.tr("help-options")),
+            ],
+        ))
 }
 
 fn command(l: &Localizer, name: &'static str, about: &str, args: Vec<Arg>) -> Command {
@@ -231,6 +244,7 @@ fn run(l: &Localizer, matches: &ArgMatches) -> Result<(), String> {
             let done = l.tr_args(&done, &[("name", &network)]);
             (Request::Configure { network, locked, approval, password: new_password }, Some(done))
         }
+        Some(("netcheck", m)) => (Request::Diagnose { logs: m.get_flag("logs") }, None),
         Some(("delete", m)) => {
             if !m.get_flag("yes") {
                 return Err(l.tr("error-confirm-delete"));
@@ -277,6 +291,10 @@ fn run(l: &Localizer, matches: &ArgMatches) -> Result<(), String> {
         }
         Response::Invites(invites) => {
             print_invites(l, &request, &invites);
+            Ok(())
+        }
+        Response::Diagnostics(diagnostics) => {
+            print!("{}", weft_ipc::report::format(&diagnostics, &|id, args| l.tr_args(id, args)));
             Ok(())
         }
         Response::Pending(name) => {

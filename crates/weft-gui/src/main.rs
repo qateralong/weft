@@ -30,6 +30,30 @@ async fn request(l: State<'_, Localizer>, request: Request) -> Result<Response, 
     send(&l, request).await
 }
 
+#[tauri::command]
+async fn diagnostics(l: State<'_, Localizer>) -> Result<String, String> {
+    report(&l, false).await
+}
+
+#[tauri::command]
+async fn save_report(app: AppHandle, l: State<'_, Localizer>) -> Result<String, String> {
+    let text = report(&l, true).await?;
+    let dir = app.path().download_dir().or_else(|_| app.path().home_dir()).map_err(|error| error.to_string())?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let path = dir.join(format!("weft-report-{stamp}.txt"));
+    std::fs::write(&path, text).map_err(|error| error.to_string())?;
+    Ok(path.display().to_string())
+}
+
+async fn report(l: &Localizer, logs: bool) -> Result<String, String> {
+    match send(l, Request::Diagnose { logs }).await? {
+        Response::Diagnostics(diagnostics) => {
+            Ok(weft_ipc::report::format(&diagnostics, &|id, args| l.tr_args(id, args)))
+        }
+        _ => Err(l.tr("error-internal")),
+    }
+}
+
 async fn send(l: &Localizer, request: Request) -> Result<Response, String> {
     let path = weft_ipc::socket_path();
     let response = weft_ipc::request(&path, &request).await.map_err(|error| {
@@ -110,7 +134,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show_window(app)))
         .manage(Localizer::from_env())
-        .invoke_handler(tauri::generate_handler![catalog, request])
+        .invoke_handler(tauri::generate_handler![catalog, request, diagnostics, save_report])
         .setup(move |app| {
             tray(app.handle())?;
             if !hidden {

@@ -20,6 +20,7 @@ const ICONS = {
   chevron: '<path d="M6 9l6 6 6-6"/>',
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
   link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
+  pulse: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
   users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/>',
 };
 const AVATAR_COLORS = ['#d9734e', '#c9a03a', '#5f9e57', '#3e9a91', '#3f7fb8', '#7867c4', '#b95f9d', '#8b7258'];
@@ -183,6 +184,31 @@ function dangerButton(label, run) {
     await run();
   };
   return button;
+}
+
+function diagnosticsDialog() {
+  let text = '';
+  openDialog(t('gui-diagnostics'), async ({ fail, render }) => {
+    try {
+      text = await invoke('diagnostics');
+    } catch (e) {
+      fail(String(e));
+    }
+    return [
+      el('pre', { class: 'mono report' }, text),
+      el('div', { class: 'toolbar' },
+        el('button', { onclick: () => render() }, t('gui-refresh')),
+        el('button', { onclick: () => copy(text) }, t('gui-copy')),
+        el('button', {
+          class: 'primary',
+          onclick: async () => {
+            try {
+              toast(t('done-report-saved', { path: await invoke('save_report') }));
+            } catch (e) { fail(String(e)); }
+          },
+        }, t('gui-save-report'))),
+    ];
+  });
 }
 
 function serverDialog() {
@@ -422,6 +448,7 @@ function renderHeader() {
         el('span', { class: `dot ${status.connection}` }),
         t(`state-${status.connection}`),
         status.address && el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(status.address) }, status.address))),
+    el('button', { class: 'icon', title: t('gui-diagnostics'), onclick: diagnosticsDialog }, icon('pulse')),
     el('button', { class: 'icon', title: t(dark ? 'gui-theme-light' : 'gui-theme-dark'), onclick: toggleTheme }, icon(dark ? 'sun' : 'moon')),
     el('button', { class: 'icon', title: t('gui-settings'), onclick: serverDialog }, icon('gear')));
 }

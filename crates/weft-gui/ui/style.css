@@ -320,6 +320,20 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; padding: 1
 dialog .section { margin: 16px 0 8px; font-weight: 650; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 dialog .list { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 dialog .error { color: var(--danger); background: var(--danger-soft); padding: 8px 10px; border-radius: 8px; margin-bottom: 10px; animation: fade-in .2s ease; }
+dialog pre.report {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  max-height: 46vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  line-height: 1.5;
+}
+
+dialog:has(pre.report) { width: min(560px, calc(100vw - 32px)); }
 dialog .menu button { width: 100%; justify-content: flex-start; margin-bottom: 8px; padding: 10px 12px; }
 
 /* Toast */
