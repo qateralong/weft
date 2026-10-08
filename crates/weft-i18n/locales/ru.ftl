@@ -312,3 +312,13 @@ gui-add-server = Добавить сервер по ссылке
 gui-add = Добавить
 gui-remove = Удалить
 gui-app = Приложение
+
+error-access-denied = Этому пользователю нельзя управлять Weft. Добавьте его в группу «weft»: sudo usermod -aG weft $USER
+
+gui-repair = Исправить
+gui-repairing = Ждём пароль администратора…
+gui-repaired = Weft готов к работе
+gui-repair-failed = Не получилось исправить: { $reason }
+gui-repair-missing = Служба Weft не запущена
+gui-repair-denied = Нет доступа к службе Weft
+gui-repair-hint = Weft может сам запустить свою службу и дать этому пользователю доступ. Система попросит пароль администратора.

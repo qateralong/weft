@@ -33,19 +33,38 @@ pub fn bind(path: &Path) -> io::Result<Listener> {
         _ => {}
     }
     let listener = tokio::net::UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
-    if let Ok(Some(group)) = nix::unistd::Group::from_name(SOCKET_GROUP) {
-        std::os::unix::fs::chown(path, None, Some(group.gid.as_raw()))?;
-    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
     Ok(Listener(listener))
+}
+
+/// Root, the daemon's own user and members of the `weft` group may use the daemon. Membership is
+/// read on every connection, so adding a user to the group works without logging in again.
+#[cfg(unix)]
+fn allowed(stream: &tokio::net::UnixStream) -> bool {
+    use nix::unistd::{Group, Uid, User};
+    let Ok(peer) = stream.peer_cred() else { return false };
+    if peer.uid() == 0 || peer.uid() == nix::unistd::getuid().as_raw() {
+        return true;
+    }
+    let Ok(Some(group)) = Group::from_name(SOCKET_GROUP) else { return false };
+    if peer.gid() == group.gid.as_raw() {
+        return true;
+    }
+    let Ok(Some(user)) = User::from_uid(Uid::from_raw(peer.uid())) else { return false };
+    user.gid == group.gid || group.mem.contains(&user.name)
 }
 
 #[cfg(unix)]
 pub async fn serve(listener: Listener, commands: mpsc::Sender<Command>) {
     loop {
         match listener.0.accept().await {
-            Ok((stream, _)) => {
+            Ok((stream, _)) if allowed(&stream) => {
                 tokio::spawn(client(stream, commands.clone()));
+            }
+            Ok((mut stream, _)) => {
+                tokio::spawn(async move {
+                    let _ = weft_ipc::send(&mut stream, &Response::Error(Failure::AccessDenied)).await;
+                });
             }
             Err(error) => {
                 tracing::warn!(%error, "ipc accept failed");

@@ -312,3 +312,13 @@ gui-add-server = Add a server by its link
 gui-add = Add
 gui-remove = Remove
 gui-app = App
+
+error-access-denied = This user may not control Weft. Add it to the “weft” group: sudo usermod -aG weft $USER
+
+gui-repair = Fix
+gui-repairing = Waiting for the administrator password…
+gui-repaired = Weft is ready
+gui-repair-failed = Could not fix it: { $reason }
+gui-repair-missing = The Weft service is not running
+gui-repair-denied = No access to the Weft service
+gui-repair-hint = Weft can start its service and give this user access. The system will ask for the administrator password.

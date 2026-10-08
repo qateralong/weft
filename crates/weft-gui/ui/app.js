@@ -12,6 +12,7 @@ let messages = {};
 let appVersion = '0.0.0';
 let settings = { notifications: true, updates: true };
 let update = null;
+let daemonState = null;
 let status = null;
 let daemonError = null;
 let pollTimer = null;
@@ -634,7 +635,25 @@ function render() {
   renderHeader();
   const main = document.getElementById('main');
   if (daemonError) {
-    main.replaceChildren(el('div', { class: 'card pad enter' }, el('h2', {}, 'weftd'), el('p', {}, daemonError)));
+    const fixable = daemonState === 'missing' || daemonState === 'denied';
+    const fix = fixable && el('button', {
+      class: 'primary',
+      onclick: async (event) => {
+        event.currentTarget.disabled = true;
+        event.currentTarget.textContent = t('gui-repairing');
+        try {
+          await invoke('repair');
+          toast(t('gui-repaired'));
+        } catch (error) {
+          toast(t('gui-repair-failed', { reason: String(error) }), true);
+        }
+        await poll();
+        render();
+      },
+    }, t('gui-repair'));
+    main.replaceChildren(el('div', { class: 'card pad enter' },
+      el('h2', {}, t(daemonState === 'denied' ? 'gui-repair-denied' : 'gui-repair-missing')),
+      el('p', {}, fixable ? t('gui-repair-hint') : daemonError), fix));
     return;
   }
   if (!status) return;
@@ -674,11 +693,14 @@ async function poll() {
     const changed = daemonError || !sameStatus(status, response.data);
     status = response.data;
     daemonError = null;
-    const editing = !status.server && document.activeElement?.tagName === 'INPUT';
+    const editing = !status.servers.length && document.activeElement?.tagName === 'INPUT';
     if (changed && !editing) render();
   } catch (error) {
-    if (daemonError !== String(error)) {
+    let state = null;
+    try { state = await invoke('daemon_state'); } catch { state = null; }
+    if (daemonError !== String(error) || daemonState !== state) {
       daemonError = String(error);
+      daemonState = state;
       status = null;
       render();
     }

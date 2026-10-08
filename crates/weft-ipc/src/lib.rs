@@ -173,6 +173,7 @@ pub enum Failure {
     AmbiguousServer,
     ServerNotFound,
     AmbiguousNetwork,
+    AccessDenied,
     Internal,
 }
 
@@ -206,6 +207,7 @@ impl Failure {
             Failure::AmbiguousServer => "error-ambiguous-server",
             Failure::ServerNotFound => "error-server-not-found",
             Failure::AmbiguousNetwork => "error-ambiguous-network",
+            Failure::AccessDenied => "error-access-denied",
             Failure::Internal => "error-internal",
         }
     }

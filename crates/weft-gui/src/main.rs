@@ -9,8 +9,9 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 use weft_i18n::{Language, Localizer};
-use weft_ipc::{Request, Response};
+use weft_ipc::{Failure, Request, Response};
 
+mod repair;
 mod watch;
 
 use watch::{Settings, SettingsStore};
@@ -49,6 +50,34 @@ fn open_release(app: AppHandle, url: String) -> Result<(), String> {
         return Err("not a Weft release page".into());
     }
     app.opener().open_url(url, None::<&str>).map_err(|error| error.to_string())
+}
+
+/// Why the daemon cannot be used, for offering a fix.
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DaemonState {
+    Ok,
+    Missing,
+    Denied,
+    Other,
+}
+
+#[tauri::command]
+async fn daemon_state() -> DaemonState {
+    match weft_ipc::request(&weft_ipc::socket_path(), &Request::Status).await {
+        Ok(Response::Error(Failure::AccessDenied)) => DaemonState::Denied,
+        Ok(_) => DaemonState::Ok,
+        Err(error) => match error.kind() {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => DaemonState::Missing,
+            std::io::ErrorKind::PermissionDenied => DaemonState::Denied,
+            _ => DaemonState::Other,
+        },
+    }
+}
+
+#[tauri::command]
+async fn repair() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(repair::run).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -173,7 +202,9 @@ fn main() {
             save_report,
             settings,
             set_settings,
-            open_release
+            open_release,
+            daemon_state,
+            repair
         ])
         .setup(move |app| {
             app.manage(SettingsStore::load(app.handle()));
