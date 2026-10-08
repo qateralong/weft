@@ -46,6 +46,21 @@ fn cli(l: &Localizer) -> Command {
             vec![positional(l, "link", "arg-link"), option(l, "nickname", 'n', "arg-nickname")],
         ))
         .subcommand(command(l, "down", "cmd-down", vec![]))
+        .subcommand(command(
+            l,
+            "host",
+            "cmd-host",
+            vec![
+                positional(l, "mode", "arg-mode").required(true).value_parser(["on", "off"]),
+                Arg::new("port")
+                    .long("port")
+                    .value_name(l.tr("value-port"))
+                    .value_parser(clap::value_parser!(u16))
+                    .help(l.tr("arg-port"))
+                    .help_heading(l.tr("help-options")),
+                option(l, "address", 'a', "arg-address"),
+            ],
+        ))
         .subcommand(command(l, "remove", "cmd-remove", vec![positional(l, "host", "arg-host").required(true)]))
         .subcommand(command(l, "create", "cmd-create", vec![name(), password()]))
         .subcommand(command(
@@ -173,6 +188,12 @@ fn run(l: &Localizer, matches: &ArgMatches) -> Result<(), String> {
     let (request, done) = match matches.subcommand() {
         Some(("up", m)) => (Request::Up { link: arg(m, "link"), nickname: arg(m, "nickname") }, Some(l.tr("done-up"))),
         Some(("down", _)) => (Request::Down, Some(l.tr("done-down"))),
+        Some(("host", m)) => {
+            let enabled = arg(m, "mode").as_deref() == Some("on");
+            let request =
+                Request::Host { enabled, port: m.get_one::<u16>("port").copied(), address: arg(m, "address") };
+            (request, (!enabled).then(|| l.tr("done-host-off")))
+        }
         Some(("remove", m)) => {
             let host = arg(m, "host").unwrap_or_default();
             let done = l.tr_args("done-remove", &[("server", &host)]);
@@ -294,6 +315,12 @@ fn run(l: &Localizer, matches: &ArgMatches) -> Result<(), String> {
         Response::Ok => {
             if let Some(done) = done {
                 println!("{done}");
+            }
+            if let Request::Host { enabled: true, .. } = request
+                && let Ok(Response::Status(status)) = runtime.block_on(weft_ipc::request(&path, &Request::Status))
+                && let Some(host) = &status.host
+            {
+                print_host(l, host);
             }
             Ok(())
         }
@@ -426,6 +453,10 @@ fn print_status(l: &Localizer, status: &Status) {
         }
     };
     print_rows(&[(l.tr("status-nickname"), status.nickname.clone()), (l.tr("status-key"), status.public_key.clone())]);
+    if let Some(host) = &status.host {
+        println!();
+        print_host(l, host);
+    }
     if status.servers.is_empty() {
         println!();
         print_rows(&[(l.tr("status-server"), none.clone())]);
@@ -447,6 +478,19 @@ fn print_status(l: &Localizer, status: &Status) {
         }
         print_networks(l, &server.networks);
     }
+}
+
+fn print_host(l: &Localizer, host: &weft_ipc::HostStatus) {
+    let reach = match host.reach {
+        weft_ipc::Reach::Public => "host-reach-public",
+        weft_ipc::Reach::Local => "host-reach-local",
+        weft_ipc::Reach::Behind => "host-reach-behind",
+    };
+    println!("{}", l.tr("host-title"));
+    println!("  {}", host.link.as_deref().unwrap_or("—"));
+    println!("  {}", l.tr(reach));
+    let id = if host.mapped { "host-mapped" } else { "host-not-mapped" };
+    println!("  {}", l.tr_args(id, &[("port", &host.port.to_string())]));
 }
 
 fn print_networks(l: &Localizer, networks: &[NetworkStatus]) {

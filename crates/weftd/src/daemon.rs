@@ -8,8 +8,8 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, sleep_until};
 use weft_ipc::{
-    Connection, DeviceInfo, Diagnostics, Failure, InviteInfo, MemberStatus, NetworkStatus, PeerDiagnostics, PeerLink,
-    PortMapping, Request, Response, ServerDiagnostics, ServerStatus, Status,
+    Connection, DeviceInfo, Diagnostics, Failure, HostStatus, InviteInfo, MemberStatus, NetworkStatus, PeerDiagnostics,
+    PeerLink, PortMapping, Request, Response, ServerDiagnostics, ServerStatus, Status,
 };
 use weft_mesh::{Mesh, Output, PeerConfig, ServerId, SocketId};
 use weft_portmap::{Mapped, PortMapper};
@@ -24,6 +24,7 @@ use weft_tun::{DEFAULT_MTU, Dns, Route, Tun, TunConfig};
 
 use crate::control::{Control, ControlEvent};
 use crate::dns;
+use crate::host::Hosted;
 use crate::ipc::Command;
 use crate::settings::{ServerEntry, Settings, SettingsFile, Transport, default_nickname};
 
@@ -37,6 +38,7 @@ pub struct Options {
     pub tun_name: String,
     pub port: Option<u16>,
     pub echo: bool,
+    pub state_dir: std::path::PathBuf,
 }
 
 /// One coordination server and the connection to it.
@@ -80,27 +82,12 @@ impl Session {
     }
 
     fn host(&self) -> String {
-        let host = match &self.link.host {
-            Host::Domain(name) => name.clone(),
-            Host::Ipv4(ip) => ip.to_string(),
-            Host::Ipv6(ip) => format!("[{ip}]"),
-        };
-        format!("{host}:{}", self.link.port)
+        link_host(&self.link)
     }
 
     /// How well `selector` names this server: 2 for its link or `host:port`, 1 for the host alone.
     fn matches(&self, selector: &str) -> u8 {
-        let selector = selector.trim();
-        let host = self.host();
-        let bare = host.rsplit_once(':').map_or(host.as_str(), |(bare, _)| bare);
-        if selector.eq_ignore_ascii_case(&host) || selector.parse::<Link>().is_ok_and(|link| link.server() == self.link)
-        {
-            2
-        } else if selector.eq_ignore_ascii_case(bare) {
-            1
-        } else {
-            0
-        }
+        link_matches(&self.link, selector)
     }
 
     fn has_network(&self, name: &str) -> bool {
@@ -127,6 +114,8 @@ impl Session {
 
 pub struct Daemon {
     keypair: Arc<StaticKeypair>,
+    state_dir: std::path::PathBuf,
+    hosted: Option<Hosted>,
     echo: bool,
     settings: Settings,
     settings_file: SettingsFile,
@@ -210,6 +199,8 @@ impl Daemon {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let mut daemon = Self {
             keypair: Arc::new(keypair),
+            state_dir: options.state_dir,
+            hosted: None,
             echo: options.echo,
             settings,
             settings_file,
@@ -252,6 +243,11 @@ impl Daemon {
                 daemon.connect(index);
             }
         }
+        if daemon.settings.host.enabled
+            && let Err(error) = daemon.start_hosting().await
+        {
+            tracing::error!(%error, "cannot start the hosted server");
+        }
         Ok(daemon)
     }
 
@@ -274,7 +270,7 @@ impl Daemon {
             let now = std::time::Instant::now();
             match wake {
                 Wake::Command(None) => return,
-                Wake::Command(Some(command)) => self.on_command(command),
+                Wake::Command(Some(command)) => self.on_command(command).await,
                 Wake::Control(Some((generation, event))) => {
                     let found = self.sessions.iter().position(|session| session.generation == generation);
                     if let Some(index) = found {
@@ -333,13 +329,14 @@ impl Daemon {
         [mesh].into_iter().chain(sessions).flatten().min().unwrap_or_else(|| Instant::now() + IDLE_TICK)
     }
 
-    fn on_command(&mut self, command: Command) {
+    async fn on_command(&mut self, command: Command) {
         let Command { request, server, reply } = command;
         let server = server.as_deref();
         match request {
             Request::Up { link, nickname } => self.up(link, nickname, server, reply),
             Request::Down => self.down(server, reply),
             Request::Remove => self.remove(server, reply),
+            Request::Host { enabled, port, address } => self.host(enabled, port, address, reply).await,
             Request::Status => {
                 let _ = reply.send(Response::Status(self.status()));
             }
@@ -426,9 +423,12 @@ impl Daemon {
     /// only one there is.
     fn target(&self, server: Option<&str>, network: Option<&str>) -> Result<usize, Failure> {
         if let Some(selector) = server {
-            let best = self.sessions.iter().map(|session| session.matches(selector)).max().unwrap_or(0);
-            let found: Vec<usize> =
-                (0..self.sessions.len()).filter(|&i| best > 0 && self.sessions[i].matches(selector) == best).collect();
+            let score = |i: usize| {
+                let public = if self.is_hosted(i) { link_matches(&self.public_link(i), selector) } else { 0 };
+                self.sessions[i].matches(selector).max(public)
+            };
+            let best = (0..self.sessions.len()).map(score).max().unwrap_or(0);
+            let found: Vec<usize> = (0..self.sessions.len()).filter(|&i| best > 0 && score(i) == best).collect();
             return match found[..] {
                 [index] => Ok(index),
                 [] => Err(Failure::ServerNotFound),
@@ -524,7 +524,13 @@ impl Daemon {
             (None, None) => None,
         };
         if self.sessions.is_empty() {
-            let _ = reply.send(Response::Error(Failure::NoServer));
+            let response = if renamed {
+                self.save_settings();
+                Response::Ok
+            } else {
+                Response::Error(Failure::NoServer)
+            };
+            let _ = reply.send(response);
             return;
         }
         let chosen: Vec<usize> = match chosen {
@@ -580,11 +586,96 @@ impl Daemon {
                 return;
             }
         };
+        if self.is_hosted(index) {
+            self.stop_hosting();
+            let _ = reply.send(Response::Ok);
+            return;
+        }
         self.disconnect_session(index);
         self.sessions.remove(index);
         self.save_settings();
         self.refresh();
         let _ = reply.send(Response::Ok);
+    }
+
+    async fn host(
+        &mut self,
+        enabled: bool,
+        port: Option<u16>,
+        address: Option<String>,
+        reply: oneshot::Sender<Response>,
+    ) {
+        if let Some(address) = address {
+            let address = address.trim().to_string();
+            self.settings.host.address = (!address.is_empty()).then_some(address);
+        }
+        if !enabled {
+            self.stop_hosting();
+            let _ = reply.send(Response::Ok);
+            return;
+        }
+        if let Some(port) = port
+            && port != self.settings.host.port
+        {
+            self.settings.host.port = port;
+            if self.hosted.is_some() {
+                self.stop_hosting();
+            }
+        }
+        if self.hosted.is_none()
+            && let Err(error) = self.start_hosting().await
+        {
+            tracing::error!(%error, "cannot host a server");
+            self.save_settings();
+            let _ = reply.send(Response::Error(Failure::CannotHost));
+            return;
+        }
+        self.save_settings();
+        let _ = reply.send(Response::Ok);
+    }
+
+    /// Starts the hosted server and connects this device to it.
+    async fn start_hosting(&mut self) -> std::io::Result<()> {
+        let hosted = Hosted::start(&self.state_dir.join("loom"), self.settings.host.port).await?;
+        self.settings.host.enabled = true;
+        self.settings.host.port = hosted.port;
+        let link = hosted.local_link();
+        self.hosted = Some(hosted);
+        let index = self.session_for(&link);
+        self.sessions[index].up = true;
+        if self.sessions[index].control.is_none() {
+            self.connect(index);
+        }
+        self.save_settings();
+        Ok(())
+    }
+
+    fn stop_hosting(&mut self) {
+        if let Some(hosted) = self.hosted.take() {
+            let link = hosted.local_link();
+            if let Some(index) = self.sessions.iter().position(|session| session.link == link) {
+                self.disconnect_session(index);
+                self.sessions.remove(index);
+            }
+        }
+        self.settings.host.enabled = false;
+        self.save_settings();
+        self.refresh();
+    }
+
+    fn is_hosted(&self, index: usize) -> bool {
+        self.hosted.as_ref().is_some_and(|hosted| self.sessions[index].link == hosted.local_link())
+    }
+
+    /// The link others use: the shared one for the hosted server.
+    fn public_link(&self, index: usize) -> Link {
+        match &self.hosted {
+            Some(hosted) if self.is_hosted(index) => hosted
+                .share(self.settings.host.address.as_deref())
+                .0
+                .unwrap_or_else(|| self.sessions[index].link.clone()),
+            _ => self.sessions[index].link.clone(),
+        }
     }
 
     fn redeem(&mut self, link: String, reply: oneshot::Sender<Response>) {
@@ -998,21 +1089,36 @@ impl Daemon {
     }
 
     fn status(&self) -> Status {
-        let servers = self
-            .sessions
-            .iter()
-            .map(|session| ServerStatus {
-                server: session.link.to_string(),
-                host: session.host(),
-                connection: session.connection,
-                address: session.address(),
-                networks: self.networks(session),
+        let servers = (0..self.sessions.len())
+            .map(|index| {
+                let session = &self.sessions[index];
+                let link = self.public_link(index);
+                ServerStatus {
+                    server: link.to_string(),
+                    host: link_host(&link),
+                    connection: session.connection,
+                    address: session.address(),
+                    networks: self.networks(session),
+                    hosted: self.is_hosted(index),
+                }
             })
             .collect();
+        let host = self.hosted.as_ref().map(|hosted| {
+            let address = self.settings.host.address.clone();
+            let (link, reach) = hosted.share(address.as_deref());
+            HostStatus {
+                link: link.map(|link| link.to_string()),
+                port: hosted.port,
+                reach,
+                mapped: hosted.mapped(),
+                address,
+            }
+        });
         Status {
             nickname: self.settings.nickname.clone().unwrap_or_else(default_nickname),
             public_key: self.keypair.public().to_string(),
             servers,
+            host,
         }
     }
 
@@ -1151,7 +1257,7 @@ impl Daemon {
     }
 
     fn invite_info(&self, index: usize, invite: Invite) -> InviteInfo {
-        let link = Link { invite: Some(invite.code.clone()), ..self.sessions[index].link.clone() }.to_string();
+        let link = Link { invite: Some(invite.code.clone()), ..self.public_link(index) }.to_string();
         InviteInfo {
             code: invite.code,
             link: Some(link),
@@ -1173,6 +1279,29 @@ impl Daemon {
             tracing::error!(path = %self.settings_file.path().display(), %error, "cannot save settings");
         }
     }
+}
+
+/// How well `selector` names the server: 2 for its link or `host:port`, 1 for the host alone.
+fn link_matches(link: &Link, selector: &str) -> u8 {
+    let selector = selector.trim();
+    let host = link_host(link);
+    let bare = host.rsplit_once(':').map_or(host.as_str(), |(bare, _)| bare);
+    if selector.eq_ignore_ascii_case(&host) || selector.parse::<Link>().is_ok_and(|other| other.server() == *link) {
+        2
+    } else if selector.eq_ignore_ascii_case(bare) {
+        1
+    } else {
+        0
+    }
+}
+
+fn link_host(link: &Link) -> String {
+    let host = match &link.host {
+        Host::Domain(name) => name.clone(),
+        Host::Ipv4(ip) => ip.to_string(),
+        Host::Ipv6(ip) => format!("[{ip}]"),
+    };
+    format!("{host}:{}", link.port)
 }
 
 fn bind_v6(port: u16) -> std::io::Result<UdpSocket> {

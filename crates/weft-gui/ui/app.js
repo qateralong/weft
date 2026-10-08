@@ -313,6 +313,10 @@ function serverDialog() {
       el('div', { class: 'section' }, t('gui-servers')),
       el('div', { class: 'list' }, servers),
       el('div', { style: 'margin-top:12px' }, linkLabel, add),
+      el('div', { class: 'section' }, t('gui-host-title')),
+      status?.host
+        ? el('button', { onclick: () => { document.getElementById('dialog').close(); setTimeout(() => hostDialog(status.host), 170); } }, t('gui-host-advanced'))
+        : el('button', { onclick: () => act('host', { enabled: true, port: null, address: null }, t('gui-host-started')) }, icon('plus'), t('gui-host-create')),
       el('div', { class: 'section' }, t('gui-app')),
       settingToggle('gui-notifications', 'notifications'), settingToggle('gui-check-updates', 'updates'),
     ];
@@ -564,15 +568,65 @@ function renderHeader() {
 }
 
 function renderSetup() {
-  const [linkLabel, link] = field('gui-server-link', { placeholder: 'weft://…' });
   const [nickLabel, nickname] = field('gui-nickname', { value: status?.nickname ?? '' });
+  const [linkLabel, link] = field('gui-server-link', { placeholder: 'weft://…' });
+  const name = () => nickname.value.trim() || null;
   const connect = el('button', {
     class: 'primary',
-    onclick: () => act('up', { link: link.value.trim(), nickname: nickname.value.trim() || null }),
-  }, icon('power'), t('gui-connect'));
+    onclick: () => act('up', { link: link.value.trim(), nickname: name() }),
+  }, icon('join'), t('gui-connect'));
+  const host = el('button', {
+    onclick: async (event) => {
+      event.currentTarget.disabled = true;
+      if (name()) await act('up', { link: null, nickname: name() });
+      await act('host', { enabled: true, port: null, address: null }, t('gui-host-started'));
+    },
+  }, icon('plus'), t('gui-host-create'));
   return el('div', { class: 'card hero enter' },
     el('img', { src: 'icon.png', alt: '' }),
-    el('h2', {}, t('gui-setup-title')), el('p', {}, t('gui-setup-hint')), linkLabel, nickLabel, connect);
+    el('h2', {}, t('gui-welcome')), nickLabel,
+    el('div', { class: 'choice' },
+      el('div', { class: 'section' }, t('gui-setup-title')), el('p', {}, t('gui-setup-hint')), linkLabel, connect),
+    el('div', { class: 'choice' },
+      el('div', { class: 'section' }, t('gui-host-title')), el('p', {}, t('gui-host-hint')), host));
+}
+
+function hostReach(host) {
+  return t({ public: 'host-reach-public', local: 'host-reach-local', behind: 'host-reach-behind' }[host.reach]);
+}
+
+function renderHost(host) {
+  const link = host.link ?? '';
+  return el('div', { class: 'card pad host enter' },
+    el('div', { class: 'host-head' },
+      el('b', { class: 'grow' }, t('gui-host-yours')),
+      el('button', { class: 'icon', title: t('gui-host-advanced'), onclick: () => hostDialog(host) }, icon('gear'))),
+    el('div', { class: 'row link-row' },
+      el('span', { class: 'grow mono' }, link),
+      el('button', { class: 'small primary', onclick: () => copy(link) }, t('gui-copy'))),
+    el('p', { class: 'muted' }, el('span', { class: `dot ${host.reach === 'public' ? 'connected' : 'connecting'}` }), ' ', hostReach(host)),
+    !(host.reach === 'public' && host.mapped) && el('p', { class: 'muted' },
+      t(host.mapped ? 'host-mapped' : 'host-not-mapped', { port: host.port })));
+}
+
+function hostDialog(host) {
+  const [addressLabel, address] = field('gui-host-address', { value: host.address ?? '', placeholder: t('gui-host-address-auto') });
+  const [portLabel, port] = field('gui-host-port', { type: 'number', min: 1, max: 65535, value: host.port });
+  openDialog(t('gui-host-advanced'), () => [
+    el('p', { class: 'muted' }, t('gui-host-advanced-hint')), addressLabel, portLabel,
+    el('div', { class: 'section' }, t('gui-host-stop')),
+    dangerButton(t('gui-host-stop'), async () => {
+      await act('host', { enabled: false, port: null, address: null }, t('done-host-off'));
+      document.getElementById('dialog').close();
+    }),
+  ], [{
+    label: t('gui-save'), primary: true,
+    run: async () => {
+      const value = Number(port.value);
+      await request('host', { enabled: true, port: value > 0 ? value : null, address: address.value.trim() });
+      await poll();
+    },
+  }]);
 }
 
 function toggleNetwork(card, name) {
@@ -657,7 +711,7 @@ function render() {
     return;
   }
   if (!status) return;
-  if (!status.servers.length) {
+  if (!status.servers.length && !status.host) {
     main.replaceChildren(renderSetup());
     return;
   }
@@ -672,13 +726,13 @@ function render() {
   const networks = status.servers.map((server) => [
     several && el('div', { class: 'server-head' },
       el('span', { class: `dot ${server.connection}` }),
-      el('span', { class: 'mono grow' }, server.host),
+      el('span', { class: 'mono grow' }, server.hosted ? t('gui-host-yours') : server.host),
       server.address && el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(server.address) }, server.address)),
     server.networks.map((network) => renderNetwork({ ...network, server: server.host })),
   ]);
   const empty = status.servers.every((server) => !server.networks.length) && overall(status) === 'connected'
     && el('div', { class: 'card pad enter' }, el('p', {}, t('gui-no-networks')));
-  main.replaceChildren(...nodes([banner, toolbar, networks, empty]));
+  main.replaceChildren(...nodes([banner, status.host && renderHost(status.host), toolbar, networks, empty]));
   seen = fresh;
 }
 

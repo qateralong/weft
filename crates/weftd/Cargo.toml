@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
 idna.workspace = true
+loom.workspace = true
 serde.workspace = true
 socket2.workspace = true
 thiserror.workspace = true

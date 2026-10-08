@@ -29,6 +29,12 @@ pub enum Request {
     Down,
     /// Forgets the selected server.
     Remove,
+    /// Runs a server inside the daemon; `port` 0 picks one, an empty `address` clears it.
+    Host {
+        enabled: bool,
+        port: Option<u16>,
+        address: Option<String>,
+    },
     Create {
         name: String,
         password: String,
@@ -174,6 +180,7 @@ pub enum Failure {
     ServerNotFound,
     AmbiguousNetwork,
     AccessDenied,
+    CannotHost,
     Internal,
 }
 
@@ -208,6 +215,7 @@ impl Failure {
             Failure::ServerNotFound => "error-server-not-found",
             Failure::AmbiguousNetwork => "error-ambiguous-network",
             Failure::AccessDenied => "error-access-denied",
+            Failure::CannotHost => "error-cannot-host",
             Failure::Internal => "error-internal",
         }
     }
@@ -218,6 +226,33 @@ pub struct Status {
     pub nickname: String,
     pub public_key: String,
     pub servers: Vec<ServerStatus>,
+    /// The server this device hosts, if any.
+    #[serde(default)]
+    pub host: Option<HostStatus>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct HostStatus {
+    /// The link for others to join.
+    pub link: Option<String>,
+    pub port: u16,
+    pub reach: Reach,
+    /// Whether the router forwards the port automatically.
+    pub mapped: bool,
+    /// The address set by the user, if any.
+    pub address: Option<String>,
+}
+
+/// Who can reach a hosted server.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Reach {
+    /// The internet: a public address is known.
+    Public,
+    /// Only the local network: the port is not forwarded.
+    Local,
+    /// Only the local network: the router itself is behind the provider's NAT.
+    Behind,
 }
 
 impl Status {
@@ -236,6 +271,9 @@ pub struct ServerStatus {
     pub connection: Connection,
     pub address: Option<Ipv4Addr>,
     pub networks: Vec<NetworkStatus>,
+    /// Whether this device hosts the server.
+    #[serde(default)]
+    pub hosted: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

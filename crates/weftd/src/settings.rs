@@ -22,7 +22,19 @@ pub struct Settings {
     pub dns: bool,
     /// How the control connection to the server looks on the wire.
     pub transport: Transport,
+    pub host: HostSettings,
     pub servers: Vec<ServerEntry>,
+}
+
+/// A server hosted by the daemon.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostSettings {
+    pub enabled: bool,
+    /// 0 picks a free port; the chosen one is kept so links stay valid.
+    pub port: u16,
+    /// Host name or address to put in links, when the automatic one is wrong.
+    pub address: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +69,7 @@ impl Default for Settings {
             multicast_groups: vec![MINECRAFT_GROUP],
             dns: true,
             transport: Transport::Tls,
+            host: HostSettings::default(),
             servers: Vec::new(),
         }
     }

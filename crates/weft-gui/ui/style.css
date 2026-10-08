@@ -133,7 +133,13 @@ main { padding: 14px 16px 28px; }
 .hero { text-align: center; padding: 28px 22px; }
 .hero img { width: 72px; height: 72px; margin-bottom: 10px; filter: drop-shadow(0 6px 14px rgba(47, 127, 181, .35)); }
 .hero label { text-align: left; }
-.hero button.primary { width: 100%; padding: 10px; font-size: 15px; }
+.hero button { width: 100%; padding: 10px; font-size: 15px; }
+.hero .choice { text-align: left; margin-top: 18px; padding-top: 4px; border-top: 1px solid var(--line); }
+.hero .choice p { margin-bottom: 12px; }
+.card.host .host-head { display: flex; align-items: center; margin-bottom: 8px; }
+.card.host .link-row { padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); margin-bottom: 8px; }
+.card.host .link-row .mono { white-space: normal; word-break: break-all; }
+.card.host p { margin: 4px 0 0; display: flex; gap: 6px; align-items: center; }
 
 .server-head {
   display: flex;

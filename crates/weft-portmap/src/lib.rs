@@ -43,15 +43,27 @@ impl Mapped {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    Udp,
+    Tcp,
+}
+
 pub struct PortMapper {
     rx: watch::Receiver<Option<Mapped>>,
     task: JoinHandle<()>,
 }
 
 impl PortMapper {
+    /// Maps a UDP port, accepting any external port.
     pub fn spawn(local_port: u16) -> Self {
+        Self::spawn_with(local_port, Transport::Udp, false)
+    }
+
+    /// With `exact`, only a mapping to the same external port counts, as servers announce their port.
+    pub fn spawn_with(local_port: u16, transport: Transport, exact: bool) -> Self {
         let (tx, rx) = watch::channel(None);
-        let task = tokio::spawn(run(local_port, tx));
+        let task = tokio::spawn(run(local_port, transport, exact, tx));
         Self { rx, task }
     }
 
@@ -72,13 +84,20 @@ impl Drop for PortMapper {
 
 enum Lease {
     Pmp(PortMapping),
-    Upnp { gateway: igd_next::aio::Gateway<igd_next::aio::tokio::Tokio>, local: SocketAddrV4, port: u16 },
+    Upnp {
+        gateway: igd_next::aio::Gateway<igd_next::aio::tokio::Tokio>,
+        local: SocketAddrV4,
+        port: u16,
+        protocol: PortMappingProtocol,
+    },
 }
 
-async fn run(local_port: u16, tx: watch::Sender<Option<Mapped>>) {
+async fn run(local_port: u16, transport: Transport, exact: bool, tx: watch::Sender<Option<Mapped>>) {
     let Some(local_port) = NonZeroU16::new(local_port) else { return };
     loop {
-        match map(local_port).await {
+        let result =
+            map(local_port, transport, exact).await.filter(|(_, mapped)| !exact || mapped.port == local_port.get());
+        match result {
             Some((mut lease, mapped)) => {
                 tracing::info!(port = mapped.port, ip = ?mapped.ip, "port mapping created");
                 tx.send_replace(Some(mapped));
@@ -100,7 +119,7 @@ async fn run(local_port: u16, tx: watch::Sender<Option<Mapped>>) {
     }
 }
 
-async fn map(local_port: NonZeroU16) -> Option<(Lease, Mapped)> {
+async fn map(local_port: NonZeroU16, transport: Transport, exact: bool) -> Option<(Lease, Mapped)> {
     let local = local_ipv4()?;
     if let Some(gateway) = gateway_ipv4() {
         let options = PortMappingOptions {
@@ -112,9 +131,11 @@ async fn map(local_port: NonZeroU16) -> Option<(Lease, Mapped)> {
                 max_retry_timeout: Some(Duration::from_secs(1)),
             }),
         };
-        let result =
-            PortMapping::new(GatewayAddress::IpV4(gateway), local.into(), InternetProtocol::Udp, local_port, options)
-                .await;
+        let protocol = match transport {
+            Transport::Udp => InternetProtocol::Udp,
+            Transport::Tcp => InternetProtocol::Tcp,
+        };
+        let result = PortMapping::new(GatewayAddress::IpV4(gateway), local.into(), protocol, local_port, options).await;
         match result {
             Ok(mapping) => {
                 let (ip, protocol) = match mapping.mapping_type() {
@@ -132,22 +153,34 @@ async fn map(local_port: NonZeroU16) -> Option<(Lease, Mapped)> {
     options.timeout = Some(Duration::from_secs(3));
     let gateway = search_gateway(options).await.ok()?;
     let local = SocketAddrV4::new(local, local_port.get());
-    let port = gateway
-        .add_any_port(PortMappingProtocol::UDP, SocketAddr::V4(local), LIFETIME, DESCRIPTION)
-        .await
-        .map_err(|error| tracing::debug!(%error, "upnp mapping failed"))
-        .ok()?;
+    let protocol = match transport {
+        Transport::Udp => PortMappingProtocol::UDP,
+        Transport::Tcp => PortMappingProtocol::TCP,
+    };
+    let port = if exact {
+        gateway
+            .add_port(protocol, local_port.get(), SocketAddr::V4(local), LIFETIME, DESCRIPTION)
+            .await
+            .map(|()| local_port.get())
+            .map_err(|error| error.to_string())
+    } else {
+        gateway
+            .add_any_port(protocol, SocketAddr::V4(local), LIFETIME, DESCRIPTION)
+            .await
+            .map_err(|error| error.to_string())
+    }
+    .map_err(|error| tracing::debug!(%error, "upnp mapping failed"))
+    .ok()?;
     let ip = gateway.get_external_ip().await.ok();
-    Some((Lease::Upnp { gateway, local, port }, Mapped { port, ip, protocol: Protocol::Upnp }))
+    Some((Lease::Upnp { gateway, local, port, protocol }, Mapped { port, ip, protocol: Protocol::Upnp }))
 }
 
 async fn renew(lease: &mut Lease) -> bool {
     match lease {
         Lease::Pmp(mapping) => mapping.renew().await.is_ok(),
-        Lease::Upnp { gateway, local, port } => gateway
-            .add_port(PortMappingProtocol::UDP, *port, SocketAddr::V4(*local), LIFETIME, DESCRIPTION)
-            .await
-            .is_ok(),
+        Lease::Upnp { gateway, local, port, protocol } => {
+            gateway.add_port(*protocol, *port, SocketAddr::V4(*local), LIFETIME, DESCRIPTION).await.is_ok()
+        }
     }
 }
 

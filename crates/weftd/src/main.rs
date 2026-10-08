@@ -2,6 +2,7 @@ mod control;
 mod daemon;
 mod dns;
 mod echo;
+mod host;
 mod ipc;
 mod logs;
 mod service;
@@ -123,7 +124,12 @@ fn run(options: Options, shutdown: impl Future<Output = ()>) -> Result<(), BoxEr
     runtime.block_on(async {
         let listener = ipc::bind(&socket)?;
         let (commands_tx, commands_rx) = tokio::sync::mpsc::channel(64);
-        let daemon_options = daemon::Options { tun_name: options.tun, port: options.port, echo: options.echo };
+        let daemon_options = daemon::Options {
+            tun_name: options.tun,
+            port: options.port,
+            echo: options.echo,
+            state_dir: state_dir.clone(),
+        };
         let daemon = daemon::Daemon::new(keypair, settings, daemon_options, commands_rx).await?;
         tokio::spawn(ipc::serve(listener, commands_tx));
         tokio::select! {

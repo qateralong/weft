@@ -175,6 +175,18 @@ sleep 3
 ping_b 2
 weft a remove 10.99.0.1:7444
 [ "$(weft a status | grep -c '^Server')" = 1 ]
+echo "--- a server hosted by the app"
+weft a host on --address 10.99.0.2 | tee "$WORK/host.txt"
+hosted=$(grep -o 'weft://[^ ]*' "$WORK/host.txt" | head -1)
+case "$hosted" in weft://10.99.0.2[:#]*) ;; *) exit 1 ;; esac
+weft b up "$hosted"
+sleep 1
+weft a create home --password secret --server "$hosted"
+weft b join home --password secret --server "$hosted"
+sleep 3
+ping_b 2
+weft a host off
+weft a status | grep -q 'Your server' && exit 1
 echo "--- all checks passed"
 if [ -n "${SHOW_LOGS:-}" ]; then
     show_logs

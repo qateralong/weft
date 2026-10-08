@@ -180,7 +180,9 @@ mod tests {
         Status {
             nickname: "me".into(),
             public_key: String::new(),
+            host: None,
             servers: vec![ServerStatus {
+                hosted: false,
                 server: "weft://example.com".into(),
                 host: "example.com:443".into(),
                 connection,
