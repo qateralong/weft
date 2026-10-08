@@ -470,7 +470,15 @@ fn print_status(l: &Localizer, status: &Status) {
         println!();
         print_rows(&[
             (l.tr("status-server"), server.host.clone()),
-            (l.tr("status-state"), l.tr(state)),
+            (
+                l.tr("status-state"),
+                match server.latency_ms {
+                    Some(ms) if server.connection == Connection::Connected => {
+                        l.tr_args("status-state-latency", &[("state", &l.tr(state)), ("ms", &ms.to_string())])
+                    }
+                    _ => l.tr(state),
+                },
+            ),
             (l.tr("status-address"), server.address.map_or_else(|| none.clone(), |a| a.to_string())),
         ]);
         if server.networks.is_empty() && server.connection == Connection::Connected {

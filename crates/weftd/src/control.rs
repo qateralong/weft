@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -17,15 +17,21 @@ use weft_session::{StaticKeypair, tls};
 use crate::settings::Transport;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const PING_INTERVAL: Duration = Duration::from_secs(30);
+const PING_INTERVAL: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const HELLO_ID: u32 = u32::MAX;
+const PING_ID: u32 = u32::MAX - 1;
 
 #[derive(Debug)]
 pub enum ControlEvent {
-    Connected { welcome: Welcome, server: SocketAddr },
+    Connected {
+        welcome: Welcome,
+        server: SocketAddr,
+    },
     Refused(ErrorCode),
     Message(ServerMessage),
+    /// Round trip of a ping over the control channel.
+    Latency(Duration),
     Closed(String),
 }
 
@@ -142,20 +148,25 @@ async fn run(
     }
 
     let reader_events = events.clone();
+    let ping_sent: Arc<Mutex<Option<Instant>>> = Arc::default();
+    let reader_ping = ping_sent.clone();
     let mut reader_task = AbortOnDrop(tokio::spawn(async move {
         loop {
             let bytes = timeout(IDLE_TIMEOUT, io::read_message(&mut reader, &mut receiver))
                 .await
                 .map_err(|_| Error::Timeout)??;
             let message: ServerMessage = control::decode(&bytes)?;
-            if reader_events.send((generation, ControlEvent::Message(message))).is_err() {
+            let event = match reader_ping.lock().unwrap().take_if(|_| message.reply_to == PING_ID) {
+                Some(sent) => ControlEvent::Latency(sent.elapsed()),
+                None => ControlEvent::Message(message),
+            };
+            if reader_events.send((generation, event)).is_err() {
                 return Ok::<_, Error>(());
             }
         }
     }));
 
     let mut ping = tokio::time::interval(PING_INTERVAL);
-    ping.tick().await;
     loop {
         let message = tokio::select! {
             result = &mut reader_task.0 => return result.unwrap_or(Ok(())),
@@ -163,7 +174,10 @@ async fn run(
                 Some(command) => command,
                 None => return Ok(()),
             },
-            _ = ping.tick() => ClientMessage { id: 0, kind: Some(ClientKind::Ping(Empty {})) },
+            _ = ping.tick() => {
+                *ping_sent.lock().unwrap() = Some(Instant::now());
+                ClientMessage { id: PING_ID, kind: Some(ClientKind::Ping(Empty {})) }
+            }
         };
         writer.write_all(&sender.seal(&control::encode(&message))?).await?;
     }

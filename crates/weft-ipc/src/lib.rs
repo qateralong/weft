@@ -272,6 +272,9 @@ pub struct ServerStatus {
     /// `host:port`, for display and for selecting the server.
     pub host: String,
     pub connection: Connection,
+    /// Round trip to the server over the control channel.
+    #[serde(default)]
+    pub latency_ms: Option<u32>,
     pub address: Option<Ipv4Addr>,
     pub networks: Vec<NetworkStatus>,
     /// Whether this device hosts the server.

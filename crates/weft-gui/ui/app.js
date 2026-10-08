@@ -192,19 +192,30 @@ function overall(current) {
   return states.includes('connecting') ? 'connecting' : 'disconnected';
 }
 
-/** The server the app is set up around, and which kind it is. */
-function primary(current) {
+/** Which of the three kinds a server is. */
+function kindOf(server) {
+  if (server.hosted) return 'local';
+  return server.public ? 'online' : 'vps';
+}
+
+/** Servers to show, with the hosted one even before the daemon connects to it. */
+function serverList(current) {
   const servers = current?.servers ?? [];
-  const hosted = servers.find((server) => server.hosted);
-  if (hosted || current?.host) return { mode: 'local', server: hosted ?? null };
-  const pub = servers.find((server) => server.public);
-  if (pub) return { mode: 'online', server: pub };
-  if (servers.length) return { mode: 'vps', server: servers[0] };
-  return null;
+  if (current?.host && !servers.some((server) => server.hosted)) {
+    return [{ server: 'local', host: '127.0.0.1', connection: 'connecting', networks: [], hosted: true, public: false }, ...servers];
+  }
+  return servers;
+}
+
+/** Modes that cannot be added twice. */
+function taken(current) {
+  const kinds = new Set(serverList(current).map(kindOf));
+  kinds.delete('vps');
+  return kinds;
 }
 
 function serverName(server) {
-  if (server.public) return t('gui-public-server');
+  if (server.public) return t('gui-mode-online');
   if (server.hosted) return t('gui-mode-local');
   return server.host;
 }
@@ -212,23 +223,15 @@ function serverName(server) {
 function serverPicker() {
   const servers = status?.servers ?? [];
   if (servers.length < 2) return [null, () => null];
-  const preferred = primary(status)?.server ?? servers[0];
+  const preferred = servers.find((server) => server.connection === 'connected') ?? servers[0];
   const select = el('select', {}, servers.map((server) => el('option', { value: server.server, selected: server === preferred }, serverName(server))));
   return [el('label', {}, el('span', {}, t('gui-server')), select), () => select.value];
 }
 
-/** Makes `mode` the only server: starts it first and forgets the others once it works. */
-async function switchMode(mode, link = null) {
-  const before = new Set((status?.servers ?? []).map((server) => server.server));
+/** Adds a server next to the ones already in use. */
+async function addMode(mode, link = null) {
   if (mode === 'local') await request('host', { enabled: true, port: null, address: null });
   else await request('up', { link, nickname: null });
-  await poll();
-  const added = (server) => server.server === link || !before.has(server.server);
-  const keep = (server) => (mode === 'local' ? server.hosted : mode === 'online' ? server.public : !server.hosted && !server.public && added(server));
-  for (const server of status?.servers ?? []) {
-    if (!keep(server)) await request('remove', {}, server.server).catch(() => {});
-  }
-  if (mode !== 'local' && status?.host) await request('host', { enabled: false, port: null, address: null }).catch(() => {});
   await poll();
 }
 
@@ -298,14 +301,17 @@ function dangerButton(label, run) {
   return button;
 }
 
-function modeCards(onPick, current = null) {
+function modeCards(onPick, used = new Set()) {
   return el('div', { class: 'modes' }, Object.entries(MODES).map(([mode, info]) => el('button', {
-    class: `mode${mode === current ? ' current' : ''}`,
+    class: 'mode',
+    disabled: used.has(mode),
     onclick: () => onPick(mode),
   },
   icon(info.icon),
   el('span', { class: 'mode-text' },
-    el('b', {}, t(info.title), mode === 'online' && el('span', { class: 'tag role' }, t('gui-recommended'))),
+    el('b', {}, t(info.title),
+      used.has(mode) ? el('span', { class: 'tag' }, t('gui-added'))
+        : mode === 'online' && el('span', { class: 'tag role' }, t('gui-recommended'))),
     el('span', { class: 'muted' }, t(info.hint))))));
 }
 
@@ -318,18 +324,36 @@ function chooseMode(mode) {
   busy = t(mode === 'online' ? 'gui-busy-online' : 'gui-busy-local');
   closeDialog();
   render();
-  switchMode(mode, mode === 'online' ? status?.public_link : null)
+  addMode(mode, mode === 'online' ? status?.public_link : null)
     .then(() => toast(t(mode === 'online' ? 'gui-done-online' : 'gui-host-started')))
     .catch((error) => toast(String(error), true))
     .finally(() => { busy = null; render(); });
 }
 
-function modeDialog() {
-  const current = primary(status)?.mode ?? null;
-  openDialog(t('gui-change-server'), () => [
-    el('p', { class: 'muted' }, t('gui-change-server-hint')),
-    modeCards(chooseMode, current),
+function addServerDialog() {
+  openDialog(t('gui-add-server'), () => [
+    el('p', { class: 'muted' }, t('gui-add-server-hint')),
+    modeCards(chooseMode, taken(status)),
   ]);
+}
+
+function serverMenu(server) {
+  const local = server.hosted;
+  openDialog(serverName(server), ({ close, fail }) => {
+    const item = (label, run) => el('button', { onclick: () => { close(); setTimeout(run, 170); } }, label);
+    const link = local ? status.host?.link : server.server;
+    return el('div', { class: 'menu' },
+      local && item(t('gui-host-advanced'), hostDialog),
+      link && item(t('gui-copy-server-link'), () => copy(link)),
+      dangerButton(t(local ? 'gui-host-stop' : 'gui-server-remove'), async () => {
+        try {
+          await request(local ? 'host' : 'remove', local ? { enabled: false, port: null, address: null } : {}, local ? null : server.server);
+          toast(t('done-remove', { server: serverName(server) }));
+          close();
+          await poll();
+        } catch (e) { fail(String(e)); }
+      }));
+  });
 }
 
 function vpsDialog() {
@@ -364,7 +388,7 @@ function vpsDialog() {
         for (const node of progress.children) node.className = 'step done';
         busy = t('gui-busy-vps');
         render();
-        await switchMode('vps', link);
+        await addMode('vps', link);
         toast(t('gui-done-vps'));
         return true;
       } catch (error) {
@@ -452,17 +476,8 @@ function settingToggle(labelId, key) {
 
 function settingsDialog() {
   const [nickLabel, nickname] = field('gui-nickname', { value: status?.nickname ?? '' });
-  const current = primary(status);
   openDialog(t('gui-settings'), () => [
     nickLabel,
-    el('div', { class: 'section' }, t('gui-server')),
-    el('div', { class: 'row-line' },
-      el('span', { class: 'grow' }, current ? t(MODES[current.mode].title) : t('gui-no-server')),
-      el('button', { class: 'small', onclick: () => { closeDialog(); setTimeout(modeDialog, 170); } }, t('gui-change'))),
-    (status?.servers ?? []).length > 1 && el('div', { class: 'list' }, status.servers.map((server) => el('div', { class: 'row' },
-      el('span', { class: `dot ${server.connection}` }),
-      el('span', { class: 'grow' }, serverName(server)),
-      dangerButton(t('gui-remove'), () => act('remove', {}, t('done-remove', { server: serverName(server) }), server.server))))),
     el('div', { class: 'section' }, t('gui-app')),
     settingToggle('gui-notifications', 'notifications'),
     settingToggle('gui-check-updates', 'updates'),
@@ -729,7 +744,7 @@ function header() {
     el('button', { class: 'icon', title: t(dark ? 'gui-theme-light' : 'gui-theme-dark'), onclick: toggleTheme }, icon(dark ? 'sun' : 'moon')),
     el('button', { class: 'icon', title: t('gui-settings'), onclick: settingsDialog }, icon('gear')),
   ];
-  if (!status || !primary(status)) {
+  if (!serverList(status).length) {
     return el('header', {}, el('div', { class: 'me' }, el('div', { class: 'name' }, 'Weft')), tools);
   }
   const connection = overall(status);
@@ -764,22 +779,31 @@ function welcome() {
     modeCards(chooseMode));
 }
 
-function serverCard(current) {
-  const host = status.host;
-  const server = current.server;
-  const state = server?.connection ?? (host ? 'connecting' : 'disconnected');
-  const subtitle = current.mode === 'online' ? t('gui-mode-online-short')
-    : current.mode === 'local' ? t('gui-mode-local-short') : server?.host;
+/** Signal bars and the round trip to the server. */
+function signal(server) {
+  const ms = server.connection === 'connected' ? server.latency_ms : null;
+  const level = ms == null ? 0 : ms < 60 ? 4 : ms < 120 ? 3 : ms < 250 ? 2 : 1;
+  return el('div', { class: 'signal', title: t('gui-ping') },
+    el('span', { class: 'bars' }, [1, 2, 3, 4].map((bar) => el('i', { class: bar <= level ? `on level-${level}` : '' }))),
+    el('span', { class: 'ms' }, ms == null ? '—' : t('gui-ping-ms', { ms: ms < 1 ? '<1' : ms })));
+}
+
+function serverCard(server) {
+  const mode = kindOf(server);
+  const host = server.hosted ? status.host : null;
+  const where = mode === 'local' ? null : server.host;
   const reach = host && t({ public: 'host-reach-public', local: 'host-reach-local', behind: 'host-reach-behind' }[host.reach]);
-  return el('div', { class: 'card server-card', 'data-key': `server:${current.mode}` },
+  return el('div', { class: 'card server-card', 'data-key': `server:${server.server}` },
     el('div', { class: 'server-line' },
-      icon(MODES[current.mode].icon),
+      icon(MODES[mode].icon),
       el('div', { class: 'grow' },
-        el('b', {}, t(MODES[current.mode].title)),
-        el('div', { class: 'muted sub' }, el('span', { class: `dot ${state}` }), t(`state-${state}`), subtitle && ` · ${subtitle}`)),
-      current.mode === 'local' && el('button', { class: 'icon', title: t('gui-host-advanced'), onclick: hostDialog }, icon('gear')),
-      el('button', { class: 'small', onclick: modeDialog }, t('gui-change'))),
-    current.mode === 'local' && host && [
+        el('b', {}, t(MODES[mode].title)),
+        el('div', { class: 'muted sub' }, el('span', { class: `dot ${server.connection}` }), t(`state-${server.connection}`),
+          server.address && el('span', { class: 'mono address', title: t('gui-copy'), onclick: () => copy(server.address) }, server.address)),
+        where && el('div', { class: 'muted info mono' }, where)),
+      signal(server),
+      el('button', { class: 'icon', title: t('gui-settings'), onclick: () => serverMenu(server) }, icon('more'))),
+    host && [
       el('div', { class: 'share' },
         el('span', { class: 'grow mono wrap' }, host.link ?? ''),
         el('button', { class: 'small primary', onclick: () => copy(host.link ?? '') }, t('gui-copy'))),
@@ -858,12 +882,15 @@ function content() {
   if (busy) return [notice('gui-busy-title', busy, null, true)];
   if (problem && Date.now() - startedAt > STARTUP_GRACE_MS) return [problemCard()];
   if (!status) return [notice('gui-starting', null, null, true)];
-  const current = primary(status);
-  if (!current) return [welcome()];
+  const servers = serverList(status);
+  if (!servers.length) return [welcome()];
   const banner = update && el('div', { class: 'card update', 'data-key': 'update' },
     el('span', { class: 'grow' }, t('gui-update', { version: update.tag.replace(/^v/, '') })),
     el('button', { class: 'small primary', onclick: () => invoke('open_release', { url: update.url }).catch((e) => toast(String(e), true)) },
       t('gui-download')));
+  const serversHead = el('div', { class: 'section-head', 'data-key': 'servers-head' },
+    el('span', { class: 'grow' }, t('gui-servers')),
+    el('button', { class: 'small', onclick: addServerDialog }, icon('plus'), t('gui-add-server')));
   const toolbar = el('div', { class: 'toolbar', 'data-key': 'toolbar' },
     el('button', { onclick: createDialog }, icon('plus'), t('gui-create-network')),
     el('button', { class: 'primary', onclick: joinDialog }, icon('join'), t('gui-join-network')));
@@ -875,7 +902,8 @@ function content() {
   ]);
   const empty = status.servers.every((server) => !server.networks.length)
     && el('div', { class: 'card pad empty-state', 'data-key': 'empty' }, el('p', {}, t(overall(status) === 'connected' ? 'gui-no-networks' : 'gui-waiting-server')));
-  return [banner, serverCard(current), toolbar, networks, empty];
+  const networksHead = el('div', { class: 'section-head', 'data-key': 'networks-head' }, el('span', { class: 'grow' }, t('gui-networks')));
+  return [banner, serversHead, servers.map(serverCard), networksHead, toolbar, networks, empty];
 }
 
 function render() {

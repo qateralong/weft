@@ -49,6 +49,7 @@ struct Session {
     control: Option<Control>,
     generation: u64,
     connection: Connection,
+    latency: Option<Duration>,
     welcome: Option<Welcome>,
     state: State,
     candidates: Vec<SocketAddr>,
@@ -69,6 +70,7 @@ impl Session {
             control: None,
             generation: 0,
             connection: Connection::Disconnected,
+            latency: None,
             welcome: None,
             state: State::default(),
             candidates: Vec::new(),
@@ -780,11 +782,13 @@ impl Daemon {
                 session.fail_pending(failure(code));
             }
             ControlEvent::Message(message) => self.on_message(index, message).await,
+            ControlEvent::Latency(latency) => self.sessions[index].latency = Some(latency),
             ControlEvent::Closed(reason) => {
                 let session = &mut self.sessions[index];
                 tracing::warn!(server = %session.host(), %reason, "server connection closed");
                 session.control = None;
                 session.welcome = None;
+                session.latency = None;
                 session.candidates_at = None;
                 session.candidates.clear();
                 session.fail_pending(Failure::NotConnected);
@@ -1107,6 +1111,7 @@ impl Daemon {
                     server: link.to_string(),
                     host: link_host(&link),
                     connection: session.connection,
+                    latency_ms: session.latency.map(|latency| latency.as_millis().min(u32::MAX as u128) as u32),
                     address: session.address(),
                     networks: self.networks(session),
                     hosted: self.is_hosted(index),
