@@ -151,6 +151,7 @@ pub async fn run(app: AppHandle) {
     let mut announced: HashMap<String, bool> = HashMap::new();
     loop {
         tokio::time::sleep(POLL).await;
+        restart_if_replaced(&app);
         let l = app.state::<Localizer>();
         let Ok(Response::Status(status)) = crate::send(&l, Request::Status).await else { continue };
         if let Some(previous) = &previous
@@ -169,6 +170,26 @@ pub async fn run(app: AppHandle) {
         previous = Some(status);
     }
 }
+
+/// After a package update the running binary is gone; start the new one in its place, keeping
+/// the window hidden or shown as it was.
+#[cfg(target_os = "linux")]
+fn restart_if_replaced(app: &AppHandle) {
+    let Ok(exe) = std::fs::read_link("/proc/self/exe") else { return };
+    let Some(path) = exe.to_str().and_then(|path| path.strip_suffix(" (deleted)")) else { return };
+    if !std::path::Path::new(path).exists() {
+        return;
+    }
+    let visible = app.get_webview_window("main").is_some_and(|window| window.is_visible().unwrap_or(false));
+    let hidden = if visible { "" } else { " --hidden" };
+    let script = format!("sleep 1; exec '{}'{hidden}", path.replace('\'', ""));
+    if std::process::Command::new("setsid").args(["-f", "sh", "-c", &script]).spawn().is_ok() {
+        app.exit(0);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn restart_if_replaced(_app: &AppHandle) {}
 
 #[cfg(test)]
 mod tests {
