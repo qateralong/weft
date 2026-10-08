@@ -238,15 +238,6 @@ impl Daemon {
                 Err(error) => tracing::warn!(link = entry.link, %error, "skipping an invalid server link"),
             }
         }
-        if daemon.settings.public_server.is_none()
-            && let Some(link) = public_server()
-        {
-            if daemon.find(&link).is_none() {
-                daemon.add_session(link, true);
-            }
-            daemon.settings.public_server = Some(true);
-            daemon.save_settings();
-        }
         for index in 0..daemon.sessions.len() {
             if daemon.sessions[index].up {
                 daemon.connect(index);
@@ -489,10 +480,6 @@ impl Daemon {
             }
             None => self.add_session(link, true),
         }
-    }
-
-    fn find(&self, link: &Link) -> Option<usize> {
-        self.sessions.iter().position(|session| session.link == *link)
     }
 
     fn is_public(&self, index: usize) -> bool {
