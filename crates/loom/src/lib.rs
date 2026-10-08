@@ -1,8 +1,10 @@
+pub mod admin;
 pub mod config;
 mod control;
 pub mod db;
 mod hub;
 mod limiter;
+pub mod relay;
 mod udp;
 mod validate;
 
@@ -23,6 +25,8 @@ pub struct Server {
     pub tcp_addr: SocketAddr,
     pub udp_addr: SocketAddr,
     pub public_key: PublicKey,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    hub: crate::hub::SharedHub,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -37,9 +41,17 @@ impl Server {
         let hub = Arc::new(Mutex::new(Hub::new(db, config)));
         let tasks = vec![
             tokio::spawn(control::serve(listener, hub.clone(), Arc::new(keypair), socket.clone())),
-            tokio::spawn(udp::serve(socket, hub, own)),
+            tokio::spawn(udp::serve(socket, hub.clone(), own)),
         ];
-        Ok(Self { tcp_addr, udp_addr, public_key, tasks })
+        Ok(Self { tcp_addr, udp_addr, public_key, hub, tasks })
+    }
+
+    /// Serves `loom admin` requests on a local socket that only the owner can open.
+    #[cfg(unix)]
+    pub fn serve_admin(&mut self, path: &std::path::Path) -> io::Result<()> {
+        let listener = admin::bind(path)?;
+        self.tasks.push(tokio::spawn(admin::serve(listener, self.hub.clone())));
+        Ok(())
     }
 
     pub fn link(&self, host: &str) -> Result<Link, weft_proto::LinkError> {

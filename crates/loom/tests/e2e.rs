@@ -123,7 +123,11 @@ fn member(network: &str, member: &str) -> MemberAction {
 }
 
 async fn start() -> Server {
-    let config = Config { listen: "127.0.0.1:0".parse().unwrap(), ..Config::default() };
+    start_with(Config::default()).await
+}
+
+async fn start_with(config: Config) -> Server {
+    let config = Config { listen: "127.0.0.1:0".parse().unwrap(), ..config };
     let keypair = StaticKeypair::from_secret(&[100; 32]);
     Server::start(config, keypair, Db::open_in_memory().unwrap()).await.unwrap()
 }
@@ -424,4 +428,58 @@ async fn approval_roles_and_settings() {
     assert_eq!(b.request(ClientKind::DeleteNetwork(lan())).await, Err(ErrorCode::Forbidden));
     a.request(ClientKind::DeleteNetwork(lan())).await.unwrap();
     c.state_where(|state| state.networks.is_empty()).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn administration_and_relay_limits() {
+    use loom::admin::{AdminRequest, AdminResponse, request};
+
+    let mut server = start_with(Config { relay_mbit: 1, ..Config::default() }).await;
+    let path = std::env::temp_dir().join(format!("loom-admin-{}.sock", std::process::id()));
+    server.serve_admin(&path).unwrap();
+    let mut a = Client::connect(&server, 1).await;
+    let mut b = Client::connect(&server, 2).await;
+    a.hello("alice").await;
+    let welcome_b = b.hello("bob").await;
+    a.request(ClientKind::CreateNetwork(credentials("lan", "secret"))).await.unwrap();
+    b.request(ClientKind::JoinNetwork(credentials("lan", "secret"))).await.unwrap();
+
+    for _ in 0..100 {
+        a.send(ClientKind::Relay(RelayPacket { address: welcome_b.address, packet: vec![7; 1200] })).await;
+    }
+    a.request(ClientKind::Ping(control::Empty {})).await.unwrap();
+    let Ok(AdminResponse::Stats(stats)) = request(&path, &AdminRequest::Stats).await else { panic!() };
+    assert_eq!((stats.devices, stats.online, stats.networks), (2, 2, 1));
+    assert_eq!(stats.relay.packets + stats.relay.dropped, 100);
+    assert!(stats.relay.dropped > 0 && stats.relay.bytes < 100_000, "{:?}", stats.relay);
+    assert_eq!(stats.top_relay[0].nickname, "alice");
+
+    let Ok(AdminResponse::Networks(networks)) = request(&path, &AdminRequest::Networks).await else { panic!() };
+    assert_eq!(
+        (networks[0].name.as_str(), networks[0].members, networks[0].owner.as_deref()),
+        ("lan", 2, Some("alice"))
+    );
+
+    let block = |device: &str| AdminRequest::Block { device: device.into() };
+    assert!(matches!(request(&path, &block("nobody")).await, Ok(AdminResponse::Error(_))));
+    assert_eq!(request(&path, &block("BOB")).await.unwrap(), AdminResponse::Ok);
+    a.state_where(|state| state.peers.iter().all(|peer| !peer.online)).await;
+    let mut again = Client::connect(&server, 2).await;
+    let id = again.send(ClientKind::Hello(Hello { version: PROTOCOL_VERSION, nickname: "bob".into() })).await;
+    assert!(matches!(again.reply(id).await, ServerKind::Failure(f) if f.code() == ErrorCode::Banned));
+    let Ok(AdminResponse::Devices(devices)) = request(&path, &AdminRequest::Devices).await else { panic!() };
+    assert_eq!(
+        devices.iter().map(|d| (d.nickname.as_str(), d.blocked)).collect::<Vec<_>>(),
+        [("alice", false), ("bob", true)]
+    );
+
+    let unblock = AdminRequest::Unblock { device: Ipv4Addr::from(welcome_b.address).to_string() };
+    assert_eq!(request(&path, &unblock).await.unwrap(), AdminResponse::Ok);
+    Client::connect(&server, 2).await.hello("bob").await;
+
+    let delete = AdminRequest::DeleteNetwork { name: "LAN".into() };
+    assert_eq!(request(&path, &delete).await.unwrap(), AdminResponse::Ok);
+    a.state_where(|state| state.networks.is_empty()).await;
+    let _ = std::fs::remove_file(&path);
 }

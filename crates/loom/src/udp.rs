@@ -55,7 +55,7 @@ async fn relay(socket: &UdpSocket, hub: &SharedHub, packet: &[u8]) {
     let route = {
         let mut hub = lock(hub);
         let Some(source) = hub.token_owner(&token) else { return };
-        hub.route(&source, destination, Instant::now())
+        hub.route(&source, destination, inner.len(), Instant::now())
     };
     if let Some(route) = route {
         forward(socket, route, inner).await;

@@ -13,6 +13,7 @@ use weft_session::Tai64N;
 use crate::config::Config;
 use crate::db::{Db, DbError};
 use crate::limiter::Limiter;
+use crate::relay::{Bucket, Traffic};
 
 pub const MAX_CANDIDATES: usize = 16;
 const UDP_FRESH: Duration = Duration::from_secs(60);
@@ -28,6 +29,9 @@ pub struct Hub {
     addresses: HashMap<Ipv4Addr, PublicKey>,
     timestamps: HashMap<PublicKey, Tai64N>,
     relations: HashMap<(PublicKey, PublicKey), bool>,
+    relay: Traffic,
+    relay_bucket: Option<Bucket>,
+    started: Instant,
 }
 
 struct Session {
@@ -39,6 +43,8 @@ struct Session {
     endpoint: Option<SocketAddr>,
     discovered_at: Option<Instant>,
     candidates: Vec<SocketAddr>,
+    relay: Traffic,
+    relay_bucket: Option<Bucket>,
     _kill: oneshot::Sender<()>,
 }
 
@@ -58,7 +64,11 @@ pub fn lock(hub: &SharedHub) -> MutexGuard<'_, Hub> {
 
 impl Hub {
     pub fn new(db: Db, config: Config) -> Self {
+        let now = Instant::now();
         Self {
+            relay: Traffic::default(),
+            relay_bucket: Bucket::mbit(config.relay_total_mbit, now),
+            started: now,
             db,
             config,
             limiter: Limiter::default(),
@@ -98,6 +108,8 @@ impl Hub {
             endpoint: None,
             discovered_at: None,
             candidates: Vec::new(),
+            relay: Traffic::default(),
+            relay_bucket: Bucket::mbit(self.config.relay_mbit, Instant::now()),
             _kill: kill,
         };
         if let Some(old) = self.sessions.insert(key, session) {
@@ -172,12 +184,22 @@ impl Hub {
         let _ = a.tx.send(message(to, b));
     }
 
-    pub fn route(&mut self, source: &PublicKey, destination: Ipv4Addr, now: Instant) -> Option<Route> {
+    pub fn route(&mut self, source: &PublicKey, destination: Ipv4Addr, len: usize, now: Instant) -> Option<Route> {
         let source_address = self.sessions.get(source)?.address;
         let destination_key = *self.addresses.get(&destination)?;
-        if !self.related(source, &destination_key) {
+        if !self.related(source, &destination_key) || !self.sessions.contains_key(&destination_key) {
             return None;
         }
+        let sender = self.sessions.get_mut(source)?;
+        let allowed = sender.relay_bucket.as_mut().is_none_or(|bucket| bucket.take(len, now))
+            && self.relay_bucket.as_mut().is_none_or(|bucket| bucket.take(len, now));
+        if !allowed {
+            sender.relay.dropped += 1;
+            self.relay.dropped += 1;
+            return None;
+        }
+        sender.relay.add(len);
+        self.relay.add(len);
         let session = self.sessions.get(&destination_key)?;
         let fresh = session.discovered_at.is_some_and(|at| now.duration_since(at) < UDP_FRESH);
         let delivery = match session.endpoint {
@@ -185,6 +207,30 @@ impl Hub {
             _ => Delivery::Tcp(session.tx.clone()),
         };
         Some(Route { source: source_address, delivery })
+    }
+
+    pub fn is_online(&self, key: &PublicKey) -> bool {
+        self.sessions.contains_key(key)
+    }
+
+    pub fn relay_traffic(&self, key: &PublicKey) -> Traffic {
+        self.sessions.get(key).map(|session| session.relay).unwrap_or_default()
+    }
+
+    pub fn relay_total(&self) -> Traffic {
+        self.relay
+    }
+
+    pub fn uptime(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// Closes the device's control connection.
+    pub fn disconnect(&mut self, key: &PublicKey) -> bool {
+        let Some(session) = self.sessions.remove(key) else { return false };
+        self.tokens.remove(&session.token);
+        self.addresses.remove(&session.address);
+        true
     }
 
     pub fn state_for(&self, key: &PublicKey) -> Result<State, DbError> {

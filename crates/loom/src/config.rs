@@ -12,6 +12,10 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub pool: Pool,
     pub max_members: usize,
+    /// Relay limit per device in megabits per second, 0 for none.
+    pub relay_mbit: u32,
+    /// Relay limit for the whole server in megabits per second, 0 for none.
+    pub relay_total_mbit: u32,
 }
 
 impl Default for Config {
@@ -22,6 +26,8 @@ impl Default for Config {
             data_dir: PathBuf::from("/var/lib/loom"),
             pool: Pool::DEFAULT,
             max_members: 250,
+            relay_mbit: 32,
+            relay_total_mbit: 0,
         }
     }
 }

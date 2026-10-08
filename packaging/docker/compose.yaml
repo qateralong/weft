@@ -1,5 +1,7 @@
 # Weft coordination server. Print the client link with:
 #   docker compose exec loom loom link --host vpn.example.com
+# Manage it with:
+#   docker compose exec loom loom admin stats
 services:
   loom:
     image: ghcr.io/qateralong/loom:latest

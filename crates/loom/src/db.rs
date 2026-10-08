@@ -9,7 +9,7 @@ use weft_proto::control::Role;
 
 use crate::config::Pool;
 
-const MIGRATIONS: [&str; 3] = [
+const MIGRATIONS: [&str; 4] = [
     "
 CREATE TABLE devices (
     key BLOB PRIMARY KEY,
@@ -62,6 +62,12 @@ CREATE TABLE requests (
     PRIMARY KEY (network, device)
 );
 ",
+    "
+CREATE TABLE blocked (
+    device BLOB PRIMARY KEY REFERENCES devices(key),
+    created INTEGER NOT NULL
+);
+",
 ];
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 
@@ -73,6 +79,8 @@ pub enum DbError {
     NetworkExists,
     #[error("invite code already exists")]
     InviteExists,
+    #[error("device is blocked")]
+    Blocked,
     #[error("address pool is exhausted")]
     PoolExhausted,
     #[error("unsupported database schema {0}")]
@@ -103,6 +111,25 @@ pub struct Membership {
     pub locked: bool,
     pub approval: bool,
     pub requests: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceRow {
+    pub device: Device,
+    pub last_seen: i64,
+    pub networks: usize,
+    pub blocked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkSummary {
+    pub id: i64,
+    pub name: String,
+    pub members: usize,
+    pub owner: Option<String>,
+    pub locked: bool,
+    pub approval: bool,
+    pub created: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -468,6 +495,79 @@ impl Db {
         Ok(devices)
     }
 
+    pub fn block(&mut self, device: &PublicKey) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO blocked (device, created) VALUES (?1, ?2)",
+            params![device.as_bytes(), unix_now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn unblock(&mut self, device: &PublicKey) -> Result<bool, DbError> {
+        Ok(self.conn.execute("DELETE FROM blocked WHERE device = ?1", [device.as_bytes()])? > 0)
+    }
+
+    pub fn is_blocked(&self, device: &PublicKey) -> Result<bool, DbError> {
+        Ok(self
+            .conn
+            .query_row("SELECT 1 FROM blocked WHERE device = ?1", [device.as_bytes()], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
+    pub fn all_devices(&self) -> Result<Vec<DeviceRow>, DbError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT d.key, d.nickname, d.address, d.last_seen,
+             (SELECT COUNT(*) FROM members m WHERE m.device = d.key),
+             EXISTS (SELECT 1 FROM blocked b WHERE b.device = d.key)
+             FROM devices d ORDER BY d.address",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, bool>(5)?,
+            ))
+        })?;
+        let mut devices = Vec::new();
+        for row in rows {
+            let (key, nickname, address, last_seen, networks, blocked) = row?;
+            let Ok(key) = PublicKey::from_slice(&key) else { continue };
+            devices.push(DeviceRow {
+                device: Device { key, nickname, address: Ipv4Addr::from(address) },
+                last_seen,
+                networks: networks as usize,
+                blocked,
+            });
+        }
+        Ok(devices)
+    }
+
+    pub fn network_summaries(&self) -> Result<Vec<NetworkSummary>, DbError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT n.id, n.name, (SELECT COUNT(*) FROM members m WHERE m.network = n.id),
+             (SELECT d.nickname FROM members m JOIN devices d ON d.key = m.device
+              WHERE m.network = n.id AND m.role = ?1 LIMIT 1),
+             n.locked, n.approval, n.created
+             FROM networks n ORDER BY n.name_key",
+        )?;
+        let rows = stmt.query_map([Role::Owner as i32], |row| {
+            Ok(NetworkSummary {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                members: row.get::<_, i64>(2)? as usize,
+                owner: row.get(3)?,
+                locked: row.get(4)?,
+                approval: row.get(5)?,
+                created: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn memberships(&self, device: &PublicKey) -> Result<Vec<Membership>, DbError> {
         let mut networks = self.conn.prepare_cached(
             "SELECT n.id, n.name, m.role, n.locked, n.approval,
@@ -684,6 +784,17 @@ mod tests {
         db.ban(id, &key(3)).unwrap();
         assert!(db.requests(id).unwrap().is_empty());
 
+        let summary = &db.network_summaries().unwrap()[0];
+        assert_eq!((summary.members, summary.owner.as_deref(), summary.approval), (2, Some("d1"), true));
+        db.block(&key(3)).unwrap();
+        assert!(db.is_blocked(&key(3)).unwrap());
+        let devices = db.all_devices().unwrap();
+        assert_eq!(
+            devices.iter().map(|d| (d.networks, d.blocked)).collect::<Vec<_>>(),
+            [(1, false), (1, false), (0, true)]
+        );
+        assert!(db.unblock(&key(3)).unwrap());
+        assert!(!db.is_blocked(&key(3)).unwrap());
         db.delete_network(id).unwrap();
         assert!(db.network_by_name("lan").unwrap().is_none());
         assert!(db.memberships(&key(2)).unwrap().is_empty());

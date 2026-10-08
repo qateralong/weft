@@ -130,6 +130,20 @@ ping_b 2
 weft a delete lan --yes
 sleep 1
 weft b status | grep -q 'No networks'
+echo "--- loom admin"
+loom_admin() { "$BIN/loom" --config "$WORK/loom.toml" admin "$@"; }
+loom_admin stats
+loom_admin devices --online | grep -q alice
+loom_admin block alice
+weft a status | grep -Eq '^Status: +connected' && sleep 2
+weft a status | grep -Eq '^Status: +connected' && exit 1
+loom_admin devices --blocked | grep -q alice
+loom_admin unblock alice
+for _ in $(seq 45); do
+    weft a status | grep -Eq '^Status: +connected' && break
+    sleep 1
+done
+weft a status | grep -Eq '^Status: +connected'
 echo "--- all checks passed"
 if [ -n "${SHOW_LOGS:-}" ]; then
     show_logs

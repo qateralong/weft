@@ -117,7 +117,13 @@ async fn connection(
     let welcome = {
         let mut hub = lock(&hub);
         let pool = hub.config.pool;
-        match hub.db.upsert_device(&key, nickname.as_deref().unwrap_or_default(), &pool) {
+        let blocked = hub.db.is_blocked(&key).unwrap_or(false);
+        let device = if blocked {
+            Err(DbError::Blocked)
+        } else {
+            hub.db.upsert_device(&key, nickname.as_deref().unwrap_or_default(), &pool)
+        };
+        match device {
             Ok(device) => {
                 let token = hub.register(key, device.address, conn, tx.clone(), kill_tx);
                 ServerMessage::reply(
@@ -131,6 +137,7 @@ async fn connection(
                 )
             }
             Err(DbError::PoolExhausted) => refuse(ErrorCode::PoolExhausted),
+            Err(DbError::Blocked) => refuse(ErrorCode::Banned),
             Err(error) => {
                 tracing::warn!(%error, "cannot register device");
                 refuse(ErrorCode::Internal)
@@ -254,7 +261,7 @@ async fn relay(hub: &SharedHub, socket: &UdpSocket, key: PublicKey, packet: Rela
     if packet.packet.len() < MIN_PACKET_LEN {
         return;
     }
-    let route = lock(hub).route(&key, Ipv4Addr::from(packet.address), Instant::now());
+    let route = lock(hub).route(&key, Ipv4Addr::from(packet.address), packet.packet.len(), Instant::now());
     if let Some(route) = route {
         udp::forward(socket, route, &packet.packet).await;
     }
@@ -582,7 +589,7 @@ fn find_invite(hub: &mut Hub, code: &str) -> Result<Option<InviteRow>, ErrorCode
     hub.db.invite(&code).map_err(internal)
 }
 
-fn resolve<'a>(devices: impl Iterator<Item = &'a Device>, query: &str) -> Result<usize, ErrorCode> {
+pub(crate) fn resolve<'a>(devices: impl Iterator<Item = &'a Device>, query: &str) -> Result<usize, ErrorCode> {
     let query = query.trim();
     let matches: Vec<usize> = if let Ok(key) = query.parse::<PublicKey>() {
         devices.enumerate().filter(|(_, device)| device.key == key).map(|(index, _)| index).collect()
