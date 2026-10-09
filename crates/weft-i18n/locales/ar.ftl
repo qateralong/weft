@@ -390,3 +390,6 @@ gui-back = رجوع
 gui-language = اللغة
 gui-invite-limited = تحديد عدد مرات الاستخدام
 gui-off-hint = Weft متوقف. اضغط زر التشغيل للاتصال.
+gui-reset = مسح بيانات التطبيق
+gui-reset-hint = يزيل جميع الخوادم وإعدادات التطبيق ويعود إلى شاشة البداية.
+done-reset = تم مسح بيانات التطبيق

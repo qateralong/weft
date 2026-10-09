@@ -350,6 +350,7 @@ export component SettingsDialog inherits DialogFrame {
     callback open-servers();
     callback notifications-toggled(bool);
     callback updates-toggled(bool);
+    callback reset();
     title: I18n.t("gui-settings");
     action-text: I18n.t("gui-save");
     action => {
@@ -404,6 +405,21 @@ export component SettingsDialog inherits DialogFrame {
         checked <=> root.updates;
         toggled(on) => {
             root.updates-toggled(on);
+        }
+    }
+
+    Section {
+        text: I18n.t("gui-reset");
+    }
+
+    Paragraph {
+        text: I18n.t("gui-reset-hint");
+    }
+
+    DangerButton {
+        text: I18n.t("gui-reset");
+        confirmed => {
+            root.reset();
         }
     }
 }

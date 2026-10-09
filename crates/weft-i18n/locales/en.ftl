@@ -390,3 +390,6 @@ gui-back = Back
 gui-language = Language
 gui-invite-limited = Limit the number of uses
 gui-off-hint = Weft is off. Press the power button to connect.
+gui-reset = Clear app data
+gui-reset-hint = Removes all servers and app settings and returns to the start screen.
+done-reset = App data cleared

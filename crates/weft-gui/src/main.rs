@@ -293,6 +293,7 @@ impl App {
             app.store.borrow_mut().update(|settings| settings.updates = on);
             app.check_updates();
         });
+        on!(app, on_reset_app, || app.reset());
         on!(app, on_server_menu, |index| app.open_server_menu(index as usize));
         on!(app, on_add_server, || app.open_add_server());
         on!(app, on_add_server_submit, || app.add_server());
@@ -881,6 +882,29 @@ impl App {
         let nickname = ui.get_settings_nickname();
         self.open_settings();
         ui.set_settings_nickname(nickname);
+    }
+
+    /// Forgets every server and the app's preferences, keeping the language, and starts over.
+    fn reset(self: &Rc<Self>) {
+        let app = self.clone();
+        self.run(async move {
+            let status = app.refresh().await.ok_or_else(|| app.tr("error-not-connected"))?;
+            if status.host.is_some() {
+                app.send(Request::Host { enabled: false, port: None, address: None }, None).await?;
+            }
+            for server in status.servers.iter().filter(|server| !server.hosted) {
+                app.send(Request::Remove, Some(server.server.clone())).await?;
+            }
+            app.store.borrow_mut().update(|settings| {
+                *settings = settings::Settings { language: settings.language.clone(), ..Default::default() };
+            });
+            *app.known.borrow_mut() = None;
+            app.ui().global::<Theme>().set_dark(false);
+            app.close();
+            app.refresh().await;
+            app.toast(&app.tr("done-reset"), false);
+            Ok(())
+        });
     }
 
     fn open_servers(&self) {

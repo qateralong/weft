@@ -131,6 +131,7 @@ export component AppWindow inherits Window {
     callback open-servers();
     callback notifications-toggled(bool);
     callback updates-toggled(bool);
+    callback reset-app();
     callback server-menu(int);
     callback add-server();
     callback add-server-submit();
@@ -338,6 +339,9 @@ export component AppWindow inherits Window {
         }
         updates-toggled(on) => {
             root.updates-toggled(on);
+        }
+        reset => {
+            root.reset-app();
         }
     }
     if dialog == "servers": ServersDialog {

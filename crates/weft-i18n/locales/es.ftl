@@ -390,3 +390,6 @@ gui-back = Atrás
 gui-language = Idioma
 gui-invite-limited = Limitar el número de usos
 gui-off-hint = Weft está apagado. Pulse el botón de encendido para conectarse.
+gui-reset = Borrar los datos de la aplicación
+gui-reset-hint = Elimina todos los servidores y los ajustes de la aplicación y vuelve a la pantalla de inicio.
+done-reset = Datos de la aplicación borrados
