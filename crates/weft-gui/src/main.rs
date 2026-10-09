@@ -386,7 +386,8 @@ impl App {
         let collapsed: HashSet<String> = self.store.borrow().current.collapsed.iter().cloned().collect();
         let connection = view::overall(&status.servers);
         let has_networks = status.servers.iter().any(|server| !server.networks.is_empty());
-        if has_networks {
+        // Only a connected snapshot is the truth: while connecting or off the daemon lists nothing.
+        if connection == "connected" {
             *self.known.borrow_mut() = Some(status.clone());
         }
         let shown = match self.known.borrow().as_ref() {
