@@ -389,3 +389,4 @@ gui-server-kind = Kind of server
 gui-back = Back
 gui-language = Language
 gui-invite-limited = Limit the number of uses
+gui-off-hint = Weft is off. Press the power button to connect.

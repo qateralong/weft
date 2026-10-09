@@ -104,6 +104,8 @@ struct App {
     store: RefCell<settings::Store>,
     networks: RefCell<view::Networks>,
     status: RefCell<Option<Status>>,
+    /// The last status that had networks, to show them while Weft is off.
+    known: RefCell<Option<Status>>,
     context: RefCell<Context>,
     notifier: RefCell<notify::Notifier>,
     problem: Cell<DaemonState>,
@@ -154,6 +156,7 @@ fn main() -> Result<(), slint::PlatformError> {
         store: RefCell::new(store),
         networks: RefCell::new(view::Networks::default()),
         status: RefCell::new(None),
+        known: RefCell::new(None),
         context: RefCell::new(Context::default()),
         notifier: RefCell::new(notify::Notifier::default()),
         problem: Cell::new(DaemonState::Ok),
@@ -381,13 +384,25 @@ impl App {
         let ui = self.ui();
         let Some(status) = self.status.borrow().clone() else { return };
         let collapsed: HashSet<String> = self.store.borrow().current.collapsed.iter().cloned().collect();
-        self.networks.borrow_mut().update(&self.l, &status, &collapsed);
         let connection = view::overall(&status.servers);
+        let has_networks = status.servers.iter().any(|server| !server.networks.is_empty());
+        if has_networks {
+            *self.known.borrow_mut() = Some(status.clone());
+        }
+        let shown = match self.known.borrow().as_ref() {
+            Some(known) if !has_networks && connection == "disconnected" => view::offline(known, &status),
+            _ => status.clone(),
+        };
+        self.networks.borrow_mut().update(&self.l, &shown, &collapsed);
         ui.set_nickname(status.nickname.clone().into());
         ui.set_connection(connection.into());
         let address = status.servers.iter().find_map(|server| server.address).map(|a| a.to_string());
         ui.set_address(address.unwrap_or_default().into());
-        let empty = if connection == "connected" { "gui-no-networks" } else { "gui-waiting-server" };
+        let empty = match connection {
+            "connected" => "gui-no-networks",
+            "connecting" => "gui-waiting-server",
+            _ => "gui-off-hint",
+        };
         ui.set_empty_text(self.tr(empty).into());
         if ui.get_dialog() == "servers" {
             view::sync(&self.servers, view::server_rows(&self.l, &status));

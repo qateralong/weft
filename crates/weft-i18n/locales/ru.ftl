@@ -389,3 +389,4 @@ gui-server-kind = Тип сервера
 gui-back = Назад
 gui-language = Язык
 gui-invite-limited = Ограничить число использований
+gui-off-hint = Weft выключен. Нажмите кнопку питания, чтобы подключиться.

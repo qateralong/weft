@@ -68,8 +68,12 @@ export component DialogFrame inherits Rectangle {
     callback leave();
     callback action();
     property <bool> shown;
-    init => {
-        shown = true;
+    Timer {
+        interval: 16ms;
+        running: !shown;
+        triggered => {
+            shown = true;
+        }
     }
     background: shown ? Theme.backdrop : transparent;
     animate background { duration: 200ms; }

@@ -36,8 +36,12 @@ component MemberLine inherits Rectangle {
     height: 52px;
     background: data.me ? Theme.accent-soft : touch.has-hover ? Theme.hover : transparent;
     property <bool> shown;
-    init => {
-        shown = true;
+    Timer {
+        interval: 16ms;
+        running: !shown;
+        triggered => {
+            shown = true;
+        }
     }
     opacity: shown ? 1 : 0;
     animate opacity { duration: 300ms; easing: ease-out; }
@@ -160,8 +164,12 @@ export component NetworkView inherits Rectangle {
     property <length> body-height: data.members.length * 52px;
     height: head-height + (data.collapsed ? 0px : body-height);
     property <bool> shown;
-    init => {
-        shown = true;
+    Timer {
+        interval: 16ms;
+        running: !shown;
+        triggered => {
+            shown = true;
+        }
     }
     opacity: shown ? 1 : 0;
     transform-scale-x: shown ? 100% : 97%;
@@ -239,8 +247,12 @@ export component NetworkView inherits Rectangle {
                                 border-radius: 9px;
                                 background: Theme.danger;
                                 property <bool> popped;
-                                init => {
-                                    popped = true;
+                                Timer {
+                                    interval: 16ms;
+                                    running: !popped;
+                                    triggered => {
+                                        popped = true;
+                                    }
                                 }
                                 transform-scale-x: popped ? 100% : 30%;
                                 transform-scale-y: self.transform-scale-x;
@@ -323,8 +335,12 @@ export component NetworkView inherits Rectangle {
                                 border-radius: 9px;
                                 background: Theme.danger;
                                 property <bool> popped;
-                                init => {
-                                    popped = true;
+                                Timer {
+                                    interval: 16ms;
+                                    running: !popped;
+                                    triggered => {
+                                        popped = true;
+                                    }
                                 }
                                 transform-scale-x: popped ? 100% : 30%;
                                 transform-scale-y: self.transform-scale-x;

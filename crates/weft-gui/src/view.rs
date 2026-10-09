@@ -124,6 +124,28 @@ pub fn kind(server: &ServerStatus) -> &'static str {
     }
 }
 
+/// The last known networks while Weft is off: the daemon forgets them until it reconnects, so
+/// they are shown from `known` with everyone offline.
+pub fn offline(known: &Status, current: &Status) -> Status {
+    let mut shown = current.clone();
+    shown.servers = known
+        .servers
+        .iter()
+        .filter(|server| current.servers.iter().any(|now| now.server == server.server))
+        .map(|server| {
+            let mut server = server.clone();
+            server.connection = Connection::Disconnected;
+            server.latency_ms = None;
+            for member in server.networks.iter_mut().flat_map(|network| network.members.iter_mut()) {
+                member.link = PeerLink::Offline;
+                member.latency_ms = None;
+            }
+            server
+        })
+        .collect();
+    shown
+}
+
 /// Servers to list, with the hosted one even before the daemon has connected to it.
 pub fn servers(status: &Status) -> Vec<ServerStatus> {
     let mut servers = status.servers.clone();

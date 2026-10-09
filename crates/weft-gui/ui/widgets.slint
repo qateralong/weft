@@ -305,6 +305,19 @@ export component Select inherits Rectangle {
         y: root.height + 4px;
         width: root.width;
         Rectangle {
+            property <bool> shown;
+            Timer {
+                interval: 16ms;
+                running: !shown;
+                triggered => {
+                    shown = true;
+                }
+            }
+            opacity: shown ? 1 : 0;
+            transform-scale-x: shown ? 100% : 96%;
+            transform-scale-y: self.transform-scale-x;
+            transform-origin: { x: self.width / 2, y: 0 };
+            animate opacity, transform-scale-x { duration: 160ms; easing: ease-out; }
             background: Theme.card;
             border-radius: 10px;
             border-width: 1px;
@@ -435,8 +448,12 @@ export component Avatar inherits Rectangle {
     in property <color> tint;
     in property <string> link;
     property <bool> shown;
-    init => {
-        shown = true;
+    Timer {
+        interval: 16ms;
+        running: !shown;
+        triggered => {
+            shown = true;
+        }
     }
     width: 32px;
     height: 32px;

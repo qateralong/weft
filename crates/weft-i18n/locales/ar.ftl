@@ -389,3 +389,4 @@ gui-server-kind = نوع الخادم
 gui-back = رجوع
 gui-language = اللغة
 gui-invite-limited = تحديد عدد مرات الاستخدام
+gui-off-hint = Weft متوقف. اضغط زر التشغيل للاتصال.

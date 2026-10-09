@@ -389,3 +389,4 @@ gui-server-kind = Tipo de servidor
 gui-back = Atrás
 gui-language = Idioma
 gui-invite-limited = Limitar el número de usos
+gui-off-hint = Weft está apagado. Pulse el botón de encendido para conectarse.
