@@ -35,6 +35,12 @@ component MemberLine inherits Rectangle {
     callback menu();
     height: 52px;
     background: data.me ? Theme.accent-soft : touch.has-hover ? Theme.hover : transparent;
+    property <bool> shown;
+    init => {
+        shown = true;
+    }
+    opacity: shown ? 1 : 0;
+    animate opacity { duration: 300ms; easing: ease-out; }
     animate background { duration: 150ms; }
     property <length> pad: 12px;
     property <length> menu-width: 32px;
@@ -153,7 +159,15 @@ export component NetworkView inherits Rectangle {
     property <length> head-height: 58px;
     property <length> body-height: data.members.length * 52px;
     height: head-height + (data.collapsed ? 0px : body-height);
+    property <bool> shown;
+    init => {
+        shown = true;
+    }
+    opacity: shown ? 1 : 0;
+    transform-scale-x: shown ? 100% : 97%;
+    transform-scale-y: self.transform-scale-x;
     animate height { duration: 250ms; easing: ease-in-out; }
+    animate opacity, transform-scale-x { duration: 300ms; easing: ease-out; }
     background: Theme.card;
     border-radius: 14px;
     border-width: 1px;
@@ -183,8 +197,10 @@ export component NetworkView inherits Rectangle {
             if !I18n.rtl: VerticalLayout {
                 alignment: center;
                 Icon {
-                    name: data.collapsed ? Icons.chevron-forward : Icons.chevron;
+                    name: Icons.chevron;
                     stroke: Theme.muted;
+                    transform-rotation: data.collapsed ? -90deg : 0deg;
+                    animate transform-rotation { duration: 250ms; easing: ease-in-out; }
                 }
             }
             if I18n.rtl: HorizontalLayout {
@@ -222,6 +238,13 @@ export component NetworkView inherits Rectangle {
                                 height: 18px;
                                 border-radius: 9px;
                                 background: Theme.danger;
+                                property <bool> popped;
+                                init => {
+                                    popped = true;
+                                }
+                                transform-scale-x: popped ? 100% : 30%;
+                                transform-scale-y: self.transform-scale-x;
+                                animate transform-scale-x { duration: 400ms; easing: cubic-bezier(0.34, 1.56, 0.64, 1); }
                                 Text {
                                     text: data.requests;
                                     color: white;
@@ -299,6 +322,13 @@ export component NetworkView inherits Rectangle {
                                 height: 18px;
                                 border-radius: 9px;
                                 background: Theme.danger;
+                                property <bool> popped;
+                                init => {
+                                    popped = true;
+                                }
+                                transform-scale-x: popped ? 100% : 30%;
+                                transform-scale-y: self.transform-scale-x;
+                                animate transform-scale-x { duration: 400ms; easing: cubic-bezier(0.34, 1.56, 0.64, 1); }
                                 Text {
                                     text: data.requests;
                                     color: white;
@@ -334,8 +364,10 @@ export component NetworkView inherits Rectangle {
             if I18n.rtl: VerticalLayout {
                 alignment: center;
                 Icon {
-                    name: data.collapsed ? Icons.chevron-back : Icons.chevron;
+                    name: Icons.chevron;
                     stroke: Theme.muted;
+                    transform-rotation: data.collapsed ? 90deg : 0deg;
+                    animate transform-rotation { duration: 250ms; easing: ease-in-out; }
                 }
             }
         }
@@ -516,9 +548,21 @@ export component Header inherits Rectangle {
         border-color: connection == "connecting" ? Theme.warn : power-touch.has-hover ? Theme.accent : Theme.line;
         drop-shadow-blur: connection == "connected" ? 10px : 0;
         drop-shadow-color: Theme.accent-soft;
+        transform-scale-x: power-touch.pressed ? 92% : 100%;
+        transform-scale-y: self.transform-scale-x;
         animate background, border-color { duration: 250ms; }
+        animate transform-scale-x { duration: 150ms; easing: ease-out; }
         accessible-role: button;
         accessible-label: I18n.t(connection == "disconnected" ? "gui-connect" : "gui-disconnect");
+        if connection == "connecting": Rectangle {
+            property <float> phase: Math.mod(animation-tick() / 1ms, 1400) / 1400;
+            width: parent.width * (1 + 0.5 * phase);
+            height: self.width;
+            border-radius: self.width / 2;
+            border-width: 2px;
+            border-color: Theme.warn;
+            opacity: 1 - phase;
+        }
         Icon {
             width: 22px;
             height: 22px;
@@ -592,6 +636,7 @@ export component Header inherits Rectangle {
         padding-bottom: 21px;
         IconButton {
             icon: I18n.rtl ? Icons.gear : Icons.pulse;
+            turn: I18n.rtl ? 90deg : 0deg;
             tooltip: I18n.t(I18n.rtl ? "gui-settings" : "gui-diagnostics");
             clicked => {
                 if I18n.rtl {
@@ -604,6 +649,7 @@ export component Header inherits Rectangle {
 
         IconButton {
             icon: Theme.dark ? Icons.sun : Icons.moon;
+            turn: 25deg;
             tooltip: I18n.t(Theme.dark ? "gui-theme-light" : "gui-theme-dark");
             clicked => {
                 root.theme();
@@ -612,6 +658,7 @@ export component Header inherits Rectangle {
 
         IconButton {
             icon: I18n.rtl ? Icons.pulse : Icons.gear;
+            turn: I18n.rtl ? 0deg : 90deg;
             tooltip: I18n.t(I18n.rtl ? "gui-diagnostics" : "gui-settings");
             clicked => {
                 if I18n.rtl {

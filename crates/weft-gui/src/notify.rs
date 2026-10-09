@@ -44,13 +44,14 @@ impl Event {
     }
 }
 
-/// Compares two status snapshots taken a few seconds apart; `was_connected` tells whether the
-/// connection to the server ever came up before `previous`.
-pub fn events(previous: &Status, next: &Status, was_connected: bool) -> Vec<Event> {
+/// Compares two status snapshots taken a few seconds apart; `lost` tells whether the connection
+/// dropped by itself before `previous`. Turning Weft off and on is not news: the daemon then
+/// reports `Disconnected`, while a dropped connection is `Connecting` until it comes back.
+pub fn events(previous: &Status, next: &Status, lost: bool) -> Vec<Event> {
     let connected = |status: &Status| status.connection() == Connection::Connected;
     match (connected(previous), connected(next)) {
-        (true, false) if !next.servers.is_empty() => return vec![Event::Disconnected],
-        (false, true) if was_connected && !previous.servers.is_empty() => return vec![Event::Reconnected],
+        (true, false) if next.connection() == Connection::Connecting => return vec![Event::Disconnected],
+        (false, true) if lost => return vec![Event::Reconnected],
         (true, true) => {}
         _ => return Vec::new(),
     }
@@ -99,7 +100,7 @@ pub fn events(previous: &Status, next: &Status, was_connected: bool) -> Vec<Even
 #[derive(Default)]
 pub struct Notifier {
     previous: Option<Status>,
-    was_connected: bool,
+    lost: bool,
     announced: HashMap<String, bool>,
 }
 
@@ -109,7 +110,7 @@ impl Notifier {
         if let Some(previous) = &self.previous
             && enabled
         {
-            for event in events(previous, status, self.was_connected) {
+            for event in events(previous, status, self.lost) {
                 if let Some((nickname, online)) = event.presence()
                     && self.announced.insert(nickname.to_string(), online) == Some(online)
                 {
@@ -118,7 +119,13 @@ impl Notifier {
                 show(event.text(l));
             }
         }
-        self.was_connected |= status.connection() == Connection::Connected;
+        self.lost = match status.connection() {
+            Connection::Connected | Connection::Disconnected => false,
+            Connection::Connecting => {
+                self.lost
+                    || self.previous.as_ref().is_some_and(|previous| previous.connection() == Connection::Connected)
+            }
+        };
         self.previous = Some(status.clone());
     }
 }
@@ -195,8 +202,25 @@ mod tests {
     fn connection_changes_hide_member_changes() {
         let online = status(Connection::Connected, &[("bob", 2, PeerLink::Direct)], 0);
         let lost = status(Connection::Connecting, &[], 0);
-        assert_eq!(events(&online, &lost, true), [Event::Disconnected]);
+        assert_eq!(events(&online, &lost, false), [Event::Disconnected]);
         assert_eq!(events(&lost, &online, true), [Event::Reconnected]);
         assert!(events(&lost, &online, false).is_empty());
+    }
+
+    #[test]
+    fn turning_off_and_on_is_quiet() {
+        let online = status(Connection::Connected, &[("bob", 2, PeerLink::Direct)], 0);
+        let off = status(Connection::Disconnected, &[], 0);
+        let starting = status(Connection::Connecting, &[], 0);
+        let l = Localizer::new(weft_i18n::Language::English);
+        let mut notifier = Notifier::default();
+        for snapshot in [&online, &off, &starting, &online] {
+            notifier.observe(snapshot, false, &l);
+            assert!(!notifier.lost);
+        }
+        assert!(events(&online, &off, false).is_empty());
+        assert!(events(&starting, &online, false).is_empty());
+        notifier.observe(&starting, false, &l);
+        assert!(notifier.lost);
     }
 }

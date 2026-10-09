@@ -82,7 +82,9 @@ export component DialogFrame inherits Rectangle {
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2 + (shown ? 0 : 14px);
         opacity: shown ? 1 : 0;
-        animate y, opacity { duration: 220ms; easing: ease-out; }
+        transform-scale-x: shown ? 100% : 96%;
+        transform-scale-y: self.transform-scale-x;
+        animate y, opacity, transform-scale-x { duration: 220ms; easing: ease-out; }
         background: Theme.card;
         border-radius: 16px;
         border-width: 1px;

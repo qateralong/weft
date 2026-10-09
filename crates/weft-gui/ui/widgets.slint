@@ -21,12 +21,17 @@ export component IconButton inherits Rectangle {
     in property <string> icon;
     in property <string> tooltip;
     in property <color> tint: Theme.muted;
+    // How far the icon turns while hovered, like a gear.
+    in property <angle> turn;
     callback clicked();
     width: 32px;
     height: 32px;
     border-radius: 8px;
     background: touch.has-hover ? Theme.hover : transparent;
+    transform-scale-x: touch.pressed ? 88% : 100%;
+    transform-scale-y: self.transform-scale-x;
     animate background { duration: 150ms; }
+    animate transform-scale-x { duration: 120ms; easing: ease-out; }
     accessible-role: button;
     accessible-label: tooltip;
     accessible-action-default => {
@@ -35,7 +40,9 @@ export component IconButton inherits Rectangle {
     Icon {
         name: icon;
         stroke: touch.has-hover ? Theme.text : tint;
+        transform-rotation: touch.has-hover ? turn : 0deg;
         animate stroke { duration: 150ms; }
+        animate transform-rotation { duration: 400ms; easing: ease-out; }
     }
 
     touch := TouchArea {
@@ -66,7 +73,10 @@ export component Button inherits Rectangle {
     drop-shadow-blur: small ? 0 : 8px;
     drop-shadow-offset-y: 2px;
     drop-shadow-color: Theme.shadow;
+    transform-scale-x: touch.pressed && enabled ? 96% : 100%;
+    transform-scale-y: self.transform-scale-x;
     animate background, border-color { duration: 150ms; }
+    animate transform-scale-x { duration: 120ms; easing: ease-out; }
     accessible-role: button;
     accessible-label: text;
     accessible-action-default => {
@@ -382,6 +392,7 @@ export component Dot inherits Rectangle {
     height: 10px;
     border-radius: self.width / 2;
     background: Theme.state-color(state);
+    opacity: state == "connecting" ? 0.45 + 0.55 * Math.abs(Math.cos(animation-tick() / 1ms / 600 * 1rad)) : 1;
     animate background { duration: 300ms; }
 }
 
@@ -423,10 +434,18 @@ export component Avatar inherits Rectangle {
     in property <string> initial;
     in property <color> tint;
     in property <string> link;
+    property <bool> shown;
+    init => {
+        shown = true;
+    }
     width: 32px;
     height: 32px;
     border-radius: 16px;
     background: tint;
+    transform-scale-x: shown ? 100% : 40%;
+    transform-scale-y: self.transform-scale-x;
+    animate transform-scale-x { duration: 350ms; easing: cubic-bezier(0.34, 1.56, 0.64, 1); }
+    animate background { duration: 300ms; }
     Text {
         text: initial;
         color: white;
