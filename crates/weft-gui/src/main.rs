@@ -299,6 +299,8 @@ impl App {
         on!(app, on_add_server_submit, || app.add_server());
         on!(app, on_host_settings, || app.open_host());
         on!(app, on_copy_server_link, || app.copy_server_link());
+        on!(app, on_open_panel, || app.open_panel());
+        on!(app, on_copy_panel_password, || app.copy_panel_password());
         on!(app, on_remove_server, || app.remove_server());
         on!(app, on_host_save, |address, port| app.save_host(address.to_string(), port.to_string()));
         on!(app, on_invite_create, |uses, expiry| app.create_invite(uses.to_string(), expiry as usize));
@@ -718,12 +720,21 @@ impl App {
                 self.connected(|server| server.hosted).await
             }
             "new:vps" => {
-                let link = self.deploy().await?;
+                let deployed = self.deploy().await?;
+                let link = deployed.link.clone();
                 self.send(Request::Up { link: Some(link.clone()), nickname: None }, None).await?;
-                self.connected(move |server| {
-                    server.server == link || (!server.public && !server.hosted && !before.contains(&server.server))
-                })
-                .await
+                let server = self
+                    .connected(move |server| {
+                        server.server == link || (!server.public && !server.hosted && !before.contains(&server.server))
+                    })
+                    .await?;
+                if let Some(panel) = deployed.panel {
+                    let key = server.clone();
+                    self.store.borrow_mut().update(|settings| {
+                        settings.panels.insert(key, panel);
+                    });
+                }
+                Ok(server)
             }
             _ => Ok(choice),
         }
@@ -747,7 +758,7 @@ impl App {
     }
 
     /// Installs the server over SSH, showing its steps, and returns its link.
-    async fn deploy(self: &Rc<Self>) -> Result<String, String> {
+    async fn deploy(self: &Rc<Self>) -> Result<deploy::Deployed, String> {
         let ui = self.ui();
         let chooser = ui.global::<Chooser>();
         let host = chooser.get_host().trim().to_string();
@@ -784,9 +795,9 @@ impl App {
         })
         .await;
         match result {
-            Ok(link) => {
+            Ok(deployed) => {
                 mark_all(&ui, |_| "done".into());
-                Ok(link)
+                Ok(deployed)
             }
             Err(error) => {
                 mark_all(&ui, |state| if state == "active" { "failed".into() } else { state.into() });
@@ -921,8 +932,40 @@ impl App {
         ui.set_dialog_title(view::server_name(&self.l, &server).into());
         ui.set_menu_local(server.hosted);
         ui.set_menu_has_link(!server.hosted || status.host.as_ref().is_some_and(|host| host.link.is_some()));
+        ui.set_menu_has_panel(self.panel_for(&server).is_some());
         self.context.borrow_mut().server = Some(server);
         self.open("server-menu");
+    }
+
+    /// The web panel of a server: the daemon knows it for the hosted one, the app remembers the
+    /// ones it installed over SSH.
+    fn panel_for(&self, server: &ServerStatus) -> Option<weft_ipc::PanelAccess> {
+        if server.hosted {
+            return self.status.borrow().as_ref()?.host.as_ref()?.panel.clone();
+        }
+        self.store.borrow().current.panels.get(&server.server).cloned()
+    }
+
+    fn open_panel(&self) {
+        let Some(panel) = self.context.borrow().server.as_ref().and_then(|server| self.panel_for(server)) else {
+            return;
+        };
+        if let Err(error) = system::open_url(&panel.url) {
+            return self.toast(&error, true);
+        }
+        if system::copy(&panel.password).is_ok() {
+            self.toast(&self.tr("done-panel-password"), false);
+        }
+    }
+
+    fn copy_panel_password(&self) {
+        let Some(panel) = self.context.borrow().server.as_ref().and_then(|server| self.panel_for(server)) else {
+            return;
+        };
+        match system::copy(&panel.password) {
+            Ok(()) => self.toast(&self.tr("done-panel-password"), false),
+            Err(error) => self.toast(&error, true),
+        }
     }
 
     fn copy_server_link(&self) {

@@ -7,7 +7,7 @@ use std::path::Path;
 use loom::Server;
 use loom::config::Config;
 use loom::db::Db;
-use weft_ipc::Reach;
+use weft_ipc::{PanelAccess, Reach};
 use weft_portmap::{PortMapper, Transport};
 use weft_proto::{Host, Link, PublicKey};
 use weft_session::StaticKeypair;
@@ -19,6 +19,7 @@ pub struct Hosted {
     _server: Server,
     pub port: u16,
     pub key: PublicKey,
+    panel: Option<PanelAccess>,
     tcp: PortMapper,
     udp: PortMapper,
 }
@@ -45,6 +46,7 @@ impl Hosted {
                     return Ok(Self {
                         port,
                         key: server.public_key,
+                        panel: panel(dir, port),
                         tcp: PortMapper::spawn_with(port, Transport::Tcp, true),
                         udp: PortMapper::spawn_with(port, Transport::Udp, true),
                         _server: server,
@@ -57,6 +59,10 @@ impl Hosted {
             }
         }
         Err(last)
+    }
+
+    pub fn panel(&self) -> Option<PanelAccess> {
+        self.panel.clone()
     }
 
     /// How this device itself connects: over loopback, which needs no port forwarding.
@@ -85,6 +91,28 @@ impl Hosted {
         let lan = weft_portmap::local_addresses(None).into_iter().find(|ip| ip.is_ipv4() && !is_public(*ip));
         (lan.and_then(|ip| link(&ip.to_string())), reach)
     }
+}
+
+/// The panel of the hosted server, opened on this computer. Its password is kept next to the
+/// server's data so the app can show it; the directory belongs to root.
+fn panel(dir: &Path, port: u16) -> Option<PanelAccess> {
+    let secret = loom::panel::secret(dir).ok()?;
+    let stored = dir.join("panel-password");
+    let password = match std::fs::read_to_string(&stored) {
+        Ok(password) if !password.trim().is_empty() && loom::panel::has_password(dir) => password.trim().to_string(),
+        _ => {
+            let password = loom::panel::generate_password();
+            loom::panel::set_password(dir, &password).ok()?;
+            std::fs::write(&stored, &password).ok()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&stored, std::fs::Permissions::from_mode(0o600));
+            }
+            password
+        }
+    };
+    Some(PanelAccess { url: loom::panel::url("127.0.0.1", port, &secret), password })
 }
 
 /// Not private, carrier-grade NAT, loopback or link-local.

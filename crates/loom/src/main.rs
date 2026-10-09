@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use loom::config::Config;
 use loom::db::Db;
-use loom::{Server, server_link};
+use loom::{Server, panel, server_link};
 use weft_session::StaticKeypair;
 
 #[cfg(unix)]
@@ -29,10 +29,31 @@ enum Command {
         #[arg(long)]
         host: Option<String>,
     },
+    /// Set up the web panel for the administrator
+    Panel {
+        #[command(subcommand)]
+        action: PanelCommand,
+    },
     /// Manage the running server
     Admin {
         #[command(subcommand)]
         action: AdminCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum PanelCommand {
+    /// Print the panel address
+    Url {
+        /// Public host name or IP address of this server
+        #[arg(long)]
+        host: Option<String>,
+    },
+    /// Set the administrator password, read from the first line of standard input
+    Password {
+        /// Make up a random password and print it
+        #[arg(long)]
+        generate: bool,
     },
 }
 
@@ -105,6 +126,28 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Link { host } => {
             let host = host.or(config.public_host.clone()).ok_or("set public_host in the config or pass --host")?;
             println!("{}", server_link(&host, config.listen.port(), &keypair.public())?);
+            Ok(())
+        }
+        Command::Panel { action: PanelCommand::Url { host } } => {
+            let host = host.or(config.public_host.clone()).ok_or("set public_host in the config or pass --host")?;
+            println!("{}", panel::url(&host, config.listen.port(), &panel::secret(&config.data_dir)?));
+            Ok(())
+        }
+        Command::Panel { action: PanelCommand::Password { generate } } => {
+            let password = if generate {
+                panel::generate_password()
+            } else {
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                line.trim_end_matches(['\r', '\n']).to_string()
+            };
+            if password.is_empty() {
+                return Err("the password is empty".into());
+            }
+            panel::set_password(&config.data_dir, &password)?;
+            if generate {
+                println!("{password}");
+            }
             Ok(())
         }
         Command::Run => {

@@ -4,6 +4,7 @@ mod control;
 pub mod db;
 mod hub;
 mod limiter;
+pub mod panel;
 pub mod relay;
 pub mod tls;
 mod udp;
@@ -40,10 +41,12 @@ impl Server {
         let public_key = keypair.public();
         let own = ObfsKey::for_receiver(&public_key);
         let tls = tls::acceptor(&config).map_err(io::Error::other)?;
+        let panel = Arc::new(panel::Panel::new(config.data_dir.clone()));
         let hub = Arc::new(Mutex::new(Hub::new(db, config)));
         let tasks = vec![
-            tokio::spawn(control::serve(listener, hub.clone(), Arc::new(keypair), socket.clone(), tls)),
+            tokio::spawn(control::serve(listener, hub.clone(), Arc::new(keypair), socket.clone(), tls, panel.clone())),
             tokio::spawn(udp::serve(socket, hub.clone(), own)),
+            tokio::spawn(panel.sample(hub.clone())),
         ];
         Ok(Self { tcp_addr, udp_addr, public_key, hub, tasks })
     }

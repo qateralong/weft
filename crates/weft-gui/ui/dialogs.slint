@@ -563,10 +563,26 @@ export component ServersDialog inherits DialogFrame {
 export component ServerMenuDialog inherits DialogFrame {
     in property <bool> local;
     in property <bool> has-link;
+    in property <bool> has-panel;
     callback host-settings();
     callback copy-link();
+    callback open-panel();
+    callback copy-panel-password();
     callback remove();
     leave-text: I18n.t("gui-back");
+    if has-panel: MenuRow {
+        text: I18n.t("gui-panel-open");
+        arrow: true;
+        clicked => {
+            root.open-panel();
+        }
+    }
+    if has-panel: MenuRow {
+        text: I18n.t("gui-panel-password");
+        clicked => {
+            root.copy-panel-password();
+        }
+    }
     if local: MenuRow {
         text: I18n.t("gui-host-advanced");
         arrow: true;

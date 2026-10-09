@@ -38,8 +38,14 @@ impl client::Handler for AcceptAny {
     }
 }
 
+/// What the installer reports back.
+pub struct Deployed {
+    pub link: String,
+    pub panel: Option<weft_ipc::PanelAccess>,
+}
+
 /// Runs the installer and returns the server link; `step` gets the script's progress.
-pub async fn deploy(target: &Target, step: impl Fn(&str)) -> Result<String, DeployError> {
+pub async fn deploy(target: &Target, step: impl Fn(&str)) -> Result<Deployed, DeployError> {
     let config = Arc::new(client::Config { inactivity_timeout: Some(Duration::from_secs(120)), ..Default::default() });
     let address = (target.host.trim_start_matches('[').trim_end_matches(']'), target.port);
     let connect = client::connect(config, address, AcceptAny);
@@ -68,6 +74,8 @@ pub async fn deploy(target: &Target, step: impl Fn(&str)) -> Result<String, Depl
     let mut channel = channel;
     let mut output = String::new();
     let mut link = None;
+    let mut panel_url = None;
+    let mut panel_password = None;
     let mut error = None;
     let mut status = None;
     let mut handle = |line: &str| {
@@ -75,6 +83,10 @@ pub async fn deploy(target: &Target, step: impl Fn(&str)) -> Result<String, Depl
             step(name.trim());
         } else if let Some(found) = line.strip_prefix("LINK ") {
             link = Some(found.trim().to_string());
+        } else if let Some(found) = line.strip_prefix("PANELPASS ") {
+            panel_password = Some(found.trim().to_string());
+        } else if let Some(found) = line.strip_prefix("PANEL ") {
+            panel_url = Some(found.trim().to_string());
         } else if let Some(code) = line.strip_prefix("ERROR ") {
             error = Some(code.trim().to_string());
         }
@@ -94,8 +106,9 @@ pub async fn deploy(target: &Target, step: impl Fn(&str)) -> Result<String, Depl
     }
     handle(output.trim_end());
     let _ = session.disconnect(russh::Disconnect::ByApplication, "", "").await;
+    let panel = panel_url.zip(panel_password).map(|(url, password)| weft_ipc::PanelAccess { url, password });
     match (link, error, status) {
-        (Some(link), _, _) => Ok(link),
+        (Some(link), _, _) => Ok(Deployed { link, panel }),
         (None, Some(code), _) => Err(DeployError::Script(code)),
         (None, None, status) => Err(DeployError::Other(format!("installer exited with {status:?}"))),
     }
@@ -142,8 +155,8 @@ mod tests {
             binary: parts.get(4).map(|url| url.to_string()),
         };
         let steps = std::sync::Mutex::new(Vec::new());
-        let link = deploy(&target, |step| steps.lock().unwrap().push(step.to_string())).await.unwrap();
-        println!("steps {:?} link {link}", steps.lock().unwrap());
-        assert!(link.starts_with("weft://"));
+        let deployed = deploy(&target, |step| steps.lock().unwrap().push(step.to_string())).await.unwrap();
+        println!("steps {:?} link {} panel {:?}", steps.lock().unwrap(), deployed.link, deployed.panel);
+        assert!(deployed.link.starts_with("weft://"));
     }
 }

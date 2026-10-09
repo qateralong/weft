@@ -1128,6 +1128,7 @@ impl Daemon {
                 reach,
                 mapped: hosted.mapped(),
                 address,
+                panel: hosted.panel(),
             }
         });
         Status {

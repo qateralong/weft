@@ -209,6 +209,10 @@ impl Hub {
         Some(Route { source: source_address, delivery })
     }
 
+    pub fn online_count(&self) -> usize {
+        self.sessions.len()
+    }
+
     pub fn is_online(&self, key: &PublicKey) -> bool {
         self.sessions.contains_key(key)
     }

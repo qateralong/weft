@@ -1,6 +1,6 @@
 # Installs or updates the Weft server (loom) on a Linux machine with systemd.
 # Runs as root; $1 is the address clients use, $2 overrides where the binary comes from. Prints "STEP name" while working,
-# "ERROR code" on failure and "LINK weft://..." at the end.
+# "ERROR code" on failure, and at the end "LINK weft://...", "PANEL https://..." and "PANELPASS password" (a new one each time).
 set -eu
 HOST="$1"
 step() { echo "STEP $1"; }
@@ -97,4 +97,9 @@ if ! systemctl is-active --quiet loom; then
     journalctl -u loom -n 20 --no-pager || true
     fail not-started
 fi
-echo "LINK $(runuser -u loom -- /usr/local/bin/loom --config /etc/loom/loom.toml link)"
+loom_cmd() { runuser -u loom -- /usr/local/bin/loom --config /etc/loom/loom.toml "$@"; }
+echo "LINK $(loom_cmd link)"
+if password=$(loom_cmd panel password --generate 2> /dev/null); then
+    echo "PANEL $(loom_cmd panel url)"
+    echo "PANELPASS $password"
+fi

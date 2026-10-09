@@ -93,6 +93,7 @@ export component AppWindow inherits Window {
     in property <[ServerRow]> servers;
     in property <bool> menu-local;
     in property <bool> menu-has-link;
+    in property <bool> menu-has-panel;
     in-out property <string> host-address;
     in-out property <string> host-port;
     in property <string> list-network;
@@ -137,6 +138,8 @@ export component AppWindow inherits Window {
     callback add-server-submit();
     callback host-settings();
     callback copy-server-link();
+    callback open-panel();
+    callback copy-panel-password();
     callback remove-server();
     callback host-save(string, string);
     callback invite-create(string, int);
@@ -362,6 +365,13 @@ export component AppWindow inherits Window {
         error: dialog-error;
         local: menu-local;
         has-link: menu-has-link;
+        has-panel: menu-has-panel;
+        open-panel => {
+            root.open-panel();
+        }
+        copy-panel-password => {
+            root.copy-panel-password();
+        }
         leave => {
             root.dialog-leave();
         }

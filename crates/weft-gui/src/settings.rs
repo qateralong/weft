@@ -1,8 +1,10 @@
 //! The app's own preferences, kept as JSON in the user's config directory.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use weft_ipc::PanelAccess;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(default)]
@@ -17,6 +19,8 @@ pub struct Settings {
     pub collapsed: Vec<String>,
     /// The latest release seen and when it was checked.
     pub release: Option<Release>,
+    /// Web panels of servers installed from this app, by server link.
+    pub panels: BTreeMap<String, PanelAccess>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -28,7 +32,15 @@ pub struct Release {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { notifications: true, updates: true, language: None, dark: None, collapsed: Vec::new(), release: None }
+        Self {
+            notifications: true,
+            updates: true,
+            language: None,
+            dark: None,
+            collapsed: Vec::new(),
+            release: None,
+            panels: BTreeMap::new(),
+        }
     }
 }
 

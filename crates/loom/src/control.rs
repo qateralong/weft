@@ -21,6 +21,7 @@ use weft_session::tls::{RECORD_HANDSHAKE, TlsAcceptor};
 
 use crate::db::{DbError, Device, InviteRow, NetworkRow, name_key, unix_now};
 use crate::hub::{Hub, MAX_CANDIDATES, SharedHub, lock};
+use crate::panel::Panel;
 use crate::tls::{http_reply, is_http};
 use crate::udp;
 use crate::validate;
@@ -54,6 +55,7 @@ pub async fn serve(
     keypair: Arc<StaticKeypair>,
     socket: Arc<UdpSocket>,
     tls: TlsAcceptor,
+    panel: Arc<Panel>,
 ) {
     let mut next_conn = 0;
     loop {
@@ -66,25 +68,35 @@ pub async fn serve(
             }
         };
         next_conn += 1;
-        let (hub, keypair, socket, tls, conn) = (hub.clone(), keypair.clone(), socket.clone(), tls.clone(), next_conn);
+        let shared = Shared {
+            hub: hub.clone(),
+            keypair: keypair.clone(),
+            socket: socket.clone(),
+            tls: tls.clone(),
+            panel: panel.clone(),
+        };
+        let conn = next_conn;
         tokio::spawn(async move {
-            if let Err(error) = accept(stream, addr, tls, hub, keypair, socket, conn).await {
+            if let Err(error) = accept(stream, addr, shared, conn).await {
                 tracing::debug!(%addr, %error, "connection closed");
             }
         });
     }
 }
 
-/// Takes TLS or the plain stream of older clients, and answers HTTP scanners like nginx would.
-async fn accept(
-    stream: TcpStream,
-    addr: SocketAddr,
-    tls: TlsAcceptor,
+/// What every connection needs from the server.
+struct Shared {
     hub: SharedHub,
     keypair: Arc<StaticKeypair>,
     socket: Arc<UdpSocket>,
-    conn: u64,
-) -> Result<(), ConnError> {
+    tls: TlsAcceptor,
+    panel: Arc<Panel>,
+}
+
+/// Takes TLS or the plain stream of older clients. HTTP inside TLS goes to the panel, which
+/// answers everything but its secret path like nginx would.
+async fn accept(stream: TcpStream, addr: SocketAddr, shared: Shared, conn: u64) -> Result<(), ConnError> {
+    let Shared { hub, keypair, socket, tls, panel } = shared;
     stream.set_nodelay(true)?;
     let mut start = [0; 4];
     let peeked = timeout(HANDSHAKE_TIMEOUT, stream.peek(&mut start)).await.map_err(|_| ConnError::Timeout)??;
@@ -104,7 +116,7 @@ async fn accept(
     let mut start = [0; 4];
     timeout(HANDSHAKE_TIMEOUT, stream.read_exact(&mut start)).await.map_err(|_| ConnError::Timeout)??;
     if is_http(&start) {
-        return decoy(stream, &http_reply("404 Not Found", "")).await;
+        return Ok(crate::panel::serve(stream, start, addr.ip(), hub, panel).await?);
     }
     let (reader, writer) = tokio::io::split(stream);
     let reader = std::io::Cursor::new(start).chain(reader);

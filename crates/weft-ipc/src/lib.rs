@@ -244,6 +244,16 @@ pub struct HostStatus {
     pub mapped: bool,
     /// The address set by the user, if any.
     pub address: Option<String>,
+    /// The server's web panel, opened from this computer.
+    #[serde(default)]
+    pub panel: Option<PanelAccess>,
+}
+
+/// Where the administrator panel of a server opens and its password.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PanelAccess {
+    pub url: String,
+    pub password: String,
 }
 
 /// Who can reach a hosted server.
