@@ -11,7 +11,7 @@ export struct MemberRow {
     ping: string,
     level: int,
     link: string,
-    color: color,
+    tone: int,
     initial: string,
     me: bool,
 }
@@ -52,7 +52,7 @@ component MemberLine inherits Rectangle {
     Avatar {
         x: place(pad, 32px);
         initial: data.initial;
-        tint: data.color;
+        tint: Theme.avatar(data.tone);
         link: data.link;
     }
 

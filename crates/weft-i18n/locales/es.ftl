@@ -388,4 +388,3 @@ gui-no-servers = Aún no hay servidores: aparecen cuando crea una red o se une a
 gui-server-kind = Tipo de servidor
 gui-back = Atrás
 gui-language = Idioma
-gui-language-system = Como en el sistema

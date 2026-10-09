@@ -1,7 +1,5 @@
 // Colors, icons and translations shared by every part of the window.
 
-import { Palette } from "std-widgets.slint";
-
 export global I18n {
     in property <int> revision;
     in property <bool> rtl;
@@ -24,7 +22,7 @@ export global Utils {
 }
 
 export global Theme {
-    in-out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    in-out property <bool> dark;
     out property <color> bg: dark ? #1c1d20 : #f4efe6;
     out property <color> card: dark ? #26282c : #fffdf8;
     out property <color> hover: dark ? #2d2f34 : #faf5ec;
@@ -42,6 +40,14 @@ export global Theme {
     out property <color> off: dark ? #5b5e65 : #bdb3a5;
     out property <color> shadow: dark ? #00000040 : #503c1e14;
     out property <color> backdrop: #140f0a66;
+
+    // Avatar backgrounds: earthy tones on beige, brighter ones on dark gray.
+    out property <[color]> avatars-light: [#c0704f, #b8893a, #7d8f4e, #4f8a7e, #6b7fa3, #8e6aa8, #b0657f, #8b6e52];
+    out property <[color]> avatars-dark: [#e07b55, #d8ab45, #6fb064, #46aca1, #4f93d1, #8a79d6, #c96aab, #a3876a];
+
+    public pure function avatar(tone: int) -> color {
+        return dark ? avatars-dark[tone] : avatars-light[tone];
+    }
 
     public pure function state-color(state: string) -> color {
         if state == "connected" || state == "direct" {

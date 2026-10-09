@@ -108,7 +108,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let language = options
         .language
         .or_else(|| store.current.language.as_deref().and_then(Language::from_code))
-        .unwrap_or_else(Language::from_env);
+        .unwrap_or(Language::English);
     let l = Arc::new(Localizer::new(language));
     // Matches weft.desktop, so docks and launchers show the right icon.
     let _ = slint::set_xdg_app_id("weft");
@@ -821,13 +821,9 @@ impl App {
         let ui = self.ui();
         let status = self.status.borrow().clone();
         ui.set_settings_nickname(status.as_ref().map(|status| status.nickname.clone()).unwrap_or_default().into());
-        let mut languages = vec![SharedString::from(self.tr("gui-language-system"))];
-        languages.extend(Language::ALL.iter().map(|language| SharedString::from(language.name())));
+        let languages: Vec<SharedString> = Language::ALL.iter().map(|language| language.name().into()).collect();
         ui.set_languages(ModelRc::new(VecModel::from(languages)));
-        let chosen = self.store.borrow().current.language.clone();
-        let index = chosen
-            .and_then(|code| Language::ALL.iter().position(|language| language.code() == code))
-            .map_or(0, |index| index + 1);
+        let index = Language::ALL.iter().position(|language| *language == self.l.language()).unwrap_or(0);
         ui.set_language_index(index as i32);
         ui.set_server_count(status.as_ref().map_or(0, |status| view::servers(status).len()) as i32);
         ui.set_notifications(self.store.borrow().current.notifications);
@@ -836,9 +832,9 @@ impl App {
     }
 
     fn choose_language(&self, index: usize) {
-        let language = index.checked_sub(1).and_then(|index| Language::ALL.get(index)).copied();
-        self.store.borrow_mut().update(|settings| settings.language = language.map(|language| language.code().into()));
-        self.l.set_language(language.unwrap_or_else(Language::from_env));
+        let language = Language::ALL.get(index).copied().unwrap_or(Language::English);
+        self.store.borrow_mut().update(|settings| settings.language = Some(language.code().into()));
+        self.l.set_language(language);
         let ui = self.ui();
         let i18n = ui.global::<I18n>();
         i18n.set_rtl(self.l.language().is_rtl());

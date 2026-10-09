@@ -388,4 +388,3 @@ gui-no-servers = لا توجد خوادم بعد: ستظهر عند إنشاء �
 gui-server-kind = نوع الخادم
 gui-back = رجوع
 gui-language = اللغة
-gui-language-system = حسب النظام

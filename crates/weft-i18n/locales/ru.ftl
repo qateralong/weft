@@ -388,4 +388,3 @@ gui-no-servers = Серверов пока нет: они появятся, ко
 gui-server-kind = Тип сервера
 gui-back = Назад
 gui-language = Язык
-gui-language-system = Как в системе

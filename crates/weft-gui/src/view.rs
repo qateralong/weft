@@ -3,13 +3,14 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use slint::{Color, Model, ModelRc, SharedString, VecModel};
+use slint::{Model, ModelRc, SharedString, VecModel};
 use weft_i18n::Localizer;
 use weft_ipc::{Connection, HostStatus, MemberStatus, NetworkStatus, PeerLink, Reach, Role, ServerStatus, Status};
 
 use crate::ui::{MemberRow, NetworkCard, ServerRow};
 
-const AVATAR_COLORS: [u32; 8] = [0xd9734e, 0xc9a03a, 0x5f9e57, 0x3e9a91, 0x3f7fb8, 0x7867c4, 0xb95f9d, 0x8b7258];
+/// How many avatar tones the theme has.
+const AVATAR_TONES: u32 = 8;
 
 /// The rows on screen, kept between polls so they are updated in place.
 #[derive(Default)]
@@ -193,7 +194,7 @@ fn member_rows(
     let me = MemberRow {
         nickname: status.nickname.clone().into(),
         initial: initial(&status.nickname).into(),
-        color: avatar_color(&status.nickname),
+        tone: avatar_tone(&status.nickname),
         sub: if several { server_name(l, server) } else { l.tr(&state) }.into(),
         address: server.address.map(|address| address.to_string()).unwrap_or_default().into(),
         dns: SharedString::new(),
@@ -217,7 +218,7 @@ fn member_row(l: &Localizer, member: &MemberStatus, to_server: Option<u32>) -> M
     MemberRow {
         nickname: member.nickname.clone().into(),
         initial: initial(&member.nickname).into(),
-        color: avatar_color(&member.nickname),
+        tone: avatar_tone(&member.nickname),
         sub: l.tr(sub).into(),
         address: member.address.to_string().into(),
         dns: member.dns.clone().unwrap_or_default().into(),
@@ -250,9 +251,9 @@ fn initial(nickname: &str) -> String {
     nickname.chars().next().map_or_else(|| "?".into(), |c| c.to_uppercase().collect())
 }
 
-fn avatar_color(nickname: &str) -> Color {
+fn avatar_tone(nickname: &str) -> i32 {
     let hash = nickname.chars().fold(0u32, |hash, c| hash.wrapping_mul(31).wrapping_add(c as u32));
-    Color::from_argb_encoded(0xff00_0000 | AVATAR_COLORS[hash as usize % AVATAR_COLORS.len()])
+    (hash % AVATAR_TONES) as i32
 }
 
 /// Updates a model row by row, so unchanged rows keep their state and animations.
