@@ -51,10 +51,19 @@ struct Options {
     language: Option<Language>,
     dark: Option<bool>,
     dialog: Option<String>,
+    clicks: Vec<(f32, f32)>,
 }
 
 fn options() -> Options {
-    let mut options = Options { hidden: false, demo: false, shot: None, language: None, dark: None, dialog: None };
+    let mut options = Options {
+        hidden: false,
+        demo: false,
+        shot: None,
+        language: None,
+        dark: None,
+        dialog: None,
+        clicks: Vec::new(),
+    };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -65,6 +74,14 @@ fn options() -> Options {
             "--screenshot" => options.shot = args.next().map(PathBuf::from),
             "--lang" => options.language = args.next().as_deref().and_then(Language::from_code),
             "--dialog" => options.dialog = args.next(),
+            "--click" => {
+                let point = args.next().unwrap_or_default();
+                if let Some((x, y)) = point.split_once(',')
+                    && let (Ok(x), Ok(y)) = (x.parse(), y.parse())
+                {
+                    options.clicks.push((x, y));
+                }
+            }
             _ => {}
         }
     }
@@ -170,6 +187,10 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Some(path) = options.shot {
         if let Some(dialog) = options.dialog {
             app.open_by_name(&dialog);
+        }
+        ui.show()?;
+        for (x, y) in options.clicks {
+            shot::click(x, y);
         }
         return shot::save(&ui, &path);
     }

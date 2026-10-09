@@ -163,6 +163,7 @@ export component Field inherits VerticalLayout {
     in property <string> label;
     in property <string> placeholder;
     in property <bool> password;
+    in property <bool> number;
     in property <bool> enabled: true;
     in-out property <string> text;
     callback accepted();
@@ -197,7 +198,7 @@ export component Field inherits VerticalLayout {
             color: Theme.text;
             selection-background-color: Theme.accent-soft;
             selection-foreground-color: Theme.text;
-            input-type: password ? InputType.password : InputType.text;
+            input-type: password ? InputType.password : number ? InputType.number : InputType.text;
             single-line: true;
             vertical-alignment: center;
             horizontal-alignment: I18n.rtl ? right : left;

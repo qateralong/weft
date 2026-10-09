@@ -211,7 +211,7 @@ gui-ban = حظر
 gui-promote = تعيين مشرفًا
 gui-demote = سحب الإشراف
 gui-new-invite = دعوة جديدة
-gui-invite-uses = عدد مرات الاستخدام (فارغ = بلا حد)
+gui-invite-uses = كم مرة
 gui-invite-expiry = تنتهي
 gui-expiry-never = أبدًا
 gui-expiry-hour = بعد ساعة
@@ -388,3 +388,4 @@ gui-no-servers = لا توجد خوادم بعد: ستظهر عند إنشاء �
 gui-server-kind = نوع الخادم
 gui-back = رجوع
 gui-language = اللغة
+gui-invite-limited = تحديد عدد مرات الاستخدام

@@ -610,14 +610,24 @@ export component InvitesDialog inherits DialogFrame {
     callback copy(string);
     callback revoke(string);
     property <int> expiry: 3;
+    property <bool> limited;
+    property <string> uses;
     leave-text: I18n.t("gui-close");
     title: I18n.t("gui-invites");
     Section {
         text: I18n.t("gui-new-invite");
     }
 
-    uses := Field {
+    Switch {
+        text: I18n.t("gui-invite-limited");
+        checked <=> root.limited;
+    }
+
+    if limited: uses := Field {
         label: I18n.t("gui-invite-uses");
+        placeholder: "1";
+        number: true;
+        text <=> root.uses;
     }
 
     VerticalLayout {
@@ -637,7 +647,7 @@ export component InvitesDialog inherits DialogFrame {
         text: I18n.t("gui-create");
         enabled: !root.busy;
         clicked => {
-            root.create(uses.text, expiry);
+            root.create(limited ? uses : "", expiry);
         }
     }
 

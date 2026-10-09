@@ -25,6 +25,18 @@ pub fn install(width: u32, height: u32) {
     slint::platform::set_platform(Box::new(Offscreen(window))).expect("no platform set yet");
 }
 
+/// Clicks at a point of the window, as a user would.
+pub fn click(x: f32, y: f32) {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let window = WINDOW.with(Rc::clone);
+    let position = slint::LogicalPosition::new(x, y);
+    slint::platform::update_timers_and_animations();
+    window.dispatch_event(WindowEvent::PointerMoved { position });
+    window.dispatch_event(WindowEvent::PointerPressed { position, button: PointerEventButton::Left });
+    window.dispatch_event(WindowEvent::PointerReleased { position, button: PointerEventButton::Left });
+    slint::platform::update_timers_and_animations();
+}
+
 /// Renders the current frame to a binary PPM file.
 pub fn save(ui: &impl ComponentHandle, path: &Path) -> Result<(), PlatformError> {
     ui.show()?;

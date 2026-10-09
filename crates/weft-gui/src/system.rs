@@ -55,3 +55,15 @@ pub fn restart_if_replaced(visible: bool) -> bool {
 pub fn restart_if_replaced(_visible: bool) -> bool {
     false
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore]
+    fn copies_to_the_desktop_clipboard() {
+        super::copy("weft-clipboard-check").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let pasted = std::process::Command::new("wl-paste").arg("-n").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&pasted.stdout), "weft-clipboard-check");
+    }
+}
