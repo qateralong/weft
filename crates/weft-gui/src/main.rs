@@ -648,12 +648,9 @@ impl App {
             ui.set_update_version(SharedString::new());
             return;
         }
-        let cached = self.store.borrow().current.release.clone();
-        if let Some(release) =
-            cached.filter(|release| update::now().saturating_sub(release.checked) < update::EVERY.as_secs())
-        {
+        // The last known release shows right away; GitHub is asked again on every start.
+        if let Some(release) = self.store.borrow().current.release.clone() {
             self.show_release(&release.tag);
-            return;
         }
         let app = self.clone();
         self.spawn(async move {
