@@ -60,12 +60,22 @@ pub enum Delivery {
     Tcp(mpsc::UnboundedSender<ServerMessage>),
 }
 
-/// Checks for ended mutes every few seconds.
-pub async fn expire_mutes(hub: SharedHub) {
+/// Devices that belong to nothing are forgotten after this long without connecting.
+const STALE_DEVICE: Duration = Duration::from_secs(90 * 24 * 3600);
+const PRUNE_EVERY: u32 = 720;
+
+/// Lifts ended mutes every few seconds and forgets stale devices every hour.
+pub async fn housekeeping(hub: SharedHub) {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
+    let mut ticks = 0u32;
     loop {
         interval.tick().await;
-        lock(&hub).expire_mutes();
+        let mut hub = lock(&hub);
+        hub.expire_mutes();
+        if ticks.is_multiple_of(PRUNE_EVERY) {
+            hub.prune_devices();
+        }
+        ticks = ticks.wrapping_add(1);
     }
 }
 
@@ -308,6 +318,15 @@ impl Hub {
                 }
                 Err(error) => tracing::warn!(%error, "cannot build state"),
             }
+        }
+    }
+
+    fn prune_devices(&mut self) {
+        let online: BTreeSet<PublicKey> = self.sessions.keys().copied().collect();
+        match self.db.prune_devices(unix_now() - STALE_DEVICE.as_secs() as i64, &online) {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(removed, "forgot stale devices"),
+            Err(error) => tracing::warn!(%error, "cannot prune devices"),
         }
     }
 

@@ -516,3 +516,6 @@ gui-update-error = فشل التحديث: { $reason }
 gui-update-done = تم، سيُعاد تشغيل Weft بعد لحظة
 
 gui-off-title = Weft متوقف
+
+error-too-many-networks = لديك عدد كبير جداً من الشبكات الخاصة بك على هذا الخادم
+gui-ssh-host-changed = تغيّر مفتاح SSH للخادم منذ آخر اتصال. قد يكون هناك من يعترض الاتصال، لذلك لم تُرسل كلمة المرور. إذا أُعيد تثبيت الخادم فاحذف سطره من ~/.ssh/known_hosts و ~/.config/weft/known_hosts.

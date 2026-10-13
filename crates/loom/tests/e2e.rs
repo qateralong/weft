@@ -480,6 +480,7 @@ async fn mutes_renames_and_avatars() {
     tokio::time::timeout(Duration::from_secs(10), b.state_where(|state| online(state, "carol"))).await.unwrap();
     let Ok(ServerKind::State(state)) = b.ask(ClientKind::Refresh(Empty {})).await else { panic!() };
     assert!(state.networks[0].details.iter().all(|detail| detail.muted_until == 0));
+    assert_eq!(b.ask(ClientKind::Refresh(Empty {})).await.err(), Some(ErrorCode::RateLimited));
 
     let rename = |name: &str| {
         ClientKind::UpdateNetwork(NetworkSettings {
@@ -509,6 +510,7 @@ async fn mutes_renames_and_avatars() {
     let avatar = |image: Vec<u8>| ClientKind::SetAvatar(Avatar { key: Vec::new(), image });
     assert_eq!(a.request(avatar(b"not a picture".to_vec())).await, Err(ErrorCode::InvalidRequest));
     a.request(avatar(png.clone())).await.unwrap();
+    assert_eq!(a.request(avatar(png.clone())).await, Err(ErrorCode::RateLimited));
     let state = b.state_where(|state| state.peers.iter().any(|peer| !peer.avatar.is_empty())).await;
     let alice = state.peers.iter().find(|peer| peer.nickname == "alice").unwrap();
     assert_eq!(alice.avatar, avatar_id(&png));

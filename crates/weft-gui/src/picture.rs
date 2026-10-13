@@ -11,6 +11,8 @@ const SIZE: u32 = 128;
 const MAX_LEN: usize = 24 * 1024;
 /// Pictures bigger than this are not even opened.
 const MAX_FILE: u64 = 32 * 1024 * 1024;
+/// The largest received picture shown; the app itself sends `SIZE`.
+const MAX_SIDE: u32 = 512;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PictureError {
@@ -50,9 +52,16 @@ fn encode(image: &DynamicImage) -> Result<Vec<u8>, PictureError> {
     Err(PictureError::TooBig)
 }
 
-/// Decodes a received picture for showing it.
+/// Decodes a received picture for showing it. Pictures come from other people, so a small file
+/// that unpacks into a huge image is refused.
 pub fn pixels(bytes: &[u8]) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
-    let image = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_SIDE);
+    limits.max_image_height = Some(MAX_SIDE);
+    limits.max_alloc = Some(16 * 1024 * 1024);
+    reader.limits(limits);
+    let image = reader.decode().ok()?.to_rgba8();
     Some(SharedPixelBuffer::clone_from_slice(image.as_raw(), image.width(), image.height()))
 }
 
@@ -71,5 +80,9 @@ mod tests {
         let decoded = pixels(&jpeg).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (SIZE, SIZE));
         assert!(pixels(b"not a picture").is_none());
+        let huge = DynamicImage::ImageLuma8(image::GrayImage::new(4000, 4000));
+        let mut png = Vec::new();
+        huge.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        assert!(pixels(&png).is_none());
     }
 }

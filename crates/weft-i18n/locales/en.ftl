@@ -516,3 +516,6 @@ gui-update-error = Update failed: { $reason }
 gui-update-done = Updated, Weft restarts in a moment
 
 gui-off-title = Weft is off
+
+error-too-many-networks = You own too many networks on this server
+gui-ssh-host-changed = The server's SSH key has changed since the last connection. Someone may be intercepting it, so the password was not sent. If the server was reinstalled, remove its line from ~/.ssh/known_hosts and ~/.config/weft/known_hosts.

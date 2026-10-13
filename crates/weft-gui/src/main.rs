@@ -1001,6 +1001,7 @@ impl App {
                         self.tr_args("gui-ssh-unreachable", &[("reason", &reason)])
                     }
                     deploy::DeployError::Login => self.tr("gui-ssh-login-failed"),
+                    deploy::DeployError::HostKeyChanged => self.tr("gui-ssh-host-changed"),
                     deploy::DeployError::Script(code) => self.tr(&format!("gui-ssh-error-{code}")),
                     deploy::DeployError::Other(reason) => self.tr_args("gui-ssh-failed", &[("reason", &reason)]),
                 })
@@ -1211,6 +1212,10 @@ impl App {
         let Some(panel) = self.context.borrow().server.as_ref().and_then(|server| self.panel_for(server)) else {
             return;
         };
+        // The address came from the server; only a web page may be opened.
+        if !panel.url.starts_with("https://") {
+            return;
+        }
         if let Err(error) = system::open_url(&panel.url) {
             return self.toast(&error, true);
         }

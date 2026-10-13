@@ -103,12 +103,7 @@ fn panel(dir: &Path, port: u16) -> Option<PanelAccess> {
         _ => {
             let password = loom::panel::generate_password();
             loom::panel::set_password(dir, &password).ok()?;
-            std::fs::write(&stored, &password).ok()?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&stored, std::fs::Permissions::from_mode(0o600));
-            }
+            loom::panel::write_private(&stored, &password).ok()?;
             password
         }
     };

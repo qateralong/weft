@@ -112,11 +112,40 @@ fn raise_file_limit() {
     }
 }
 
+/// The state directory holds the device's private key, the hosted server's data and its panel
+/// password, so only the daemon's own user may read it.
+#[cfg(unix)]
+fn protect(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(error) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
+        tracing::warn!(dir = %dir.display(), %error, "cannot restrict the state directory");
+    }
+}
+
+/// On Windows, ProgramData lets every user read new folders: keep only SYSTEM and administrators.
+#[cfg(windows)]
+fn protect(dir: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    if dir != default_state_dir() {
+        return;
+    }
+    let result = std::process::Command::new("icacls")
+        .arg(dir)
+        .args(["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T", "/Q"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+    if !result.is_ok_and(|status| status.success()) {
+        tracing::warn!(dir = %dir.display(), "cannot restrict the state directory");
+    }
+}
+
 fn run(options: Options, shutdown: impl Future<Output = ()>) -> Result<(), BoxError> {
     #[cfg(unix)]
     raise_file_limit();
     let state_dir = options.state_dir.unwrap_or_else(default_state_dir);
     std::fs::create_dir_all(&state_dir)?;
+    protect(&state_dir);
     let keypair = StaticKeypair::load_or_create(&state_dir.join("key"))?;
     let settings = settings::SettingsFile::new(state_dir.join("weftd.toml"));
     let socket = options.socket.unwrap_or_else(weft_ipc::socket_path);
@@ -145,6 +174,7 @@ fn run(options: Options, shutdown: impl Future<Output = ()>) -> Result<(), BoxEr
 fn run_service(options: Options) -> Result<(), BoxError> {
     let state_dir = options.state_dir.clone().unwrap_or_else(default_state_dir);
     std::fs::create_dir_all(&state_dir)?;
+    protect(&state_dir);
     init_logging(Some(state_dir.join("weftd.log")));
     service::windows::dispatch(Box::new(move |mut stop| {
         let stopped = async move {

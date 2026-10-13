@@ -120,6 +120,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("loom admin needs a Unix socket and is not available here ({action:?})").into());
     }
     std::fs::create_dir_all(&config.data_dir)?;
+    // Keys, the database and the panel's files are the server's alone.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&config.data_dir, std::fs::Permissions::from_mode(0o700));
+    }
     let keypair = StaticKeypair::load_or_create(&config.data_dir.join("key"))?;
 
     match command {

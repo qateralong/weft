@@ -1527,6 +1527,7 @@ fn failure(code: ErrorCode) -> Failure {
         ErrorCode::AmbiguousMember => Failure::AmbiguousMember,
         ErrorCode::TooManyInvites => Failure::TooManyInvites,
         ErrorCode::NetworkLocked => Failure::NetworkLocked,
+        ErrorCode::TooManyNetworks => Failure::TooManyNetworks,
         ErrorCode::Unspecified | ErrorCode::Internal => Failure::Internal,
     }
 }

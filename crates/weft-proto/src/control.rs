@@ -330,6 +330,7 @@ pub enum ErrorCode {
     AmbiguousMember = 19,
     TooManyInvites = 20,
     NetworkLocked = 21,
+    TooManyNetworks = 22,
 }
 
 #[derive(Clone, PartialEq, Message)]

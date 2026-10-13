@@ -1,6 +1,8 @@
 //! Installs the Weft server on a Linux machine over SSH, with only its address, login and password.
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use russh::ChannelMsg;
@@ -23,18 +25,61 @@ pub struct Target {
 #[derive(Debug)]
 pub enum DeployError {
     Unreachable(String),
+    /// The server's key differs from the one remembered: someone may be in the middle.
+    HostKeyChanged,
     Login,
     Script(String),
     Other(String),
 }
 
-struct AcceptAny;
+/// Checks the server's key like ssh does: against the user's known_hosts, then against the keys
+/// this app met before, and remembers a new server's key on first use. A changed key stops the
+/// connection before the password is sent.
+struct KnownHosts {
+    host: String,
+    port: u16,
+    changed: Arc<AtomicBool>,
+}
 
-impl client::Handler for AcceptAny {
+impl KnownHosts {
+    fn own_file() -> Option<PathBuf> {
+        dirs::config_dir().map(|dir| dir.join("weft").join("known_hosts"))
+    }
+
+    fn system_file() -> Option<PathBuf> {
+        dirs::home_dir().map(|dir| dir.join(".ssh").join("known_hosts"))
+    }
+
+    fn verify(&self, key: &russh::keys::PublicKey) -> bool {
+        use russh::keys::known_hosts::{check_known_hosts_path, learn_known_hosts_path};
+        let check = |path: Option<PathBuf>| match path {
+            Some(path) if path.exists() => check_known_hosts_path(&self.host, self.port, key, path),
+            _ => Ok(false),
+        };
+        for file in [Self::system_file(), Self::own_file()] {
+            match check(file) {
+                Ok(true) => return true,
+                Err(russh::keys::Error::KeyChanged { .. }) => {
+                    self.changed.store(true, Ordering::Relaxed);
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        Self::own_file().is_some_and(|path| learn_known_hosts_path(&self.host, self.port, key, path).is_ok())
+    }
+}
+
+impl client::Handler for KnownHosts {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, _key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
-        Ok(true)
+    async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+        Ok(match key {
+            PublicKeyOrCertificate::PublicKey { key, .. } => self.verify(key),
+            PublicKeyOrCertificate::Certificate(certificate) => {
+                self.verify(&russh::keys::PublicKey::new(certificate.public_key().clone(), ""))
+            }
+        })
     }
 }
 
@@ -47,12 +92,17 @@ pub struct Deployed {
 /// Runs the installer and returns the server link; `step` gets the script's progress.
 pub async fn deploy(target: &Target, step: impl Fn(&str)) -> Result<Deployed, DeployError> {
     let config = Arc::new(client::Config { inactivity_timeout: Some(Duration::from_secs(120)), ..Default::default() });
-    let address = (target.host.trim_start_matches('[').trim_end_matches(']'), target.port);
-    let connect = client::connect(config, address, AcceptAny);
+    let host = target.host.trim().trim_start_matches('[').trim_end_matches(']');
+    let changed = Arc::new(AtomicBool::new(false));
+    let handler = KnownHosts { host: host.to_string(), port: target.port, changed: changed.clone() };
+    let connect = client::connect(config, (host, target.port), handler);
     let mut session = tokio::time::timeout(CONNECT_TIMEOUT, connect)
         .await
         .map_err(|_| DeployError::Unreachable("timed out".into()))?
-        .map_err(|error| DeployError::Unreachable(error.to_string()))?;
+        .map_err(|error| match changed.load(Ordering::Relaxed) {
+            true => DeployError::HostKeyChanged,
+            false => DeployError::Unreachable(error.to_string()),
+        })?;
     login(&mut session, target).await?;
 
     let root = target.user == "root";
@@ -114,7 +164,7 @@ pub async fn deploy(target: &Target, step: impl Fn(&str)) -> Result<Deployed, De
     }
 }
 
-async fn login(session: &mut client::Handle<AcceptAny>, target: &Target) -> Result<(), DeployError> {
+async fn login(session: &mut client::Handle<KnownHosts>, target: &Target) -> Result<(), DeployError> {
     let result = session.authenticate_password(&target.user, &target.password).await.map_err(other)?;
     if result.success() {
         return Ok(());

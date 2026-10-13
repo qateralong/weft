@@ -91,6 +91,8 @@ pub enum DbError {
     Blocked,
     #[error("address pool is exhausted")]
     PoolExhausted,
+    #[error("too many new devices from one address")]
+    TooManyDevices,
     #[error("unsupported database schema {0}")]
     Schema(i32),
 }
@@ -315,6 +317,49 @@ impl Db {
             params![network, locked, approval, password_hash],
         )?;
         Ok(())
+    }
+
+    pub fn device_exists(&self, key: &PublicKey) -> Result<bool, DbError> {
+        Ok(self
+            .conn
+            .query_row("SELECT 1 FROM devices WHERE key = ?1", [key.as_bytes()], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
+    pub fn owned_count(&self, owner: &PublicKey) -> Result<usize, DbError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM members WHERE device = ?1 AND role = ?2",
+            params![owner.as_bytes(), Role::Owner as i32],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Forgets devices last seen before `before` that belong to nothing, which frees their
+    /// addresses; `keep` are the ones online now.
+    pub fn prune_devices(&mut self, before: i64, keep: &BTreeSet<PublicKey>) -> Result<usize, DbError> {
+        let tx = self.conn.transaction()?;
+        let stale: Vec<Vec<u8>> = {
+            let mut stmt = tx.prepare(
+                "SELECT key FROM devices d WHERE last_seen < ?1
+                 AND NOT EXISTS (SELECT 1 FROM members WHERE device = d.key)
+                 AND NOT EXISTS (SELECT 1 FROM requests WHERE device = d.key)
+                 AND NOT EXISTS (SELECT 1 FROM bans WHERE device = d.key)
+                 AND NOT EXISTS (SELECT 1 FROM blocked WHERE device = d.key)
+                 AND NOT EXISTS (SELECT 1 FROM invites WHERE creator = d.key)",
+            )?;
+            stmt.query_map([before], |row| row.get(0))?.collect::<Result<_, _>>()?
+        };
+        let mut removed = 0;
+        for key in stale {
+            if PublicKey::from_slice(&key).is_ok_and(|key| keep.contains(&key)) {
+                continue;
+            }
+            removed += tx.execute("DELETE FROM devices WHERE key = ?1", [&key])?;
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 
     pub fn rename_network(&mut self, network: i64, name: &str) -> Result<(), DbError> {
@@ -1005,5 +1050,19 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
+    }
+
+    #[test]
+    fn prunes_only_unused_devices() {
+        let mut db = db_with_devices(4);
+        db.create_network("lan", "hash", &key(1)).unwrap();
+        db.block(&key(2)).unwrap();
+        assert_eq!(db.owned_count(&key(1)).unwrap(), 1);
+        assert_eq!(db.owned_count(&key(3)).unwrap(), 0);
+        let future = unix_now() + 10;
+        assert_eq!(db.prune_devices(future, &BTreeSet::from([key(4)])).unwrap(), 1);
+        assert!(db.device_exists(&key(1)).unwrap() && db.device_exists(&key(2)).unwrap());
+        assert!(!db.device_exists(&key(3)).unwrap() && db.device_exists(&key(4)).unwrap());
+        assert_eq!(db.prune_devices(unix_now() - 10, &BTreeSet::new()).unwrap(), 0);
     }
 }

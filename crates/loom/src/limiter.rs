@@ -6,11 +6,14 @@ use std::time::{Duration, Instant};
 const WINDOW: Duration = Duration::from_secs(60);
 const PER_IP: usize = 5;
 const PER_NETWORK: usize = 20;
+/// New devices one address may register per minute.
+const REGISTRATIONS_PER_IP: usize = 10;
 
 #[derive(Default)]
 pub struct Limiter {
     ips: Failures<IpAddr>,
     networks: Failures<String>,
+    registrations: Failures<IpAddr>,
 }
 
 struct Failures<K> {
@@ -57,6 +60,18 @@ impl Limiter {
         self.ip_failed(ip, now);
     }
 
+    /// Counts a new device from `ip` and tells whether it may register.
+    pub fn registration_allowed(&mut self, ip: IpAddr, now: Instant) -> bool {
+        if self.registrations.count(&ip, now) >= REGISTRATIONS_PER_IP {
+            return false;
+        }
+        self.registrations.record(&ip, now);
+        if self.registrations.entries.len() > 10_000 {
+            self.registrations.prune(now);
+        }
+        true
+    }
+
     pub fn ip_allowed(&mut self, ip: IpAddr, now: Instant) -> bool {
         self.ips.count(&ip, now) < PER_IP
     }
@@ -86,6 +101,11 @@ mod tests {
         assert!(!limiter.allowed(ip, "other", now));
         assert!(limiter.allowed("198.51.100.2".parse().unwrap(), "lan", now));
         assert!(limiter.allowed(ip, "lan", now + WINDOW));
+        for _ in 0..REGISTRATIONS_PER_IP {
+            assert!(limiter.registration_allowed(ip, now));
+        }
+        assert!(!limiter.registration_allowed(ip, now));
+        assert!(limiter.registration_allowed(ip, now + WINDOW));
 
         for i in 0..PER_NETWORK {
             limiter.failed(IpAddr::from([10, 0, 0, i as u8]), "target", now);

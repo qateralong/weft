@@ -92,14 +92,20 @@ pub fn url(host: &str, port: u16, secret: &str) -> String {
     format!("https://{host}:{port}/{secret}/")
 }
 
-fn write_private(path: &Path, text: &str) -> io::Result<()> {
-    std::fs::write(path, text)?;
+/// Writes a file only its owner can read, from the moment it exists.
+pub fn write_private(path: &Path, text: &str) -> io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
     }
-    Ok(())
+    options.open(path)?.write_all(text.as_bytes())
 }
 
 impl Panel {
@@ -144,6 +150,9 @@ impl Panel {
 
     fn failed(&self, ip: IpAddr) {
         let mut failures = guard(&self.failures);
+        if failures.len() > 10_000 {
+            failures.retain(|_, (_, since)| since.elapsed() <= LOGIN_WINDOW);
+        }
         let entry = failures.entry(ip).or_insert((0, Instant::now()));
         if entry.1.elapsed() > LOGIN_WINDOW {
             *entry = (0, Instant::now());
@@ -158,11 +167,10 @@ impl Panel {
         let Ok(hash) = std::fs::read_to_string(self.dir.join(HASH_FILE)) else {
             return Err(Reply::error(503, "no-password"));
         };
-        let valid = tokio::task::spawn_blocking(move || {
-            Argon2::default().verify_password(password.as_bytes(), hash.trim()).is_ok()
-        })
-        .await
-        .unwrap_or(false);
+        let valid =
+            crate::hashing::run(move || Argon2::default().verify_password(password.as_bytes(), hash.trim()).is_ok())
+                .await
+                .unwrap_or(false);
         if valid {
             guard(&self.failures).remove(&ip);
             Ok(())

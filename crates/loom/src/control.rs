@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,6 +33,15 @@ const MAX_INVITES: usize = 100;
 const MAX_INVITE_LIFETIME: u64 = 365 * 24 * 3600;
 const MAX_INVITE_LEN: usize = 64;
 const MAX_MUTE: u64 = 10 * 365 * 24 * 3600;
+/// Control messages a client may send per second over time, relayed packets aside, and in a burst.
+const MESSAGES_PER_SECOND: f64 = 50.0;
+const MESSAGE_BURST: f64 = 300.0;
+const REFRESH_EVERY: Duration = Duration::from_secs(1);
+const AVATAR_EVERY: Duration = Duration::from_secs(10);
+/// Networks one device may own.
+const MAX_OWNED: usize = 32;
+/// Open connections from one address, so one host cannot hold them all.
+const MAX_CONNECTIONS_PER_IP: usize = 64;
 const INVITE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +69,7 @@ pub async fn serve(
     panel: Arc<Panel>,
 ) {
     let mut next_conn = 0;
+    let open: Arc<std::sync::Mutex<HashMap<IpAddr, usize>>> = Arc::default();
     loop {
         let (stream, addr) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -78,11 +88,80 @@ pub async fn serve(
             panel: panel.clone(),
         };
         let conn = next_conn;
+        let Some(slot) = Slot::take(&open, addr.ip()) else {
+            tracing::debug!(%addr, "too many connections from one address");
+            continue;
+        };
         tokio::spawn(async move {
+            let _slot = slot;
             if let Err(error) = accept(stream, addr, shared, conn).await {
                 tracing::debug!(%addr, %error, "connection closed");
             }
         });
+    }
+}
+
+/// One open connection counted against its address until dropped.
+struct Slot {
+    open: Arc<std::sync::Mutex<HashMap<IpAddr, usize>>>,
+    ip: IpAddr,
+}
+
+impl Slot {
+    fn take(open: &Arc<std::sync::Mutex<HashMap<IpAddr, usize>>>, ip: IpAddr) -> Option<Slot> {
+        let mut counts = open.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let count = counts.entry(ip).or_default();
+        if *count >= MAX_CONNECTIONS_PER_IP {
+            return None;
+        }
+        *count += 1;
+        Some(Slot { open: open.clone(), ip })
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut counts = self.open.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = counts.get_mut(&self.ip) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&self.ip);
+            }
+        }
+    }
+}
+
+/// How fast one client sends requests: a token bucket for all of them, and spacing for the
+/// ones that make the server do more work.
+struct Pace {
+    tokens: f64,
+    at: Instant,
+    refreshed: Option<Instant>,
+    pictured: Option<Instant>,
+}
+
+impl Pace {
+    fn new(now: Instant) -> Self {
+        Self { tokens: MESSAGE_BURST, at: now, refreshed: None, pictured: None }
+    }
+
+    fn take(&mut self, now: Instant) -> bool {
+        let elapsed = now.duration_since(self.at).as_secs_f64();
+        self.at = now;
+        self.tokens = (self.tokens + elapsed * MESSAGES_PER_SECOND).min(MESSAGE_BURST);
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+
+    fn spaced(last: &mut Option<Instant>, every: Duration, now: Instant) -> bool {
+        if last.is_some_and(|last| now.duration_since(last) < every) {
+            return false;
+        }
+        *last = Some(now);
+        true
     }
 }
 
@@ -189,8 +268,11 @@ where
         let mut hub = lock(&hub);
         let pool = hub.config.pool;
         let blocked = hub.db.is_blocked(&key).unwrap_or(false);
+        let known = hub.db.device_exists(&key).unwrap_or(true);
         let device = if blocked {
             Err(DbError::Blocked)
+        } else if !known && !hub.limiter.registration_allowed(addr.ip(), Instant::now()) {
+            Err(DbError::TooManyDevices)
         } else {
             let preferred = greeting.address.map(Ipv4Addr::from);
             hub.db.upsert_device_preferring(&key, nickname.as_deref().unwrap_or_default(), &pool, preferred)
@@ -211,6 +293,7 @@ where
                 )
             }
             Err(DbError::PoolExhausted) => refuse(ErrorCode::PoolExhausted),
+            Err(DbError::TooManyDevices) => refuse(ErrorCode::RateLimited),
             Err(DbError::Blocked) => refuse(ErrorCode::Banned),
             Err(error) => {
                 tracing::warn!(%error, "cannot register device");
@@ -238,6 +321,7 @@ where
         return Ok(());
     }
 
+    let mut pace = Pace::new(Instant::now());
     let result = loop {
         let bytes = tokio::select! {
             _ = &mut kill_rx => break Ok(()),
@@ -251,7 +335,12 @@ where
             Ok(message) => message,
             Err(error) => break Err(error.into()),
         };
-        let Some(reply) = handle(&hub, &socket, key, addr.ip(), message).await else { continue };
+        let relayed = matches!(message.kind, Some(ClientKind::Relay(_)));
+        if !relayed && !pace.take(Instant::now()) {
+            tracing::debug!(?key, %addr, "too many requests, closing");
+            break Err(ConnError::Protocol);
+        }
+        let Some(reply) = handle(&hub, &socket, key, addr.ip(), message, &mut pace).await else { continue };
         if tx.send(reply).is_err() {
             break Ok(());
         }
@@ -275,7 +364,9 @@ async fn handle(
     key: PublicKey,
     ip: IpAddr,
     message: ClientMessage,
+    pace: &mut Pace,
 ) -> Option<ServerMessage> {
+    let now = Instant::now();
     let ack = |result: Result<(), ErrorCode>| result.map(|()| ServerKind::Ack(Empty {}));
     let result = match message.kind {
         Some(ClientKind::CreateNetwork(request)) => ack(create(hub, key, request).await),
@@ -297,8 +388,20 @@ async fn handle(
         Some(ClientKind::UpdateNetwork(request)) => ack(update_network(hub, key, request).await),
         Some(ClientKind::DeleteNetwork(request)) => ack(delete_network(&mut lock(hub), key, request)),
         Some(ClientKind::Mute(request)) => ack(mute(&mut lock(hub), key, request)),
+        Some(ClientKind::Refresh(_)) if !Pace::spaced(&mut pace.refreshed, REFRESH_EVERY, now) => {
+            Err(ErrorCode::RateLimited)
+        }
         Some(ClientKind::Refresh(_)) => lock(hub).state_for(&key).map(ServerKind::State).map_err(internal),
-        Some(ClientKind::SetAvatar(avatar)) => ack(set_avatar(&mut lock(hub), key, avatar)),
+        Some(ClientKind::SetAvatar(_)) if pace.pictured.is_some_and(|last| now.duration_since(last) < AVATAR_EVERY) => {
+            Err(ErrorCode::RateLimited)
+        }
+        Some(ClientKind::SetAvatar(avatar)) => {
+            let result = set_avatar(&mut lock(hub), key, avatar);
+            if result.is_ok() {
+                pace.pictured = Some(now);
+            }
+            ack(result)
+        }
         Some(ClientKind::GetAvatar(target)) => get_avatar(&lock(hub), key, target),
         Some(ClientKind::Candidates(candidates)) => {
             set_candidates(hub, key, candidates);
@@ -350,14 +453,20 @@ async fn create(hub: &SharedHub, key: PublicKey, request: NetworkCredentials) ->
     if !validate::password(&request.password) {
         return Err(ErrorCode::InvalidPassword);
     }
-    if lock(hub).db.network_by_name(&name).map_err(internal)?.is_some() {
-        return Err(ErrorCode::NetworkExists);
+    {
+        let hub = lock(hub);
+        if hub.db.network_by_name(&name).map_err(internal)?.is_some() {
+            return Err(ErrorCode::NetworkExists);
+        }
+        if hub.db.owned_count(&key).map_err(internal)? >= MAX_OWNED {
+            return Err(ErrorCode::TooManyNetworks);
+        }
     }
-    let hash = tokio::task::spawn_blocking(move || {
+    let hash = crate::hashing::run(move || {
         Argon2::default().hash_password(request.password.as_bytes()).map(|hash| hash.to_string())
     })
     .await
-    .map_err(internal)?
+    .ok_or(ErrorCode::Internal)?
     .map_err(internal)?;
     let mut hub = lock(hub);
     match hub.db.create_network(&name, &hash, &key) {
@@ -394,11 +503,11 @@ async fn join(
         network
     };
     let hash = network.password_hash.clone();
-    let valid = tokio::task::spawn_blocking(move || {
+    let valid = crate::hashing::run(move || {
         Argon2::default().verify_password(request.password.as_bytes(), hash.as_str()).is_ok()
     })
     .await
-    .map_err(internal)?;
+    .ok_or(ErrorCode::Internal)?;
 
     let mut hub = lock(hub);
     if !valid {
@@ -622,11 +731,11 @@ async fn update_network(hub: &SharedHub, key: PublicKey, request: NetworkSetting
     let hash = match request.password {
         Some(password) if !validate::password(&password) => return Err(ErrorCode::InvalidPassword),
         Some(password) => Some(
-            tokio::task::spawn_blocking(move || {
+            crate::hashing::run(move || {
                 Argon2::default().hash_password(password.as_bytes()).map(|hash| hash.to_string())
             })
             .await
-            .map_err(internal)?
+            .ok_or(ErrorCode::Internal)?
             .map_err(internal)?,
         ),
         None => None,

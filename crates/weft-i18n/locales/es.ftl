@@ -516,3 +516,6 @@ gui-update-error = No se pudo actualizar: { $reason }
 gui-update-done = Listo, Weft se reinicia en un momento
 
 gui-off-title = Weft está apagado
+
+error-too-many-networks = Tienes demasiadas redes propias en este servidor
+gui-ssh-host-changed = La clave SSH del servidor cambió desde la última conexión. Alguien podría estar interceptándola, así que no se envió la contraseña. Si reinstalaste el servidor, borra su línea de ~/.ssh/known_hosts y ~/.config/weft/known_hosts.
