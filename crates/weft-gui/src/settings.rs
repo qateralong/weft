@@ -10,6 +10,8 @@ use weft_ipc::PanelAccess;
 #[serde(default)]
 pub struct Settings {
     pub notifications: bool,
+    /// Which kinds of notifications to show while they are on.
+    pub notify: Notify,
     pub updates: bool,
     /// A language code; the system language when unset.
     pub language: Option<String>,
@@ -24,16 +26,67 @@ pub struct Settings {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct Notify {
+    pub online: bool,
+    pub offline: bool,
+    pub joined: bool,
+    pub requests: bool,
+    pub connection: bool,
+}
+
+impl Default for Notify {
+    fn default() -> Self {
+        Self { online: true, offline: true, joined: true, requests: true, connection: true }
+    }
+}
+
+impl Notify {
+    pub const KINDS: [&str; 5] = ["online", "offline", "joined", "requests", "connection"];
+
+    pub fn get(&self, kind: &str) -> bool {
+        match kind {
+            "online" => self.online,
+            "offline" => self.offline,
+            "joined" => self.joined,
+            "requests" => self.requests,
+            _ => self.connection,
+        }
+    }
+
+    pub fn set(&mut self, kind: &str, on: bool) {
+        match kind {
+            "online" => self.online = on,
+            "offline" => self.offline = on,
+            "joined" => self.joined = on,
+            "requests" => self.requests = on,
+            _ => self.connection = on,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Release {
     pub tag: String,
     pub url: String,
     pub checked: u64,
+    /// Downloadable files: name, address and SHA-256 when GitHub gives one.
+    #[serde(default)]
+    pub assets: Vec<Asset>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Asset {
+    pub name: String,
+    pub url: String,
+    pub sha256: Option<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             notifications: true,
+            notify: Notify::default(),
             updates: true,
             language: None,
             dark: None,

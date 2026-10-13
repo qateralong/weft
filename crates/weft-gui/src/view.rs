@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use slint::{Model, ModelRc, SharedString, VecModel};
+use slint::{Image, Model, ModelRc, SharedString, VecModel};
 use weft_i18n::Localizer;
 use weft_ipc::{Connection, HostStatus, MemberStatus, NetworkStatus, PeerLink, Reach, Role, ServerStatus, Status};
 
@@ -11,6 +11,9 @@ use crate::ui::{MemberRow, NetworkCard, ServerRow};
 
 /// How many avatar tones the theme has.
 const AVATAR_TONES: u32 = 8;
+
+/// Pictures of devices by id.
+pub type Pictures = HashMap<String, Image>;
 
 /// The rows on screen, kept between polls so they are updated in place.
 #[derive(Default)]
@@ -22,7 +25,7 @@ pub struct Networks {
 }
 
 impl Networks {
-    pub fn update(&mut self, l: &Localizer, status: &Status, collapsed: &HashSet<String>) {
+    pub fn update(&mut self, l: &Localizer, status: &Status, collapsed: &HashSet<String>, pictures: &Pictures) {
         let several = status.servers.len() > 1;
         let mut cards = Vec::new();
         let mut shown = Vec::new();
@@ -30,7 +33,7 @@ impl Networks {
             for network in &server.networks {
                 let id = network_id(server, network);
                 let members = self.members.entry(id.clone()).or_insert_with(|| Rc::new(VecModel::default())).clone();
-                sync(&members, member_rows(l, status, server, network, several));
+                sync(&members, member_rows(l, status, server, network, several, pictures));
                 cards.push(card(l, &id, server, network, several, collapsed.contains(&id), members));
                 shown.push((server.clone(), network.clone()));
             }
@@ -43,7 +46,21 @@ impl Networks {
 }
 
 pub fn network_id(server: &ServerStatus, network: &NetworkStatus) -> String {
-    format!("{}/{}", server.server, network.name)
+    format!("{}{}", server.server, network_id_of(&network.name))
+}
+
+/// The end of a network's id, after its server.
+pub fn network_id_of(name: &str) -> String {
+    format!("/{name}")
+}
+
+/// How much a role may do, for comparing two.
+pub fn rank(role: Role) -> u8 {
+    match role {
+        Role::Owner => 2,
+        Role::Admin => 1,
+        Role::Member => 0,
+    }
 }
 
 pub fn overall(servers: &[ServerStatus]) -> &'static str {
@@ -124,28 +141,6 @@ pub fn kind(server: &ServerStatus) -> &'static str {
     }
 }
 
-/// The last known networks while Weft is off: the daemon forgets them until it reconnects, so
-/// they are shown from `known` with everyone offline.
-pub fn offline(known: &Status, current: &Status) -> Status {
-    let mut shown = current.clone();
-    shown.servers = known
-        .servers
-        .iter()
-        .filter(|server| current.servers.iter().any(|now| now.server == server.server))
-        .map(|server| {
-            let mut server = server.clone();
-            server.connection = Connection::Disconnected;
-            server.latency_ms = None;
-            for member in server.networks.iter_mut().flat_map(|network| network.members.iter_mut()) {
-                member.link = PeerLink::Offline;
-                member.latency_ms = None;
-            }
-            server
-        })
-        .collect();
-    shown
-}
-
 /// Servers to list, with the hosted one even before the daemon has connected to it.
 pub fn servers(status: &Status) -> Vec<ServerStatus> {
     let mut servers = status.servers.clone();
@@ -209,45 +204,109 @@ fn member_rows(
     server: &ServerStatus,
     network: &NetworkStatus,
     several: bool,
+    pictures: &Pictures,
 ) -> Vec<MemberRow> {
     let connected = server.connection == Connection::Connected;
     let to_server = server.latency_ms.filter(|_| connected);
     let state = format!("state-{}", state_name(server.connection));
+    let sub = match network.muted_until {
+        Some(until) => muted_text(l, "gui-you-muted", until),
+        None if several => server_name(l, server),
+        None => l.tr(&state),
+    };
+    let (picture, has_picture) = picture(status.avatar.as_deref(), pictures);
     let me = MemberRow {
         nickname: status.nickname.clone().into(),
         initial: initial(&status.nickname).into(),
         tone: avatar_tone(&status.nickname),
-        sub: if several { server_name(l, server) } else { l.tr(&state) }.into(),
+        sub: sub.into(),
         address: server.address.map(|address| address.to_string()).unwrap_or_default().into(),
         dns: SharedString::new(),
         ping: ping_text(l, to_server, false).into(),
         level: level(to_server),
         link: if connected { "direct" } else { "offline" }.into(),
         me: true,
+        manageable: false,
+        badge: SharedString::new(),
+        muted: network.muted_until.is_some(),
+        picture,
+        has_picture,
     };
     let mut rows = vec![me];
-    rows.extend(network.members.iter().map(|member| member_row(l, member, to_server)));
+    rows.extend(network.members.iter().map(|member| {
+        let manageable = rank(network.role) > rank(member.role.unwrap_or(Role::Member));
+        MemberRow { manageable, ..member_row(l, member, to_server, pictures) }
+    }));
     rows
 }
 
-fn member_row(l: &Localizer, member: &MemberStatus, to_server: Option<u32>) -> MemberRow {
+fn member_row(l: &Localizer, member: &MemberStatus, to_server: Option<u32>, pictures: &Pictures) -> MemberRow {
     let (link, sub, ms, estimate) = match member.link {
         PeerLink::Direct => ("direct", "link-direct", member.latency_ms, false),
         PeerLink::Relay => ("relay", "link-relay", to_server.map(|ms| ms * 2), true),
         PeerLink::Connecting => ("connecting", "link-connecting", None, false),
         PeerLink::Offline => ("offline", "link-offline", None, false),
     };
+    let sub = match member.muted_until {
+        Some(until) => muted_text(l, "link-muted", until),
+        None => l.tr(sub),
+    };
+    let (picture, has_picture) = picture(member.avatar.as_deref(), pictures);
     MemberRow {
         nickname: member.nickname.clone().into(),
         initial: initial(&member.nickname).into(),
         tone: avatar_tone(&member.nickname),
-        sub: l.tr(sub).into(),
+        sub: sub.into(),
         address: member.address.to_string().into(),
         dns: member.dns.clone().unwrap_or_default().into(),
         ping: ping_text(l, ms, estimate).into(),
         level: level(ms),
-        link: link.into(),
+        link: if member.muted_until.is_some() { "muted" } else { link }.into(),
         me: false,
+        manageable: false,
+        badge: badge(l, member.role).into(),
+        muted: member.muted_until.is_some(),
+        picture,
+        has_picture,
+    }
+}
+
+fn picture(id: Option<&str>, pictures: &Pictures) -> (Image, bool) {
+    match id.and_then(|id| pictures.get(id)) {
+        Some(image) => (image.clone(), true),
+        None => (Image::default(), false),
+    }
+}
+
+/// A short mark next to managers' names.
+fn badge(l: &Localizer, role: Option<Role>) -> String {
+    match role {
+        Some(Role::Owner) => l.tr("gui-badge-owner"),
+        Some(Role::Admin) => l.tr("gui-badge-admin"),
+        _ => String::new(),
+    }
+}
+
+/// "muted, 4 min left", or just "muted" for good; `id` is the message with the time left.
+pub fn muted_text(l: &Localizer, id: &str, until: u64) -> String {
+    if until == weft_ipc::MUTED_FOREVER {
+        return l.tr(&format!("{id}-forever"));
+    }
+    let left = until.saturating_sub(crate::update::now());
+    l.tr_args(id, &[("time", &remaining(l, left))])
+}
+
+/// A duration as days and hours, hours and minutes, or minutes.
+pub fn remaining(l: &Localizer, seconds: u64) -> String {
+    let minutes = seconds.div_ceil(60).max(1);
+    let (days, hours, mins) =
+        ((minutes / 1440).to_string(), ((minutes / 60) % 24).to_string(), (minutes % 60).to_string());
+    if minutes >= 1440 {
+        l.tr_args("time-days", &[("days", &days), ("hours", &hours)])
+    } else if minutes >= 60 {
+        l.tr_args("time-hours", &[("hours", &hours), ("minutes", &mins)])
+    } else {
+        l.tr_args("time-minutes", &[("minutes", &mins)])
     }
 }
 
@@ -269,11 +328,11 @@ pub fn level(ms: Option<u32>) -> i32 {
     }
 }
 
-fn initial(nickname: &str) -> String {
+pub fn initial(nickname: &str) -> String {
     nickname.chars().next().map_or_else(|| "?".into(), |c| c.to_uppercase().collect())
 }
 
-fn avatar_tone(nickname: &str) -> i32 {
+pub fn avatar_tone(nickname: &str) -> i32 {
     let hash = nickname.chars().fold(0u32, |hash, c| hash.wrapping_mul(31).wrapping_add(c as u32));
     (hash % AVATAR_TONES) as i32
 }
@@ -301,11 +360,15 @@ pub fn demo() -> Status {
         address: Ipv4Addr::new(100, 64, 0, last),
         link,
         latency_ms,
+        role: Some(if last == 2 { Role::Admin } else { Role::Member }),
+        muted_until: (last == 4).then_some(crate::update::now() + 25 * 60),
+        avatar: None,
     };
     Status {
         nickname: "qateralong".into(),
         public_key: String::new(),
         host: None,
+        avatar: None,
         public_link: Some("weft://141.11.211.11:8443".into()),
         servers: vec![ServerStatus {
             server: "weft://141.11.211.11:8443".into(),
@@ -322,6 +385,7 @@ pub fn demo() -> Status {
                     locked: false,
                     approval: true,
                     requests: 1,
+                    muted_until: None,
                     members: vec![
                         member("alice", PeerLink::Direct, Some(27), 2),
                         member("bob", PeerLink::Relay, None, 3),
@@ -334,6 +398,7 @@ pub fn demo() -> Status {
                     locked: true,
                     approval: false,
                     requests: 0,
+                    muted_until: None,
                     members: vec![member("dave", PeerLink::Direct, Some(143), 9)],
                 },
             ],

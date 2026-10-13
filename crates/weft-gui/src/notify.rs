@@ -6,6 +6,8 @@ use std::net::Ipv4Addr;
 use weft_i18n::Localizer;
 use weft_ipc::{Connection, NetworkStatus, PeerLink, Status};
 
+use crate::settings::Notify;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Online { nickname: String, network: String },
@@ -23,6 +25,17 @@ impl Event {
             Event::Online { nickname, .. } | Event::Joined { nickname, .. } => Some((nickname, true)),
             Event::Offline { nickname, .. } => Some((nickname, false)),
             _ => None,
+        }
+    }
+
+    /// The kind of notification, as in `settings::Notify`.
+    fn kind(&self) -> &'static str {
+        match self {
+            Event::Online { .. } => "online",
+            Event::Offline { .. } => "offline",
+            Event::Joined { .. } => "joined",
+            Event::Request { .. } => "requests",
+            Event::Disconnected | Event::Reconnected => "connection",
         }
     }
 
@@ -105,10 +118,10 @@ pub struct Notifier {
 }
 
 impl Notifier {
-    /// Shows a notification for every change since the last snapshot when `enabled`.
-    pub fn observe(&mut self, status: &Status, enabled: bool, l: &Localizer) {
+    /// Shows a notification for every change since the last snapshot of the kinds `wanted`.
+    pub fn observe(&mut self, status: &Status, wanted: Option<&Notify>, l: &Localizer) {
         if let Some(previous) = &self.previous
-            && enabled
+            && let Some(wanted) = wanted
         {
             for event in events(previous, status, self.lost) {
                 if let Some((nickname, online)) = event.presence()
@@ -116,7 +129,9 @@ impl Notifier {
                 {
                     continue;
                 }
-                show(event.text(l));
+                if wanted.get(event.kind()) {
+                    show(event.text(l));
+                }
             }
         }
         self.lost = match status.connection() {
@@ -148,6 +163,7 @@ mod tests {
             public_key: String::new(),
             host: None,
             public_link: None,
+            avatar: None,
             servers: vec![ServerStatus {
                 hosted: false,
                 public: false,
@@ -162,6 +178,7 @@ mod tests {
                     locked: false,
                     approval: true,
                     requests,
+                    muted_until: None,
                     members: members
                         .iter()
                         .map(|&(nickname, host, link)| MemberStatus {
@@ -170,6 +187,9 @@ mod tests {
                             address: Ipv4Addr::new(100, 64, 0, host),
                             link,
                             latency_ms: None,
+                            role: None,
+                            muted_until: None,
+                            avatar: None,
                         })
                         .collect(),
                 }],
@@ -215,12 +235,12 @@ mod tests {
         let l = Localizer::new(weft_i18n::Language::English);
         let mut notifier = Notifier::default();
         for snapshot in [&online, &off, &starting, &online] {
-            notifier.observe(snapshot, false, &l);
+            notifier.observe(snapshot, None, &l);
             assert!(!notifier.lost);
         }
         assert!(events(&online, &off, false).is_empty());
         assert!(events(&starting, &online, false).is_empty());
-        notifier.observe(&starting, false, &l);
+        notifier.observe(&starting, None, &l);
         assert!(notifier.lost);
     }
 }

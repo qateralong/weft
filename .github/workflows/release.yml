@@ -27,7 +27,7 @@ jobs:
           export VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml) ARCH=amd64
           mkdir dist
           for name in weft loom; do
-            for packager in deb rpm; do
+            for packager in deb rpm archlinux; do
               nfpm package --config "packaging/linux/nfpm-$name.yaml" --packager "$packager" --target dist/
             done
           done

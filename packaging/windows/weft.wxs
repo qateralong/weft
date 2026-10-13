@@ -10,6 +10,12 @@
       <Directory Id="INSTALLFOLDER" Name="Weft" />
     </StandardDirectory>
 
+    <!-- After an interactive install or an update from the app, start the new version for the user. -->
+    <CustomAction Id="LaunchApp" Directory="INSTALLFOLDER" ExeCommand="&quot;[INSTALLFOLDER]weft-gui.exe&quot;" Return="asyncNoWait" />
+    <InstallExecuteSequence>
+      <Custom Action="LaunchApp" After="InstallFinalize" Condition="NOT REMOVE AND UILevel &gt; 2" />
+    </InstallExecuteSequence>
+
     <Feature Id="Main">
       <Component Directory="INSTALLFOLDER">
         <File Source="$(var.Bin)\weftd.exe" KeyPath="yes" />

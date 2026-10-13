@@ -9,7 +9,7 @@ use weft_proto::control::Role;
 
 use crate::config::Pool;
 
-const MIGRATIONS: [&str; 4] = [
+const MIGRATIONS: [&str; 5] = [
     "
 CREATE TABLE devices (
     key BLOB PRIMARY KEY,
@@ -68,7 +68,15 @@ CREATE TABLE blocked (
     created INTEGER NOT NULL
 );
 ",
+    "
+ALTER TABLE members ADD COLUMN muted_until INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE devices ADD COLUMN avatar BLOB;
+ALTER TABLE devices ADD COLUMN avatar_id TEXT NOT NULL DEFAULT '';
+",
 ];
+
+/// `muted_until` of a mute without an end.
+pub const MUTED_FOREVER: i64 = i64::MAX;
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;
 
 #[derive(Debug, thiserror::Error)]
@@ -108,9 +116,17 @@ pub struct Membership {
     pub name: String,
     pub role: Role,
     pub members: Vec<PublicKey>,
+    pub details: Vec<MemberDetail>,
     pub locked: bool,
     pub approval: bool,
     pub requests: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberDetail {
+    pub key: PublicKey,
+    pub role: Role,
+    pub muted_until: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,6 +254,35 @@ impl Db {
         Ok(devices)
     }
 
+    /// Picture ids of the devices that have one.
+    pub fn avatar_ids(&self, keys: &BTreeSet<PublicKey>) -> Result<HashMap<PublicKey, String>, DbError> {
+        let mut stmt = self.conn.prepare_cached("SELECT avatar_id FROM devices WHERE key = ?1 AND avatar_id != ''")?;
+        let mut ids = HashMap::new();
+        for key in keys {
+            if let Some(id) = stmt.query_row([key.as_bytes()], |row| row.get::<_, String>(0)).optional()? {
+                ids.insert(*key, id);
+            }
+        }
+        Ok(ids)
+    }
+
+    pub fn avatar(&self, key: &PublicKey) -> Result<Option<Vec<u8>>, DbError> {
+        Ok(self
+            .conn
+            .query_row("SELECT avatar FROM devices WHERE key = ?1", [key.as_bytes()], |row| row.get(0))
+            .optional()?
+            .flatten())
+    }
+
+    pub fn set_avatar(&mut self, key: &PublicKey, avatar: Option<(&[u8], &str)>) -> Result<(), DbError> {
+        let (image, id) = avatar.map_or((None, ""), |(image, id)| (Some(image), id));
+        self.conn.execute(
+            "UPDATE devices SET avatar = ?2, avatar_id = ?3 WHERE key = ?1",
+            params![key.as_bytes(), image, id],
+        )?;
+        Ok(())
+    }
+
     pub fn network_by_name(&self, name: &str) -> Result<Option<NetworkRow>, DbError> {
         Ok(self
             .conn
@@ -270,6 +315,46 @@ impl Db {
             params![network, locked, approval, password_hash],
         )?;
         Ok(())
+    }
+
+    pub fn rename_network(&mut self, network: i64, name: &str) -> Result<(), DbError> {
+        let updated = self.conn.execute(
+            "UPDATE networks SET name = ?2, name_key = ?3 WHERE id = ?1",
+            params![network, name, name_key(name)],
+        );
+        match updated {
+            Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == ErrorCode::ConstraintViolation => {
+                Err(DbError::NetworkExists)
+            }
+            other => other.map(drop).map_err(Into::into),
+        }
+    }
+
+    pub fn set_muted(&mut self, network: i64, device: &PublicKey, until: i64) -> Result<(), DbError> {
+        self.conn.execute(
+            "UPDATE members SET muted_until = ?3 WHERE network = ?1 AND device = ?2",
+            params![network, device.as_bytes(), until],
+        )?;
+        Ok(())
+    }
+
+    /// Lifts the mutes that ended by `now` and returns the networks they were in.
+    pub fn expire_mutes(&mut self, now: i64) -> Result<Vec<i64>, DbError> {
+        let tx = self.conn.transaction()?;
+        let networks: Vec<i64> = {
+            let mut stmt =
+                tx.prepare("SELECT DISTINCT network FROM members WHERE muted_until > 0 AND muted_until <= ?1")?;
+            stmt.query_map([now], |row| row.get(0))?.collect::<Result<_, _>>()?
+        };
+        tx.execute("UPDATE members SET muted_until = 0 WHERE muted_until > 0 AND muted_until <= ?1", [now])?;
+        tx.commit()?;
+        Ok(networks)
+    }
+
+    pub fn member_keys(&self, network: i64) -> Result<BTreeSet<PublicKey>, DbError> {
+        let mut stmt = self.conn.prepare_cached("SELECT device FROM members WHERE network = ?1")?;
+        let keys: Vec<Vec<u8>> = stmt.query_map([network], |row| row.get(0))?.collect::<Result<_, _>>()?;
+        Ok(keys.iter().filter_map(|key| PublicKey::from_slice(key).ok()).collect())
     }
 
     pub fn delete_network(&mut self, network: i64) -> Result<(), DbError> {
@@ -599,8 +684,9 @@ impl Db {
              (SELECT COUNT(*) FROM requests r WHERE r.network = n.id)
              FROM networks n JOIN members m ON m.network = n.id WHERE m.device = ?1 ORDER BY n.name_key",
         )?;
-        let mut members =
-            self.conn.prepare_cached("SELECT device FROM members WHERE network = ?1 ORDER BY joined, device")?;
+        let mut members = self.conn.prepare_cached(
+            "SELECT device, role, muted_until FROM members WHERE network = ?1 ORDER BY joined, device",
+        )?;
         let rows: Vec<(i64, String, i32, bool, bool, i64)> = networks
             .query_map([device.as_bytes()], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
@@ -608,11 +694,24 @@ impl Db {
             .collect::<Result<_, _>>()?;
         let mut memberships = Vec::with_capacity(rows.len());
         for (id, name, role, locked, approval, requests) in rows {
-            let keys: Vec<Vec<u8>> = members.query_map([id], |row| row.get(0))?.collect::<Result<_, _>>()?;
+            let rows: Vec<(Vec<u8>, i32, i64)> = members
+                .query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<_, _>>()?;
+            let details: Vec<MemberDetail> = rows
+                .iter()
+                .filter_map(|(key, role, muted_until)| {
+                    Some(MemberDetail {
+                        key: PublicKey::from_slice(key).ok()?,
+                        role: Role::try_from(*role).unwrap_or(Role::Member),
+                        muted_until: *muted_until,
+                    })
+                })
+                .collect();
             memberships.push(Membership {
                 name,
                 role: Role::try_from(role).unwrap_or(Role::Member),
-                members: keys.iter().filter_map(|key| PublicKey::from_slice(key).ok()).collect(),
+                members: details.iter().map(|detail| detail.key).collect(),
+                details,
                 locked,
                 approval,
                 requests: requests as usize,
@@ -630,6 +729,20 @@ impl Db {
         let mut related: BTreeSet<PublicKey> = keys.iter().filter_map(|key| PublicKey::from_slice(key).ok()).collect();
         related.insert(*device);
         Ok(related)
+    }
+
+    /// The devices `device` may talk to at `now`: members of a shared network where neither is muted.
+    pub fn reachable(&self, device: &PublicKey, now: i64) -> Result<BTreeSet<PublicKey>, DbError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT other.device FROM members mine JOIN members other ON other.network = mine.network
+             WHERE mine.device = ?1 AND mine.muted_until <= ?2 AND other.muted_until <= ?2",
+        )?;
+        let keys: Vec<Vec<u8>> =
+            stmt.query_map(params![device.as_bytes(), now], |row| row.get(0))?.collect::<Result<_, _>>()?;
+        let mut reachable: BTreeSet<PublicKey> =
+            keys.iter().filter_map(|key| PublicKey::from_slice(key).ok()).collect();
+        reachable.remove(device);
+        Ok(reachable)
     }
 }
 

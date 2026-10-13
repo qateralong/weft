@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,9 +14,10 @@ use weft_ipc::{
 use weft_mesh::{Mesh, Output, PeerConfig, ServerId, SocketId};
 use weft_portmap::{Mapped, PortMapper};
 use weft_proto::control::{
-    Candidates, ClientKind, ClientMessage, DeviceList, Endpoint, ErrorCode, Hello, Invite, InviteCode, InviteRequest,
-    MemberAction, NetworkCredentials, NetworkName, NetworkSettings, PROTOCOL_VERSION, PeerCandidates, PeerKey,
-    RelayPacket, Role, RoleChange, ServerKind, ServerMessage, State, Welcome,
+    Avatar, Candidates, ClientKind, ClientMessage, DeviceList, Empty, Endpoint, ErrorCode, Hello, Invite, InviteCode,
+    InviteRequest, MAX_AVATAR_LEN, MUTE_FOREVER, MemberAction, MuteRequest, NetworkCredentials, NetworkName,
+    NetworkSettings, PROTOCOL_VERSION, PeerCandidates, PeerKey, RelayPacket, Role, RoleChange, ServerKind,
+    ServerMessage, State, Welcome, avatar_id,
 };
 use weft_proto::{DNS_ADDRESS, Host, Link, PublicKey};
 use weft_session::StaticKeypair;
@@ -33,6 +34,8 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const CANDIDATES_INTERVAL: Duration = Duration::from_secs(60);
 const IDLE_TICK: Duration = Duration::from_secs(3600);
 const DEFAULT_TTL: u32 = 64;
+const AVATAR_FILE: &str = "avatar";
+const MAX_CACHED_AVATARS: usize = 512;
 
 pub struct Options {
     pub tun_name: String,
@@ -55,6 +58,8 @@ struct Session {
     candidates: Vec<SocketAddr>,
     candidates_at: Option<Instant>,
     pending: HashMap<u32, oneshot::Sender<Response>>,
+    /// Requests the daemon makes on its own, by id.
+    internal: HashMap<u32, Internal>,
     up_waiters: Vec<oneshot::Sender<Response>>,
     redeem_waiters: Vec<(String, oneshot::Sender<Response>)>,
     backoff: Duration,
@@ -76,6 +81,7 @@ impl Session {
             candidates: Vec::new(),
             candidates_at: None,
             pending: HashMap::new(),
+            internal: HashMap::new(),
             up_waiters: Vec::new(),
             redeem_waiters: Vec::new(),
             backoff: MIN_BACKOFF,
@@ -102,6 +108,7 @@ impl Session {
     }
 
     fn fail_pending(&mut self, failure: Failure) {
+        self.internal.clear();
         for (_, reply) in self.pending.drain() {
             let _ = reply.send(Response::Error(failure));
         }
@@ -112,6 +119,13 @@ impl Session {
             let _ = reply.send(Response::Error(failure));
         }
     }
+}
+
+/// What a reply to the daemon's own request is for.
+enum Internal {
+    Refresh,
+    Avatar(String),
+    Ignore,
 }
 
 pub struct Daemon {
@@ -137,6 +151,11 @@ pub struct Daemon {
     /// Our virtual addresses with prefix lengths; the first one created the TUN interface.
     addresses: Vec<(Ipv4Addr, u8)>,
     names: HashMap<String, Ipv4Addr>,
+    /// This device's picture.
+    avatar: Option<Vec<u8>>,
+    /// Pictures of other devices by id, and the ids being fetched.
+    avatars: HashMap<String, Vec<u8>>,
+    fetching: HashSet<String>,
     sessions: Vec<Session>,
     next_server: ServerId,
     generation: u64,
@@ -199,6 +218,7 @@ impl Daemon {
         let (extra_tx, extra_rx) = mpsc::channel(1024);
         let mapped = mapper.subscribe();
         let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let avatar = std::fs::read(options.state_dir.join(AVATAR_FILE)).ok().filter(|image| !image.is_empty());
         let mut daemon = Self {
             keypair: Arc::new(keypair),
             state_dir: options.state_dir,
@@ -220,6 +240,9 @@ impl Daemon {
             tun: None,
             addresses: Vec::new(),
             names: HashMap::new(),
+            avatar,
+            avatars: HashMap::new(),
+            fetching: HashSet::new(),
             sessions: Vec::new(),
             next_server: 1,
             generation: 0,
@@ -415,9 +438,95 @@ impl Daemon {
             }
             Request::Configure { network, locked, approval, password } => {
                 let target = self.target(server, Some(&network));
-                let settings = NetworkSettings { name: network, locked, approval, password };
+                let settings = NetworkSettings { name: network, locked, approval, password, rename: None };
                 self.route(target, ClientKind::UpdateNetwork(settings), reply)
             }
+            Request::RenameNetwork { network, name } => {
+                let target = self.target(server, Some(&network));
+                let settings =
+                    NetworkSettings { name: network, locked: None, approval: None, password: None, rename: Some(name) };
+                self.route(target, ClientKind::UpdateNetwork(settings), reply)
+            }
+            Request::Mute { network, member, seconds } => {
+                let target = self.target(server, Some(&network));
+                let seconds = seconds.unwrap_or(MUTE_FOREVER);
+                self.route(target, ClientKind::Mute(MuteRequest { network, member, seconds }), reply)
+            }
+            Request::Refresh { address } => {
+                if address.is_none() {
+                    for index in 0..self.sessions.len() {
+                        self.internal(index, ClientKind::Refresh(Empty {}), Internal::Refresh);
+                    }
+                }
+                self.mesh.refresh(std::time::Instant::now(), address);
+                let _ = reply.send(Response::Ok);
+            }
+            Request::SetAvatar { image } => {
+                let _ = reply.send(self.set_avatar(image));
+            }
+            Request::Avatar { id } => {
+                let own = self.avatar.as_ref().filter(|image| avatar_id(image) == id);
+                let image = own.or_else(|| self.avatars.get(&id));
+                let _ = reply.send(Response::Avatar(image.map(|image| weft_ipc::encode_image(image))));
+            }
+        }
+    }
+
+    fn set_avatar(&mut self, image: Option<String>) -> Response {
+        let image = match image.as_deref().map(weft_ipc::decode_image) {
+            None => None,
+            Some(Some(image)) if !image.is_empty() && image.len() <= MAX_AVATAR_LEN => Some(image),
+            Some(_) => return Response::Error(Failure::InvalidRequest),
+        };
+        let path = self.state_dir.join(AVATAR_FILE);
+        let saved = match &image {
+            Some(image) => std::fs::write(&path, image),
+            None => std::fs::remove_file(&path).or_else(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(error),
+            }),
+        };
+        if let Err(error) = saved {
+            tracing::error!(%error, "cannot save the picture");
+            return Response::Error(Failure::Internal);
+        }
+        self.avatar = image;
+        for index in 0..self.sessions.len() {
+            self.send_avatar(index);
+        }
+        Response::Ok
+    }
+
+    fn send_avatar(&mut self, index: usize) {
+        let image = self.avatar.clone().unwrap_or_default();
+        self.internal(index, ClientKind::SetAvatar(Avatar { key: Vec::new(), image }), Internal::Ignore);
+    }
+
+    /// Sends a request whose reply the daemon handles itself.
+    fn internal(&mut self, index: usize, kind: ClientKind, purpose: Internal) {
+        if self.sessions[index].connection != Connection::Connected {
+            return;
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        if self.send_control(index, ClientMessage { id, kind: Some(kind) }) {
+            self.sessions[index].internal.insert(id, purpose);
+        }
+    }
+
+    /// Fetches the pictures of peers that are not known yet.
+    fn fetch_avatars(&mut self, index: usize) {
+        let missing: Vec<(Vec<u8>, String)> = self.sessions[index]
+            .state
+            .peers
+            .iter()
+            .filter(|peer| !peer.avatar.is_empty())
+            .filter(|peer| !self.avatars.contains_key(&peer.avatar) && !self.fetching.contains(&peer.avatar))
+            .map(|peer| (peer.key.clone(), peer.avatar.clone()))
+            .collect();
+        for (key, id) in missing {
+            self.fetching.insert(id.clone());
+            self.internal(index, ClientKind::GetAvatar(PeerKey { key }), Internal::Avatar(id));
         }
     }
 
@@ -758,6 +867,7 @@ impl Daemon {
         session.state = State::default();
         session.fail_pending(Failure::NotConnected);
         self.mesh.clear_server(session.id);
+        self.fetching.clear();
     }
 
     /// Rebuilds what depends on all servers: mesh peers, names, and the TUN interface.
@@ -801,6 +911,7 @@ impl Daemon {
                 }
                 let id = session.id;
                 self.mesh.clear_server(id);
+                self.fetching.clear();
             }
         }
     }
@@ -822,6 +933,8 @@ impl Daemon {
             let (id, key) = (session.id, session.link.server_key);
             self.mesh.set_server(std::time::Instant::now(), id, udp, key, token);
         }
+        let own = self.avatar.as_deref().map(avatar_id).unwrap_or_default();
+        let outdated = own != welcome.avatar;
         let session = &mut self.sessions[index];
         session.welcome = Some(welcome);
         session.candidates.clear();
@@ -831,6 +944,9 @@ impl Daemon {
         }
         for (code, reply) in std::mem::take(&mut session.redeem_waiters) {
             self.request(index, ClientKind::RedeemInvite(InviteCode { code }), reply);
+        }
+        if outdated {
+            self.send_avatar(index);
         }
         self.update_names();
     }
@@ -890,6 +1006,26 @@ impl Daemon {
 
     async fn on_message(&mut self, index: usize, message: ServerMessage) {
         if message.reply_to != 0
+            && let Some(purpose) = self.sessions[index].internal.remove(&message.reply_to)
+        {
+            match (purpose, message.kind) {
+                (Internal::Refresh, Some(ServerKind::State(state))) => self.apply_state(index, state),
+                (Internal::Avatar(id), kind) => {
+                    self.fetching.remove(&id);
+                    if let Some(ServerKind::Avatar(avatar)) = kind
+                        && avatar_id(&avatar.image) == id
+                    {
+                        if self.avatars.len() >= MAX_CACHED_AVATARS {
+                            self.avatars.clear();
+                        }
+                        self.avatars.insert(id, avatar.image);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if message.reply_to != 0
             && let Some(reply) = self.sessions[index].pending.remove(&message.reply_to)
         {
             let response = match message.kind {
@@ -910,10 +1046,7 @@ impl Daemon {
         }
         let now = std::time::Instant::now();
         match message.kind {
-            Some(ServerKind::State(state)) => {
-                self.sessions[index].state = state;
-                self.refresh();
-            }
+            Some(ServerKind::State(state)) => self.apply_state(index, state),
             Some(ServerKind::CallMeMaybe(PeerCandidates { key, endpoints })) => {
                 if let Ok(key) = PublicKey::from_slice(&key) {
                     let candidates = endpoints.iter().filter_map(|e| e.to_socket_addr()).collect();
@@ -927,6 +1060,12 @@ impl Daemon {
             }
             _ => {}
         }
+    }
+
+    fn apply_state(&mut self, index: usize, state: State) {
+        self.sessions[index].state = state;
+        self.refresh();
+        self.fetch_avatars(index);
     }
 
     fn on_timer(&mut self) {
@@ -1075,8 +1214,13 @@ impl Daemon {
     fn peer_configs(&self) -> Vec<PeerConfig> {
         let mut configs: HashMap<PublicKey, PeerConfig> = HashMap::new();
         let mut owners: HashMap<Ipv4Addr, PublicKey> = HashMap::new();
+        let own = self.keypair.public();
         for session in &self.sessions {
+            let muted = muted_peers(&session.state, own.as_bytes());
             for peer in &session.state.peers {
+                if muted.contains(peer.key.as_slice()) {
+                    continue;
+                }
                 let Ok(key) = PublicKey::from_slice(&peer.key) else { continue };
                 let address = Ipv4Addr::from(peer.address);
                 if owners.get(&address).is_some_and(|owner| *owner != key) {
@@ -1137,6 +1281,7 @@ impl Daemon {
             servers,
             host,
             public_link: public_server().map(|link| link.to_string()),
+            avatar: self.avatar.as_deref().map(avatar_id),
         }
     }
 
@@ -1148,23 +1293,35 @@ impl Daemon {
             .state
             .networks
             .iter()
-            .map(|network| NetworkStatus {
-                name: network.name.clone(),
-                role: match network.role() {
-                    Role::Owner => weft_ipc::Role::Owner,
-                    Role::Admin => weft_ipc::Role::Admin,
-                    Role::Member => weft_ipc::Role::Member,
-                },
-                locked: network.locked,
-                approval: network.approval,
-                requests: network.requests,
-                members: network
-                    .members
-                    .iter()
-                    .filter(|key| key.as_slice() != own.as_bytes())
-                    .filter_map(|key| peers.get(key.as_slice()))
-                    .map(|peer| self.member_status(peer))
-                    .collect(),
+            .map(|network| {
+                let details: HashMap<&[u8], &weft_proto::control::MemberDetails> =
+                    network.details.iter().map(|detail| (detail.key.as_slice(), detail)).collect();
+                let muted = |key: &[u8]| {
+                    details
+                        .get(key)
+                        .map(|detail| detail.muted_until)
+                        .filter(|&until| until > 0)
+                        .map(|until| if until == MUTE_FOREVER { weft_ipc::MUTED_FOREVER } else { until })
+                };
+                NetworkStatus {
+                    name: network.name.clone(),
+                    role: ipc_role(network.role()),
+                    locked: network.locked,
+                    approval: network.approval,
+                    requests: network.requests,
+                    muted_until: muted(own.as_bytes()),
+                    members: network
+                        .members
+                        .iter()
+                        .filter(|key| key.as_slice() != own.as_bytes())
+                        .filter_map(|key| peers.get(key.as_slice()))
+                        .map(|peer| MemberStatus {
+                            role: details.get(peer.key.as_slice()).map(|detail| ipc_role(detail.role())),
+                            muted_until: muted(&peer.key),
+                            ..self.member_status(peer)
+                        })
+                        .collect(),
+                }
             })
             .collect()
     }
@@ -1271,6 +1428,9 @@ impl Daemon {
             address: Ipv4Addr::from(peer.address),
             link,
             latency_ms: latency.map(|latency| latency.as_millis().min(u128::from(u32::MAX)) as u32),
+            role: None,
+            muted_until: None,
+            avatar: (!peer.avatar.is_empty()).then(|| peer.avatar.clone()),
         }
     }
 
@@ -1371,6 +1531,31 @@ fn failure(code: ErrorCode) -> Failure {
     }
 }
 
+/// Peers that only share networks with us where one of us is muted, so must not be reached.
+fn muted_peers<'a>(state: &'a State, own: &[u8]) -> HashSet<&'a [u8]> {
+    let mut reachable = HashSet::new();
+    let mut shared = HashSet::new();
+    for network in &state.networks {
+        let muted = |key: &[u8]| network.details.iter().any(|detail| detail.key == key && detail.muted_until > 0);
+        let me_muted = muted(own);
+        for key in &network.members {
+            shared.insert(key.as_slice());
+            if !me_muted && !muted(key) {
+                reachable.insert(key.as_slice());
+            }
+        }
+    }
+    shared.difference(&reachable).copied().collect()
+}
+
+fn ipc_role(role: Role) -> weft_ipc::Role {
+    match role {
+        Role::Owner => weft_ipc::Role::Owner,
+        Role::Admin => weft_ipc::Role::Admin,
+        Role::Member => weft_ipc::Role::Member,
+    }
+}
+
 fn device_infos(list: DeviceList) -> Vec<DeviceInfo> {
     list.devices
         .into_iter()
@@ -1402,5 +1587,23 @@ mod tests {
         let b = session(&format!("weft://[2001:db8::1]:7443#k={key}"));
         assert_eq!(b.host(), "[2001:db8::1]:7443");
         assert_eq!(b.matches("[2001:db8::1]"), 1);
+    }
+
+    #[test]
+    fn muted_peers_are_not_reached() {
+        use weft_proto::control::{MemberDetails, Network};
+        let network = |members: &[u8], muted: &[u8]| Network {
+            members: members.iter().map(|&n| vec![n]).collect(),
+            details: muted.iter().map(|&n| MemberDetails { key: vec![n], role: 0, muted_until: 9 }).collect(),
+            ..Default::default()
+        };
+        let state = |networks| State { networks, peers: Vec::new() };
+        let own = [0u8];
+        let alone = state(vec![network(&[0, 1, 2], &[2])]);
+        assert_eq!(muted_peers(&alone, &own), HashSet::from([[2u8].as_slice()]));
+        let elsewhere = state(vec![network(&[0, 1, 2], &[2]), network(&[0, 2], &[])]);
+        assert!(muted_peers(&elsewhere, &own).is_empty());
+        let me = state(vec![network(&[0, 1, 2], &[0])]);
+        assert_eq!(muted_peers(&me, &own).len(), 3);
     }
 }

@@ -104,6 +104,28 @@ pub enum Request {
     Diagnose {
         logs: bool,
     },
+    /// Mutes a member for `seconds`, for good without them; 0 lifts the mute.
+    Mute {
+        network: String,
+        member: String,
+        seconds: Option<u64>,
+    },
+    RenameNetwork {
+        network: String,
+        name: String,
+    },
+    /// Asks the servers again and measures pings; with an address only that member's ping.
+    Refresh {
+        address: Option<Ipv4Addr>,
+    },
+    /// Sets this device's picture, base64 PNG or JPEG; none removes it.
+    SetAvatar {
+        image: Option<String>,
+    },
+    /// A picture by its id, as base64.
+    Avatar {
+        id: String,
+    },
 }
 
 /// A request with an optional server: a link, `host` or `host:port`. Without it the daemon picks
@@ -128,6 +150,7 @@ pub enum Response {
     Bans(Vec<DeviceInfo>),
     Requests(Vec<DeviceInfo>),
     Diagnostics(Box<Diagnostics>),
+    Avatar(Option<String>),
     Error(Failure),
 }
 
@@ -232,6 +255,9 @@ pub struct Status {
     /// The public Weft server's link, for choosing it again.
     #[serde(default)]
     pub public_link: Option<String>,
+    /// The id of this device's picture.
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -311,7 +337,12 @@ pub struct NetworkStatus {
     pub approval: bool,
     pub requests: u32,
     pub members: Vec<MemberStatus>,
+    /// Until when this device is muted here; `MUTED_FOREVER` has no end.
+    #[serde(default)]
+    pub muted_until: Option<u64>,
 }
+
+pub const MUTED_FOREVER: u64 = u64::MAX;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -329,6 +360,13 @@ pub struct MemberStatus {
     pub address: Ipv4Addr,
     pub link: PeerLink,
     pub latency_ms: Option<u32>,
+    #[serde(default)]
+    pub role: Option<Role>,
+    /// Until when the member is muted; `MUTED_FOREVER` has no end.
+    #[serde(default)]
+    pub muted_until: Option<u64>,
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,6 +376,14 @@ pub enum PeerLink {
     Connecting,
     Relay,
     Direct,
+}
+
+pub fn encode_image(image: &[u8]) -> String {
+    data_encoding::BASE64.encode(image)
+}
+
+pub fn decode_image(text: &str) -> Option<Vec<u8>> {
+    data_encoding::BASE64.decode(text.as_bytes()).ok()
 }
 
 pub fn socket_path() -> PathBuf {

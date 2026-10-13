@@ -5,6 +5,7 @@ mod daemon;
 mod deploy;
 mod instance;
 mod notify;
+mod picture;
 mod repair;
 mod settings;
 mod shot;
@@ -43,6 +44,12 @@ const EXPIRY: [(&str, Option<u64>); 5] = [
     ("gui-expiry-month", Some(30 * 86_400)),
 ];
 const DEPLOY_STEPS: [&str; 5] = ["check", "download", "configure", "firewall", "start"];
+/// Mute lengths offered for a member: fixed ones, then a custom one and forever.
+const MUTES: [(&str, u64); 4] =
+    [("gui-mute-5m", 300), ("gui-mute-30m", 1800), ("gui-mute-1h", 3600), ("gui-mute-5h", 5 * 3600)];
+const MUTE_UNITS: [(&str, u64); 3] = [("gui-unit-minutes", 60), ("gui-unit-hours", 3600), ("gui-unit-days", 86_400)];
+/// How long a refresh waits for answers before showing them.
+const REFRESH_WAIT: Duration = Duration::from_millis(1200);
 
 struct Options {
     hidden: bool,
@@ -92,7 +99,7 @@ fn options() -> Options {
 #[derive(Default)]
 struct Context {
     network: Option<(ServerStatus, NetworkStatus)>,
-    member: Option<(String, String)>,
+    member: Option<(String, String, bool)>,
     server: Option<ServerStatus>,
     choices: Vec<String>,
 }
@@ -104,8 +111,9 @@ struct App {
     store: RefCell<settings::Store>,
     networks: RefCell<view::Networks>,
     status: RefCell<Option<Status>>,
-    /// The last status that had networks, to show them while Weft is off.
-    known: RefCell<Option<Status>>,
+    /// Pictures of devices by id, and the ids being fetched.
+    pictures: RefCell<view::Pictures>,
+    fetching: RefCell<HashSet<String>>,
     context: RefCell<Context>,
     notifier: RefCell<notify::Notifier>,
     problem: Cell<DaemonState>,
@@ -156,7 +164,8 @@ fn main() -> Result<(), slint::PlatformError> {
         store: RefCell::new(store),
         networks: RefCell::new(view::Networks::default()),
         status: RefCell::new(None),
-        known: RefCell::new(None),
+        pictures: RefCell::new(view::Pictures::new()),
+        fetching: RefCell::new(HashSet::new()),
         context: RefCell::new(Context::default()),
         notifier: RefCell::new(notify::Notifier::default()),
         problem: Cell::new(DaemonState::Ok),
@@ -275,6 +284,8 @@ impl App {
         on!(app, on_network_requests, |index| app.with_network(index as usize, |app| app.open_devices("requests")));
         on!(app, on_network_menu, |index| app.with_network(index as usize, App::open_network_menu));
         on!(app, on_member_menu, |network, member| app.open_member(network as usize, member as usize));
+        on!(app, on_member_ping, |network, member| app.ping_member(network as usize, member as usize));
+        on!(app, on_refresh, || app.refresh_all());
         on!(app, on_fix_problem, || app.fix_problem());
         on!(app, on_download_update, || app.download_update());
         on!(app, on_nickname_changed, |name| app.rename(name.to_string(), false));
@@ -288,7 +299,13 @@ impl App {
         on!(app, on_settings_save, |name| app.rename(name.to_string(), true));
         on!(app, on_language_chosen, |index| app.choose_language(index as usize));
         on!(app, on_open_servers, || app.open_servers());
-        on!(app, on_notifications_toggled, |on| app.store.borrow_mut().update(|settings| settings.notifications = on));
+        on!(app, on_notifications_toggled, |on| {
+            app.store.borrow_mut().update(|settings| settings.notifications = on);
+        });
+        on!(app, on_open_notifications, || app.open_notifications());
+        on!(app, on_notify_kind_toggled, |kind, on| app.toggle_notify(&kind, on));
+        on!(app, on_pick_picture, || app.pick_picture());
+        on!(app, on_remove_picture, || app.set_picture(None));
         on!(app, on_updates_toggled, |on| {
             app.store.borrow_mut().update(|settings| settings.updates = on);
             app.check_updates();
@@ -308,9 +325,15 @@ impl App {
         on!(app, on_device_act, |command, key| app.device_action(command.to_string(), key.to_string()));
         on!(app, on_network_configure, |key, on| app.configure(key.to_string(), on));
         on!(app, on_network_password, |password| app.change_password(password.to_string()));
+        on!(app, on_network_rename, |name| app.rename_network(name.to_string()));
         on!(app, on_network_delete, || app.delete_network());
         on!(app, on_network_pick, |item| app.network_pick(&item));
         on!(app, on_member_act, |command| app.member_action(command.to_string()));
+        on!(app, on_member_mute, |duration, amount, unit| app.mute_member(
+            duration as usize,
+            amount.to_string(),
+            unit as usize
+        ));
         on!(app, on_report_refresh, || app.load_report());
         on!(app, on_report_save, || app.save_report());
     }
@@ -366,10 +389,11 @@ impl App {
         None
     }
 
-    fn show_status(&self, status: Status) {
+    fn show_status(self: &Rc<Self>, status: Status) {
         let ui = self.ui();
-        let enabled = self.store.borrow().current.notifications && !self.demo;
-        self.notifier.borrow_mut().observe(&status, enabled, &self.l);
+        let wanted = self.store.borrow().current.clone();
+        let wanted = (wanted.notifications && !self.demo).then_some(&wanted.notify);
+        self.notifier.borrow_mut().observe(&status, wanted, &self.l);
         let welcome = status.servers.is_empty() && status.host.is_none();
         if welcome && ui.get_phase() != "welcome" {
             ui.set_welcome_nickname(status.nickname.clone().into());
@@ -377,6 +401,7 @@ impl App {
         ui.set_phase(if welcome { "welcome" } else { "main" }.into());
         *self.status.borrow_mut() = Some(status);
         self.render();
+        self.fetch_pictures();
         if !self.demo && system::restart_if_replaced(ui.window().is_visible()) {
             let _ = slint::quit_event_loop();
         }
@@ -388,26 +413,18 @@ impl App {
         let Some(status) = self.status.borrow().clone() else { return };
         let collapsed: HashSet<String> = self.store.borrow().current.collapsed.iter().cloned().collect();
         let connection = view::overall(&status.servers);
-        let has_networks = status.servers.iter().any(|server| !server.networks.is_empty());
-        // Only a connected snapshot is the truth: while connecting or off the daemon lists nothing.
-        if connection == "connected" {
-            *self.known.borrow_mut() = Some(status.clone());
-        }
-        let shown = match self.known.borrow().as_ref() {
-            Some(known) if !has_networks && connection == "disconnected" => view::offline(known, &status),
-            _ => status.clone(),
-        };
-        self.networks.borrow_mut().update(&self.l, &shown, &collapsed);
+        self.networks.borrow_mut().update(&self.l, &status, &collapsed, &self.pictures.borrow());
         ui.set_nickname(status.nickname.clone().into());
         ui.set_connection(connection.into());
         let address = status.servers.iter().find_map(|server| server.address).map(|a| a.to_string());
         ui.set_address(address.unwrap_or_default().into());
-        let empty = match connection {
-            "connected" => "gui-no-networks",
-            "connecting" => "gui-waiting-server",
-            _ => "gui-off-hint",
+        let (empty, hint) = match connection {
+            "connected" => ("gui-no-networks", None),
+            "connecting" => ("gui-waiting-server", None),
+            _ => ("gui-off-title", Some("gui-off-hint")),
         };
         ui.set_empty_text(self.tr(empty).into());
+        ui.set_empty_hint(hint.map(|id| self.tr(id)).unwrap_or_default().into());
         if ui.get_dialog() == "servers" {
             view::sync(&self.servers, view::server_rows(&self.l, &status));
         }
@@ -476,6 +493,88 @@ impl App {
         match system::copy(text) {
             Ok(()) => self.toast(&self.tr("gui-copied"), false),
             Err(error) => self.toast(&error, true),
+        }
+    }
+
+    /// Asks the servers again and measures every ping, then shows the result.
+    fn refresh_all(self: &Rc<Self>) {
+        let ui = self.ui();
+        if ui.get_refreshing() || self.demo {
+            return;
+        }
+        ui.set_refreshing(true);
+        let app = self.clone();
+        self.spawn(async move {
+            if let Err(error) = app.send(Request::Refresh { address: None }, None).await {
+                app.toast(&error, true);
+            }
+            daemon::background(tokio::time::sleep(REFRESH_WAIT)).await;
+            app.refresh().await;
+            app.ui().set_refreshing(false);
+        });
+    }
+
+    /// Measures one member's ping again; the own row stands for the server and refreshes all.
+    fn ping_member(self: &Rc<Self>, network: usize, member: usize) {
+        let shown = self.networks.borrow().shown.get(network).cloned();
+        let Some((_, network)) = shown else { return };
+        let Some(address) = member.checked_sub(1).and_then(|index| network.members.get(index)).map(|m| m.address)
+        else {
+            return self.refresh_all();
+        };
+        if self.demo {
+            return;
+        }
+        let app = self.clone();
+        self.spawn(async move {
+            let _ = app.send(Request::Refresh { address: Some(address) }, None).await;
+            daemon::background(tokio::time::sleep(REFRESH_WAIT)).await;
+            app.refresh().await;
+        });
+    }
+
+    /// Loads the pictures the status mentions that are not here yet.
+    fn fetch_pictures(self: &Rc<Self>) {
+        let Some(status) = self.status.borrow().clone() else { return };
+        let ids: HashSet<String> = status
+            .avatar
+            .iter()
+            .cloned()
+            .chain(
+                status
+                    .servers
+                    .iter()
+                    .flat_map(|server| &server.networks)
+                    .flat_map(|network| &network.members)
+                    .filter_map(|member| member.avatar.clone()),
+            )
+            .filter(|id| !self.pictures.borrow().contains_key(id))
+            .collect();
+        for id in ids {
+            if !self.fetching.borrow_mut().insert(id.clone()) {
+                continue;
+            }
+            let app = self.clone();
+            self.spawn(async move {
+                let image = match app.send(Request::Avatar { id: id.clone() }, None).await {
+                    Ok(Response::Avatar(Some(image))) => weft_ipc::decode_image(&image),
+                    _ => None,
+                };
+                let pixels = match image {
+                    Some(image) => daemon::background(async move { picture::pixels(&image) }).await,
+                    None => None,
+                };
+                let Some(pixels) = pixels else {
+                    // The daemon may still be fetching it from the server: ask again later.
+                    daemon::background(tokio::time::sleep(Duration::from_secs(5))).await;
+                    app.fetching.borrow_mut().remove(&id);
+                    return;
+                };
+                app.fetching.borrow_mut().remove(&id);
+                app.pictures.borrow_mut().insert(id, slint::Image::from_rgba8(pixels));
+                app.render();
+                app.show_own_picture();
+            });
         }
     }
 
@@ -572,13 +671,89 @@ impl App {
         self.ui().set_update_version(version.into());
     }
 
-    fn download_update(&self) {
-        let release = self.store.borrow().current.release.clone();
-        if let Some(release) = release.filter(|release| release.url.starts_with(update::RELEASES))
-            && let Err(error) = system::open_url(&release.url)
-        {
-            self.toast(&error, true);
+    /// Downloads the new version and starts its installer; without a package for this system
+    /// it opens the release page instead.
+    fn download_update(self: &Rc<Self>) {
+        let ui = self.ui();
+        if ui.get_update_stage() != "" {
+            return;
         }
+        ui.set_update_stage("downloading".into());
+        ui.set_update_progress(0);
+        let app = self.clone();
+        self.spawn(async move {
+            let cached = app.store.borrow().current.release.clone();
+            let release = match cached.filter(|release| !release.assets.is_empty()) {
+                Some(release) => Some(release),
+                None => daemon::background(async { tokio::task::spawn_blocking(update::fetch).await.ok().flatten() })
+                    .await
+                    .inspect(|release| {
+                        let release = release.clone();
+                        app.store.borrow_mut().update(|settings| settings.release = Some(release));
+                    }),
+            };
+            let Some(release) = release else {
+                app.ui().set_update_stage(SharedString::new());
+                return app.toast(&app.tr("gui-update-failed"), true);
+            };
+            let Some(plan) = update::plan(&release) else {
+                app.ui().set_update_stage(SharedString::new());
+                if release.url.starts_with(update::RELEASES)
+                    && let Err(error) = system::open_url(&release.url)
+                {
+                    app.toast(&error, true);
+                }
+                return;
+            };
+            let weak = app.ui.clone();
+            let asset = plan.asset.clone();
+            let downloaded = daemon::background(async move {
+                tokio::task::spawn_blocking(move || {
+                    update::download(&asset, |percent| {
+                        let weak = weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_update_progress(i32::from(percent));
+                            }
+                        });
+                    })
+                })
+                .await
+                .unwrap_or_else(|error| Err(error.to_string()))
+            })
+            .await;
+            let path = match downloaded {
+                Ok(path) => path,
+                Err(reason) => {
+                    app.ui().set_update_stage(SharedString::new());
+                    return app.toast(&app.tr_args("gui-update-error", &[("reason", &reason)]), true);
+                }
+            };
+            app.ui().set_update_stage("installing".into());
+            let installing = plan.clone();
+            let installed = daemon::background(async move {
+                tokio::task::spawn_blocking(move || update::install(&installing, &path))
+                    .await
+                    .unwrap_or_else(|error| Err(error.to_string()))
+            })
+            .await;
+            match installed {
+                // The installer replaces this program and starts the new version itself.
+                Ok(()) if plan.installer == update::Installer::Msi => {
+                    let _ = slint::quit_event_loop();
+                }
+                Ok(()) => {
+                    app.ui().set_update_stage(SharedString::new());
+                    if plan.installer != update::Installer::Pkg {
+                        app.toast(&app.tr("gui-update-done"), false);
+                    }
+                }
+                Err(reason) => {
+                    app.ui().set_update_stage(SharedString::new());
+                    app.toast(&app.tr_args("gui-update-error", &[("reason", &reason)]), true);
+                }
+            }
+        });
     }
 
     // Dialogs
@@ -603,7 +778,12 @@ impl App {
     /// Goes back from a submenu, or closes the dialog.
     fn leave(self: &Rc<Self>) {
         match self.ui().get_dialog().as_str() {
-            "servers" => self.open_settings(),
+            "servers" | "notifications" => {
+                let ui = self.ui();
+                let nickname = ui.get_settings_nickname();
+                self.open_settings();
+                ui.set_settings_nickname(nickname);
+            }
             "server-menu" | "host" | "add-server" => self.open_servers(),
             _ => self.close(),
         }
@@ -637,7 +817,25 @@ impl App {
             "invites" => self.with_network(0, App::open_invites),
             "network-menu" => self.with_network(0, App::open_network_menu),
             "network-settings" => self.with_network(0, App::open_network_settings),
-            "member" => self.open_member(0, 1),
+            "member" => self.open_member(0, 2),
+            "member-admin" => self.open_member(0, 1),
+            "member-muted" => self.open_member(0, 3),
+            "notifications" => self.open_notifications(),
+            "toast" => self.toast(&self.tr("gui-copied"), false),
+            "off" => {
+                let mut status = view::demo();
+                for server in &mut status.servers {
+                    server.connection = Connection::Disconnected;
+                    server.networks.clear();
+                }
+                self.show_status(status);
+            }
+            "update" => {
+                let ui = self.ui();
+                ui.set_update_version("1.1.0".into());
+                ui.set_update_stage("downloading".into());
+                ui.set_update_progress(42);
+            }
             "diagnostics" => self.open_diagnostics(),
             "ssh" => {
                 self.open_create();
@@ -875,9 +1073,76 @@ impl App {
         let index = Language::ALL.iter().position(|language| *language == self.l.language()).unwrap_or(0);
         ui.set_language_index(index as i32);
         ui.set_server_count(status.as_ref().map_or(0, |status| view::servers(status).len()) as i32);
-        ui.set_notifications(self.store.borrow().current.notifications);
+        let notifications = self.store.borrow().current.notifications;
+        ui.set_notifications_detail(self.tr(if notifications { "gui-on" } else { "gui-off" }).into());
         ui.set_updates(self.store.borrow().current.updates);
+        self.show_own_picture();
         self.open("settings");
+    }
+
+    /// The own picture, or the first letter, in the settings.
+    fn show_own_picture(&self) {
+        let ui = self.ui();
+        let status = self.status.borrow();
+        let nickname = status.as_ref().map(|status| status.nickname.as_str()).unwrap_or_default();
+        ui.set_own_initial(view::initial(nickname).into());
+        ui.set_own_tone(view::avatar_tone(nickname));
+        let picture = status
+            .as_ref()
+            .and_then(|status| status.avatar.as_ref())
+            .and_then(|id| self.pictures.borrow().get(id).cloned());
+        ui.set_own_has_picture(picture.is_some());
+        ui.set_own_picture(picture.unwrap_or_default());
+    }
+
+    fn open_notifications(&self) {
+        let ui = self.ui();
+        let current = self.store.borrow().current.clone();
+        ui.set_notifications(current.notifications);
+        let kinds: Vec<SharedString> = settings::Notify::KINDS.iter().map(|&kind| kind.into()).collect();
+        let labels: Vec<SharedString> =
+            settings::Notify::KINDS.iter().map(|kind| self.tr(&format!("gui-notify-{kind}")).into()).collect();
+        let wanted: Vec<bool> = settings::Notify::KINDS.iter().map(|kind| current.notify.get(kind)).collect();
+        ui.set_notify_kinds(ModelRc::new(VecModel::from(kinds)));
+        ui.set_notify_labels(ModelRc::new(VecModel::from(labels)));
+        ui.set_notify_wanted(ModelRc::new(VecModel::from(wanted)));
+        self.open("notifications");
+    }
+
+    fn toggle_notify(&self, kind: &str, on: bool) {
+        self.store.borrow_mut().update(|settings| settings.notify.set(kind, on));
+    }
+
+    fn pick_picture(self: &Rc<Self>) {
+        let title = self.tr("gui-picture-choose");
+        let filter = self.tr("gui-picture-files");
+        let app = self.clone();
+        self.spawn(async move {
+            let dialog = rfd::AsyncFileDialog::new()
+                .set_title(&title)
+                .add_filter(&filter, &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
+            let Some(file) = dialog.pick_file().await else { return };
+            let path = file.path().to_path_buf();
+            let prepared = daemon::background(async move { picture::prepare(&path) }).await;
+            match prepared {
+                Ok(image) => app.set_picture(Some(image)),
+                Err(picture::PictureError::TooBig) => app.toast(&app.tr("gui-picture-too-big"), true),
+                Err(picture::PictureError::Unreadable) => app.toast(&app.tr("gui-picture-unreadable"), true),
+            }
+        });
+    }
+
+    fn set_picture(self: &Rc<Self>, image: Option<Vec<u8>>) {
+        let removed = image.is_none();
+        let app = self.clone();
+        self.run(async move {
+            let image = image.as_deref().map(weft_ipc::encode_image);
+            app.send(Request::SetAvatar { image }, None).await?;
+            app.refresh().await;
+            app.show_own_picture();
+            app.toast(&app.tr(if removed { "done-picture-removed" } else { "done-picture" }), false);
+            Ok(())
+        });
     }
 
     fn choose_language(&self, index: usize) {
@@ -909,7 +1174,6 @@ impl App {
             app.store.borrow_mut().update(|settings| {
                 *settings = settings::Settings { language: settings.language.clone(), ..Default::default() };
             });
-            *app.known.borrow_mut() = None;
             app.ui().global::<Theme>().set_dark(false);
             app.close();
             app.refresh().await;
@@ -1092,6 +1356,10 @@ impl App {
     fn load_invites(self: &Rc<Self>) {
         let Some((name, server, _)) = self.network() else { return };
         if self.demo {
+            let link = "weft://141.11.211.11:8443/K7QF-M2XA#k=g4xfbqwhwx3slxpw73sszriu2w5bsgms7ahkso2mxuk7253bbn7a";
+            self.ui().set_invite_created(link.into());
+            let row = InviteRow { code: "K7QF-M2XA".into(), link: link.into(), details: "0/5 \u{b7} 6 d 23 h".into() };
+            view::sync(&self.invites, vec![row]);
             return;
         }
         let app = self.clone();
@@ -1122,26 +1390,13 @@ impl App {
         };
         let expires = match invite.expires {
             Some(at) => {
-                let left = self.remaining(at as i64 - update::now() as i64);
+                let left = view::remaining(&self.l, at.saturating_sub(update::now()));
                 self.tr_args("invite-expires", &[("time", &left)])
             }
             None => self.tr("invite-no-expiry"),
         };
         let by = self.tr_args("invite-by", &[("nickname", &invite.creator)]);
         format!("{used} \u{b7} {expires} \u{b7} {by}")
-    }
-
-    fn remaining(&self, seconds: i64) -> String {
-        let minutes = (seconds + 59).div_euclid(60).max(1);
-        let (days, hours, mins) =
-            ((minutes / 1440).to_string(), ((minutes / 60) % 24).to_string(), (minutes % 60).to_string());
-        if minutes >= 1440 {
-            self.tr_args("time-days", &[("days", &days), ("hours", &hours)])
-        } else if minutes >= 60 {
-            self.tr_args("time-hours", &[("hours", &hours), ("minutes", &mins)])
-        } else {
-            self.tr_args("time-minutes", &[("minutes", &mins)])
-        }
     }
 
     fn create_invite(self: &Rc<Self>, uses: String, expiry: usize) {
@@ -1161,7 +1416,11 @@ impl App {
             if let Response::Invite(invite) =
                 app.send(Request::CreateInvite { network, uses, expires_in }, Some(server)).await?
             {
-                app.ui().set_invite_created(invite.link.unwrap_or(invite.code).into());
+                let link = invite.link.unwrap_or(invite.code);
+                app.ui().set_invite_created(link.clone().into());
+                if system::copy(&link).is_ok() {
+                    app.toast(&app.tr("done-invite-copied"), false);
+                }
             }
             app.load_invites();
             Ok(())
@@ -1237,7 +1496,32 @@ impl App {
         ui.set_network_owner(network.role == Role::Owner);
         ui.set_network_locked(network.locked);
         ui.set_network_approval(network.approval);
+        ui.set_network_name(network.name.clone().into());
         self.open("network-settings");
+    }
+
+    fn rename_network(self: &Rc<Self>, name: String) {
+        let Some((network, server, _)) = self.network() else { return };
+        let name = name.trim().to_string();
+        if name.is_empty() || name == network {
+            return;
+        }
+        let app = self.clone();
+        self.run(async move {
+            app.send(Request::RenameNetwork { network: network.clone(), name: name.clone() }, Some(server)).await?;
+            let (old, new) = (view::network_id_of(&network), view::network_id_of(&name));
+            app.store.borrow_mut().update(|settings| {
+                for id in &mut settings.collapsed {
+                    if let Some(server) = id.strip_suffix(&old) {
+                        *id = format!("{server}{new}");
+                    }
+                }
+            });
+            app.toast(&app.tr_args("done-rename", &[("name", &network), ("new", &name)]), false);
+            app.close();
+            app.poll();
+            Ok(())
+        });
     }
 
     fn configure(self: &Rc<Self>, key: String, on: bool) {
@@ -1297,20 +1581,68 @@ impl App {
         ui.set_dialog_title(row.nickname.clone().into());
         ui.set_member_address(row.address.to_string().into());
         ui.set_network_owner(network.role == Role::Owner);
+        let role = row.role.unwrap_or(Role::Member);
+        ui.set_member_admin(role == Role::Admin);
+        ui.set_member_above(view::rank(network.role) > view::rank(role));
+        ui.set_member_muted(row.muted_until.is_some());
+        let muted = row.muted_until.map(|until| view::muted_text(&self.l, "gui-muted", until));
+        ui.set_member_muted_text(muted.unwrap_or_default().into());
+        let mut durations: Vec<SharedString> = MUTES.iter().map(|(id, _)| self.tr(id).into()).collect();
+        durations.push(self.tr("gui-mute-custom").into());
+        durations.push(self.tr("gui-mute-forever").into());
+        ui.set_mute_durations(ModelRc::new(VecModel::from(durations)));
+        let units: Vec<SharedString> = MUTE_UNITS.iter().map(|(id, _)| self.tr(id).into()).collect();
+        ui.set_mute_units(ModelRc::new(VecModel::from(units)));
         let mut context = self.context.borrow_mut();
-        context.member = Some((row.address.to_string(), row.nickname));
+        context.member = Some((row.address.to_string(), row.nickname, row.muted_until.is_some()));
         context.network = Some((server, network));
         drop(context);
         self.open("member");
     }
 
+    /// Mutes the member for a listed time, a custom one, or for good.
+    fn mute_member(self: &Rc<Self>, duration: usize, amount: String, unit: usize) {
+        let seconds = match duration {
+            index if index < MUTES.len() => Some(MUTES[index].1),
+            index if index == MUTES.len() => {
+                let amount = amount.trim().parse::<u64>().ok().filter(|&amount| amount > 0);
+                let unit = MUTE_UNITS.get(unit).map_or(60, |(_, seconds)| *seconds);
+                match amount.and_then(|amount| amount.checked_mul(unit)) {
+                    Some(seconds) => Some(seconds),
+                    None => return self.fail(&self.tr("gui-mute-invalid")),
+                }
+            }
+            _ => None,
+        };
+        let Some((network, server, _)) = self.network() else { return };
+        let Some((member, nickname, _)) = self.context.borrow().member.clone() else { return };
+        let app = self.clone();
+        self.run(async move {
+            let name = network.clone();
+            app.send(Request::Mute { network, member, seconds }, Some(server)).await?;
+            let args = [("name", name.as_str()), ("member", nickname.as_str())];
+            let done = match seconds {
+                Some(seconds) => {
+                    let time = view::remaining(&app.l, seconds);
+                    app.tr_args("done-mute", &[args[0], args[1], ("time", &time)])
+                }
+                None => app.tr_args("done-mute-forever", &args),
+            };
+            app.toast(&done, false);
+            app.close();
+            app.poll();
+            Ok(())
+        });
+    }
+
     fn member_action(self: &Rc<Self>, command: String) {
         let Some((network, server, _)) = self.network() else { return };
-        let Some((member, nickname)) = self.context.borrow().member.clone() else { return };
+        let Some((member, nickname, _)) = self.context.borrow().member.clone() else { return };
         let app = self.clone();
         self.run(async move {
             let name = network.clone();
             let (request, done) = match command.as_str() {
+                "unmute" => (Request::Mute { network, member, seconds: Some(0) }, "done-unmute"),
                 "kick" => (Request::Kick { network, member }, "done-kick"),
                 "ban" => (Request::Ban { network, member }, "done-ban"),
                 "promote" => (Request::SetRole { network, member, role: Role::Admin }, "done-promote"),

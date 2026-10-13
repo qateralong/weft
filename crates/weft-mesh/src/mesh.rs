@@ -353,6 +353,29 @@ impl Mesh {
         self.tick(now);
     }
 
+    /// Measures the ping of peers with a direct path again and retries the others, right now;
+    /// `only` limits it to one peer.
+    pub fn refresh(&mut self, now: Instant, only: Option<Ipv4Addr>) {
+        let ids: Vec<PeerId> = self
+            .peers
+            .iter()
+            .filter(|(_, peer)| peer.online && only.is_none_or(|address| peer.address == address))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            let Some(peer) = self.peers.get_mut(&id) else { continue };
+            match peer.best {
+                Some(best) => self.ping(now, id, best),
+                None => {
+                    peer.attempts = 0;
+                    peer.sprayed_at = None;
+                    peer.probe_at = Some(now);
+                }
+            }
+        }
+        self.tick(now);
+    }
+
     pub fn call_me_maybe(&mut self, now: Instant, key: &PublicKey, candidates: Vec<SocketAddr>) {
         let Some(&id) = self.by_key.get(key) else { return };
         let Some(peer) = self.peers.get_mut(&id) else { return };

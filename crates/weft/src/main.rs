@@ -110,6 +110,15 @@ fn cli(l: &Localizer) -> Command {
             vec![network(), positional(l, "mode", "arg-mode").required(true).value_parser(["on", "off"])],
         ))
         .subcommand(command(l, "password", "cmd-password", vec![network(), password()]))
+        .subcommand(command(l, "mute", "cmd-mute", vec![network(), member(), option(l, "for", 'f', "arg-for")]))
+        .subcommand(command(l, "unmute", "cmd-unmute", vec![network(), member()]))
+        .subcommand(command(
+            l,
+            "rename",
+            "cmd-rename",
+            vec![network(), positional(l, "new-name", "arg-new-name").required(true)],
+        ))
+        .subcommand(command(l, "refresh", "cmd-refresh", vec![]))
         .subcommand(command(
             l,
             "delete",
@@ -287,6 +296,34 @@ fn run(l: &Localizer, matches: &ArgMatches) -> Result<(), String> {
             let done = l.tr_args(&done, &[("name", &network)]);
             (Request::Configure { network, locked, approval, password: new_password }, Some(done))
         }
+        Some(("mute", m)) => {
+            let network = arg(m, "network").unwrap_or_default();
+            let member = arg(m, "member").unwrap_or_default();
+            let seconds =
+                arg(m, "for").map(|text| parse_duration(&text).ok_or(l.tr("error-invalid-duration"))).transpose()?;
+            let args = [("name", network.as_str()), ("member", member.as_str())];
+            let done = match seconds {
+                Some(seconds) => {
+                    let time = format_remaining(l, seconds);
+                    l.tr_args("done-mute", &[args[0], args[1], ("time", &time)])
+                }
+                None => l.tr_args("done-mute-forever", &args),
+            };
+            (Request::Mute { network, member, seconds }, Some(done))
+        }
+        Some(("unmute", m)) => {
+            let network = arg(m, "network").unwrap_or_default();
+            let member = arg(m, "member").unwrap_or_default();
+            let done = l.tr_args("done-unmute", &[("name", &network), ("member", &member)]);
+            (Request::Mute { network, member, seconds: Some(0) }, Some(done))
+        }
+        Some(("rename", m)) => {
+            let network = arg(m, "network").unwrap_or_default();
+            let name = arg(m, "new-name").unwrap_or_default();
+            let done = l.tr_args("done-rename", &[("name", &network), ("new", &name)]);
+            (Request::RenameNetwork { network, name }, Some(done))
+        }
+        Some(("refresh", _)) => (Request::Refresh { address: None }, Some(l.tr("done-refresh"))),
         Some(("netcheck", m)) => (Request::Diagnose { logs: m.get_flag("logs") }, None),
         Some(("delete", m)) => {
             if !m.get_flag("yes") {
@@ -354,6 +391,7 @@ fn run(l: &Localizer, matches: &ArgMatches) -> Result<(), String> {
             print_devices(l, &request, &devices);
             Ok(())
         }
+        Response::Avatar(_) => Ok(()),
         Response::Error(failure) => Err(l.tr(failure.message_id())),
     }
 }
@@ -531,6 +569,14 @@ fn print_networks(l: &Localizer, networks: &[NetworkStatus]) {
                 (PeerLink::Relay, _) => l.tr("link-relay"),
                 (PeerLink::Direct, Some(ms)) => l.tr_args("link-direct-latency", &[("ms", &ms.to_string())]),
                 (PeerLink::Direct, None) => l.tr("link-direct"),
+            };
+            let link = match member.muted_until {
+                Some(weft_ipc::MUTED_FOREVER) => l.tr("link-muted-forever"),
+                Some(until) => {
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                    l.tr_args("link-muted", &[("time", &format_remaining(l, until.saturating_sub(now)))])
+                }
+                None => link,
             };
             let name = member.dns.as_deref().unwrap_or("");
             if names == 0 {

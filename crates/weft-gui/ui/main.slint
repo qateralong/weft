@@ -14,6 +14,11 @@ export struct MemberRow {
     tone: int,
     initial: string,
     me: bool,
+    manageable: bool,
+    badge: string,
+    muted: bool,
+    picture: image,
+    has-picture: bool,
 }
 
 export struct NetworkCard {
@@ -33,6 +38,8 @@ component MemberLine inherits Rectangle {
     in property <bool> manager;
     callback copy(string);
     callback menu();
+    callback ping();
+    property <bool> pinging;
     height: 52px;
     background: data.me ? Theme.accent-soft : touch.has-hover ? Theme.hover : transparent;
     property <bool> shown;
@@ -64,6 +71,8 @@ component MemberLine inherits Rectangle {
         initial: data.initial;
         tint: Theme.avatar(data.tone);
         link: data.link;
+        picture: data.picture;
+        has-picture: data.has-picture;
     }
 
     VerticalLayout {
@@ -78,6 +87,13 @@ component MemberLine inherits Rectangle {
                 alignment: center;
                 Tag {
                     text: I18n.t("gui-you");
+                }
+            }
+            if data.badge != "" && I18n.rtl: VerticalLayout {
+                alignment: center;
+                Tag {
+                    text: data.badge;
+                    strong: true;
                 }
             }
             name := Text {
@@ -95,6 +111,13 @@ component MemberLine inherits Rectangle {
                 }
             }
 
+            if data.badge != "" && !I18n.rtl: VerticalLayout {
+                alignment: center;
+                Tag {
+                    text: data.badge;
+                    strong: true;
+                }
+            }
             if data.me && !I18n.rtl: VerticalLayout {
                 alignment: center;
                 Tag {
@@ -105,7 +128,7 @@ component MemberLine inherits Rectangle {
 
         Text {
             text: data.sub;
-            color: Theme.muted;
+            color: data.muted ? Theme.danger : Theme.muted;
             font-size: 12px;
             overflow: elide;
             horizontal-alignment: I18n.rtl ? right : left;
@@ -137,9 +160,25 @@ component MemberLine inherits Rectangle {
         x: place(root.width - pad - menu-width - signal-width, signal-width);
         level: data.level;
         ping: data.ping;
+        busy: pinging;
+        TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                pinging = true;
+                root.ping();
+            }
+        }
     }
 
-    if manager && !data.me: IconButton {
+    Timer {
+        interval: 1500ms;
+        running: pinging;
+        triggered => {
+            pinging = false;
+        }
+    }
+
+    if data.manageable: IconButton {
         x: place(root.width - pad - 30px, 30px);
         icon: Icons.more;
         clicked => {
@@ -160,6 +199,7 @@ export component NetworkView inherits Rectangle {
     callback requests();
     callback menu();
     callback member-menu(int);
+    callback member-ping(int);
     property <length> head-height: 58px;
     property <length> body-height: data.members.length * 52px;
     height: head-height + (data.collapsed ? 0px : body-height);
@@ -404,6 +444,9 @@ export component NetworkView inherits Rectangle {
         menu => {
             root.member-menu(i);
         }
+        ping => {
+            root.member-ping(i);
+        }
     }
 }
 
@@ -535,8 +578,10 @@ export component Header inherits Rectangle {
     in property <string> nickname;
     in property <string> connection;
     in property <string> address;
+    in property <bool> refreshing;
     callback power();
     callback copy(string);
+    callback refresh();
     callback diagnostics();
     callback theme();
     callback settings();
@@ -546,7 +591,7 @@ export component Header inherits Rectangle {
     drop-shadow-blur: 10px;
     drop-shadow-color: Theme.shadow;
 
-    property <length> tools-width: 3 * 32px + 2 * 2px;
+    property <length> tools-width: (full ? 4 : 3) * 32px + (full ? 3 : 2) * 2px;
     property <length> power-width: full ? 46px + 12px : 0px;
     property <length> text-width: root.width - 32px - tools-width - power-width - 12px;
 
@@ -650,6 +695,15 @@ export component Header inherits Rectangle {
         spacing: 2px;
         padding-top: 21px;
         padding-bottom: 21px;
+        if full && !I18n.rtl: IconButton {
+            icon: Icons.refresh;
+            tooltip: I18n.t("gui-refresh");
+            turn: 60deg;
+            spin: refreshing;
+            clicked => {
+                root.refresh();
+            }
+        }
         IconButton {
             icon: I18n.rtl ? Icons.gear : Icons.pulse;
             turn: I18n.rtl ? 90deg : 0deg;
@@ -684,6 +738,16 @@ export component Header inherits Rectangle {
                 }
             }
         }
+
+        if full && I18n.rtl: IconButton {
+            icon: Icons.refresh;
+            tooltip: I18n.t("gui-refresh");
+            turn: 60deg;
+            spin: refreshing;
+            clicked => {
+                root.refresh();
+            }
+        }
     }
 }
 
@@ -691,50 +755,113 @@ export component Toast inherits Rectangle {
     in property <string> text;
     in property <bool> error;
     in property <bool> shown;
-    height: label.preferred-height + 20px;
-    border-radius: 10px;
+    height: max(40px, label.preferred-height + 20px);
+    border-radius: min(20px, self.height / 2);
     background: error ? Theme.danger : Theme.text;
+    drop-shadow-blur: 16px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: #00000033;
     opacity: shown ? 1 : 0;
-    animate opacity { duration: 200ms; }
-    label := Text {
-        x: 16px;
-        width: parent.width - 32px;
-        text: root.text;
-        color: error ? white : Theme.bg;
-        wrap: word-wrap;
-        horizontal-alignment: center;
+    transform-scale-x: shown ? 100% : 90%;
+    transform-scale-y: self.transform-scale-x;
+    animate opacity { duration: 180ms; }
+    animate transform-scale-x { duration: 260ms; easing: cubic-bezier(0.34, 1.56, 0.64, 1); }
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 18px;
+        spacing: 8px;
+        alignment: center;
+        if !error && !I18n.rtl: VerticalLayout {
+            alignment: center;
+            Icon {
+                width: 16px;
+                height: 16px;
+                name: Icons.check;
+                stroke: Theme.bg;
+                stroke-width: 2.5px;
+            }
+        }
+        label := Text {
+            text: root.text;
+            color: error ? white : Theme.bg;
+            font-weight: 550;
+            wrap: word-wrap;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+
+        if !error && I18n.rtl: VerticalLayout {
+            alignment: center;
+            Icon {
+                width: 16px;
+                height: 16px;
+                name: Icons.check;
+                stroke: Theme.bg;
+                stroke-width: 2.5px;
+            }
+        }
     }
 }
 
 export component UpdateBanner inherits Rectangle {
     in property <string> version;
+    // Empty while waiting, then "downloading" or "installing".
+    in property <string> stage;
+    in property <int> progress;
     callback download();
     height: 48px;
     border-radius: 14px;
     background: Theme.accent-soft;
+    clip: true;
+    if stage == "downloading": Rectangle {
+        x: I18n.rtl ? parent.width - self.width : 0;
+        width: parent.width * progress / 100;
+        background: Theme.accent-soft;
+        animate width { duration: 200ms; }
+    }
     HorizontalLayout {
         padding-left: 14px;
         padding-right: 10px;
         spacing: 10px;
-        Text {
-            text: I18n.ta("gui-update", "version", version);
-            color: Theme.text;
-            font-weight: 600;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-            horizontal-alignment: I18n.rtl ? right : left;
-        }
-
-        VerticalLayout {
+        if I18n.rtl && stage == "": VerticalLayout {
             alignment: center;
             Button {
                 small: true;
                 primary: true;
-                text: I18n.t("gui-download");
+                icon: Icons.download;
+                text: I18n.t("gui-update-install");
                 clicked => {
                     root.download();
                 }
             }
+        }
+        Text {
+            text: stage == "downloading" ? I18n.ta("gui-update-downloading", "progress", progress)
+                : stage == "installing" ? I18n.t("gui-update-installing")
+                : I18n.ta("gui-update", "version", version);
+            color: Theme.text;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+            horizontal-alignment: I18n.rtl ? right : left;
+        }
+
+        if !I18n.rtl && stage == "": VerticalLayout {
+            alignment: center;
+            Button {
+                small: true;
+                primary: true;
+                icon: Icons.download;
+                text: I18n.t("gui-update-install");
+                clicked => {
+                    root.download();
+                }
+            }
+        }
+        if stage != "": VerticalLayout {
+            alignment: center;
+            Spinner { }
         }
     }
 }

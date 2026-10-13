@@ -13,7 +13,10 @@ workspace = true
 [dependencies]
 arboard.workspace = true
 dirs.workspace = true
+image.workspace = true
 notify-rust.workspace = true
+rfd.workspace = true
+ring.workspace = true
 russh.workspace = true
 serde.workspace = true
 serde_json.workspace = true

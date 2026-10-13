@@ -13,7 +13,7 @@ pub struct ClientMessage {
     pub id: u32,
     #[prost(
         oneof = "ClientKind",
-        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23"
+        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27"
     )]
     pub kind: Option<ClientKind>,
 }
@@ -64,6 +64,44 @@ pub enum ClientKind {
     UpdateNetwork(NetworkSettings),
     #[prost(message, tag = "23")]
     DeleteNetwork(NetworkName),
+    #[prost(message, tag = "24")]
+    Mute(MuteRequest),
+    /// Asks for a fresh `State`.
+    #[prost(message, tag = "25")]
+    Refresh(Empty),
+    /// Replaces this device's picture; empty removes it.
+    #[prost(message, tag = "26")]
+    SetAvatar(Avatar),
+    #[prost(message, tag = "27")]
+    GetAvatar(PeerKey),
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct MuteRequest {
+    #[prost(string, tag = "1")]
+    pub network: String,
+    #[prost(string, tag = "2")]
+    pub member: String,
+    /// How long, in seconds: 0 lifts the mute, `MUTE_FOREVER` never ends.
+    #[prost(uint64, tag = "3")]
+    pub seconds: u64,
+}
+
+pub const MUTE_FOREVER: u64 = u64::MAX;
+pub const MAX_AVATAR_LEN: usize = 24 * 1024;
+
+/// Names a picture by its content, the same on every server and client.
+pub fn avatar_id(image: &[u8]) -> String {
+    use blake2::{Blake2s256, Digest};
+    data_encoding::HEXLOWER.encode(&Blake2s256::digest(image)[..12])
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct Avatar {
+    #[prost(bytes = "vec", tag = "1")]
+    pub key: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub image: Vec<u8>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -86,6 +124,8 @@ pub struct NetworkSettings {
     pub approval: Option<bool>,
     #[prost(string, optional, tag = "4")]
     pub password: Option<String>,
+    #[prost(string, optional, tag = "5")]
+    pub rename: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -202,7 +242,7 @@ pub struct Empty {}
 pub struct ServerMessage {
     #[prost(uint32, tag = "1")]
     pub reply_to: u32,
-    #[prost(oneof = "ServerKind", tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13")]
+    #[prost(oneof = "ServerKind", tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14")]
     pub kind: Option<ServerKind>,
 }
 
@@ -232,6 +272,8 @@ pub enum ServerKind {
     Pending(NetworkName),
     #[prost(message, tag = "13")]
     Requests(DeviceList),
+    #[prost(message, tag = "14")]
+    Avatar(Avatar),
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -252,6 +294,9 @@ pub struct Welcome {
     pub discovery_token: Vec<u8>,
     #[prost(uint32, tag = "4")]
     pub udp_port: u32,
+    /// The picture the server keeps for this device, so the client knows whether to send its own.
+    #[prost(string, tag = "5")]
+    pub avatar: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -309,6 +354,19 @@ pub struct Network {
     pub approval: bool,
     #[prost(uint32, tag = "6")]
     pub requests: u32,
+    #[prost(message, repeated, tag = "7")]
+    pub details: Vec<MemberDetails>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct MemberDetails {
+    #[prost(bytes = "vec", tag = "1")]
+    pub key: Vec<u8>,
+    #[prost(enumeration = "Role", tag = "2")]
+    pub role: i32,
+    /// Unix time the mute ends, 0 when not muted, `MUTE_FOREVER` for good.
+    #[prost(uint64, tag = "3")]
+    pub muted_until: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Enumeration)]
@@ -333,6 +391,9 @@ pub struct Peer {
     pub endpoint: Option<Endpoint>,
     #[prost(message, repeated, tag = "6")]
     pub candidates: Vec<Endpoint>,
+    /// Identifies the device's picture, empty without one.
+    #[prost(string, tag = "7")]
+    pub avatar: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -418,6 +479,7 @@ mod tests {
                 online: true,
                 endpoint: Some("203.0.113.9:41000".parse::<SocketAddr>().unwrap().into()),
                 candidates: vec!["192.168.1.5:41000".parse::<SocketAddr>().unwrap().into()],
+                avatar: String::new(),
             }],
         };
         let message = ServerMessage::push(ServerKind::State(state));
@@ -431,6 +493,13 @@ mod tests {
             panic!()
         };
         assert_eq!(failure.code(), ErrorCode::WrongPassword);
+    }
+
+    #[test]
+    fn avatar_ids_follow_the_content() {
+        assert_eq!(avatar_id(b"a"), avatar_id(b"a"));
+        assert_ne!(avatar_id(b"a"), avatar_id(b"b"));
+        assert_eq!(avatar_id(b"a").len(), 24);
     }
 
     #[test]

@@ -6,7 +6,7 @@ import { Header, NetworkView, Notice, Welcome, Toast, UpdateBanner, MemberRow, N
 import {
     Chooser, Step, ServerRow, InviteRow, DeviceRow, CreateDialog, JoinDialog, SettingsDialog, ServersDialog,
     ServerMenuDialog, HostDialog, AddServerDialog, InvitesDialog, DevicesDialog, NetworkSettingsDialog,
-    NetworkMenuDialog, MemberDialog, DiagnosticsDialog,
+    NetworkMenuDialog, MemberDialog, DiagnosticsDialog, NotificationsDialog,
 } from "dialogs.slint";
 
 export { Theme, I18n, Utils, Chooser, Step, ServerRow, InviteRow, DeviceRow, MemberRow, NetworkCard }
@@ -70,11 +70,15 @@ export component AppWindow inherits Window {
     in property <string> address;
     in property <[NetworkCard]> networks;
     in property <string> update-version;
+    in property <string> update-stage;
+    in property <int> update-progress;
+    in property <bool> refreshing;
     in property <string> problem-title;
     in property <string> problem-text;
     in property <string> problem-action;
     in property <bool> problem-busy;
     in property <string> empty-text;
+    in property <string> empty-hint;
     in property <string> toast-text;
     in property <bool> toast-error;
     in property <bool> toast-shown;
@@ -89,7 +93,15 @@ export component AppWindow inherits Window {
     in-out property <int> language-index;
     in property <int> server-count;
     in-out property <bool> notifications;
+    in property <string> notifications-detail;
+    in property <[string]> notify-kinds;
+    in property <[string]> notify-labels;
+    in property <[bool]> notify-wanted;
     in-out property <bool> updates;
+    in property <image> own-picture;
+    in property <bool> own-has-picture;
+    in property <int> own-tone;
+    in property <string> own-initial;
     in property <[ServerRow]> servers;
     in property <bool> menu-local;
     in property <bool> menu-has-link;
@@ -105,8 +117,15 @@ export component AppWindow inherits Window {
     in property <bool> network-owner;
     in-out property <bool> network-locked;
     in-out property <bool> network-approval;
+    in-out property <string> network-name;
     in property <bool> network-manager;
     in property <string> member-address;
+    in property <bool> member-above;
+    in property <bool> member-admin;
+    in property <bool> member-muted;
+    in property <string> member-muted-text;
+    in property <[string]> mute-durations;
+    in property <[string]> mute-units;
     in property <string> report;
 
     callback power();
@@ -121,6 +140,8 @@ export component AppWindow inherits Window {
     callback network-requests(int);
     callback network-menu(int);
     callback member-menu(int, int);
+    callback member-ping(int, int);
+    callback refresh();
     callback fix-problem();
     callback download-update();
     callback nickname-changed(string);
@@ -131,6 +152,10 @@ export component AppWindow inherits Window {
     callback language-chosen(int);
     callback open-servers();
     callback notifications-toggled(bool);
+    callback open-notifications();
+    callback notify-kind-toggled(string, bool);
+    callback pick-picture();
+    callback remove-picture();
     callback updates-toggled(bool);
     callback reset-app();
     callback server-menu(int);
@@ -147,9 +172,11 @@ export component AppWindow inherits Window {
     callback device-act(string, string);
     callback network-configure(string, bool);
     callback network-password(string);
+    callback network-rename(string);
     callback network-delete();
     callback network-pick(string);
     callback member-act(string);
+    callback member-mute(int, string, int);
     callback report-refresh();
     callback report-save();
 
@@ -169,8 +196,12 @@ export component AppWindow inherits Window {
             nickname: nickname;
             connection: connection;
             address: address;
+            refreshing: refreshing;
             power => {
                 root.power();
+            }
+            refresh => {
+                root.refresh();
             }
             copy(text) => {
                 root.copy(text);
@@ -221,6 +252,8 @@ export component AppWindow inherits Window {
                 }
                 if phase == "main" && update-version != "": UpdateBanner {
                     version: update-version;
+                    stage: update-stage;
+                    progress: update-progress;
                     download => {
                         root.download-update();
                     }
@@ -277,10 +310,18 @@ export component AppWindow inherits Window {
                         member-menu(member) => {
                             root.member-menu(i, member);
                         }
+                        member-ping(member) => {
+                            root.member-ping(i, member);
+                        }
                     }
                 }
                 if phase == "main" && networks.length == 0: Notice {
                     title: empty-text;
+                    text: empty-hint;
+                    action: connection == "disconnected" ? I18n.t("gui-connect") : "";
+                    act => {
+                        root.power();
+                    }
                 }
             }
         }
@@ -323,8 +364,12 @@ export component AppWindow inherits Window {
         languages: languages;
         language <=> root.language-index;
         servers: server-count;
-        notifications <=> root.notifications;
+        notifications-detail: notifications-detail;
         updates <=> root.updates;
+        picture: own-picture;
+        has-picture: own-has-picture;
+        tone: own-tone;
+        initial: own-initial;
         leave => {
             root.dialog-leave();
         }
@@ -337,14 +382,35 @@ export component AppWindow inherits Window {
         open-servers => {
             root.open-servers();
         }
-        notifications-toggled(on) => {
-            root.notifications-toggled(on);
+        open-notifications => {
+            root.open-notifications();
+        }
+        pick-picture => {
+            root.pick-picture();
+        }
+        remove-picture => {
+            root.remove-picture();
         }
         updates-toggled(on) => {
             root.updates-toggled(on);
         }
         reset => {
             root.reset-app();
+        }
+    }
+    if dialog == "notifications": NotificationsDialog {
+        enabled <=> root.notifications;
+        kinds: notify-kinds;
+        labels: notify-labels;
+        wanted: notify-wanted;
+        leave => {
+            root.dialog-leave();
+        }
+        enabled-toggled(on) => {
+            root.notifications-toggled(on);
+        }
+        kind-toggled(kind, on) => {
+            root.notify-kind-toggled(kind, on);
         }
     }
     if dialog == "servers": ServersDialog {
@@ -444,6 +510,11 @@ export component AppWindow inherits Window {
         owner: network-owner;
         locked <=> root.network-locked;
         approval <=> root.network-approval;
+        name <=> root.network-name;
+        busy: dialog-busy;
+        rename(name) => {
+            root.network-rename(name);
+        }
         leave => {
             root.dialog-leave();
         }
@@ -473,6 +544,16 @@ export component AppWindow inherits Window {
         error: dialog-error;
         address: member-address;
         owner: network-owner;
+        above: member-above;
+        admin: member-admin;
+        muted: member-muted;
+        muted-text: member-muted-text;
+        durations: mute-durations;
+        units: mute-units;
+        busy: dialog-busy;
+        mute(duration, amount, unit) => {
+            root.member-mute(duration, amount, unit);
+        }
         leave => {
             root.dialog-leave();
         }

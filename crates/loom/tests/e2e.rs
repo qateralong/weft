@@ -7,9 +7,9 @@ use loom::db::Db;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use weft_proto::control::{
-    self, Candidates, ClientKind, ClientMessage, ErrorCode, Hello, InviteCode, InviteRequest, MemberAction,
-    NetworkCredentials, NetworkName, NetworkSettings, PROTOCOL_VERSION, PeerKey, RelayPacket, Role, RoleChange,
-    ServerKind, ServerMessage, State, Welcome,
+    self, Avatar, Candidates, ClientKind, ClientMessage, Empty, ErrorCode, Hello, InviteCode, InviteRequest,
+    MUTE_FOREVER, MemberAction, MuteRequest, NetworkCredentials, NetworkName, NetworkSettings, PROTOCOL_VERSION,
+    PeerKey, RelayPacket, Role, RoleChange, ServerKind, ServerMessage, State, Welcome, avatar_id,
 };
 use weft_proto::loom::{parse_observed, parse_relayed, relay_packet};
 use weft_proto::obfs::discover_packet;
@@ -405,6 +405,7 @@ async fn approval_roles_and_settings() {
             locked,
             approval,
             password: password.map(Into::into),
+            rename: None,
         })
     };
     let role = |member: &str, role: Role| {
@@ -445,6 +446,84 @@ async fn approval_roles_and_settings() {
     assert_eq!(b.request(ClientKind::DeleteNetwork(lan())).await, Err(ErrorCode::Forbidden));
     a.request(ClientKind::DeleteNetwork(lan())).await.unwrap();
     c.state_where(|state| state.networks.is_empty()).await;
+}
+
+#[tokio::test]
+async fn mutes_renames_and_avatars() {
+    let server = start().await;
+    let mut a = Client::connect(&server, 1).await;
+    let mut b = Client::connect(&server, 2).await;
+    let mut c = Client::connect(&server, 3).await;
+    a.hello("alice").await;
+    b.hello("bob").await;
+    c.hello("carol").await;
+    a.request(ClientKind::CreateNetwork(credentials("lan", "secret"))).await.unwrap();
+    b.request(ClientKind::JoinNetwork(credentials("lan", "secret"))).await.unwrap();
+    c.request(ClientKind::JoinNetwork(credentials("lan", "secret"))).await.unwrap();
+    let online = |state: &State, name: &str| state.peers.iter().any(|peer| peer.nickname == name && peer.online);
+    b.state_where(|state| online(state, "carol")).await;
+
+    let mute =
+        |member: &str, seconds| ClientKind::Mute(MuteRequest { network: "lan".into(), member: member.into(), seconds });
+    assert_eq!(b.request(mute("carol", 60)).await, Err(ErrorCode::Forbidden));
+    a.request(mute("carol", MUTE_FOREVER)).await.unwrap();
+    let state = b.state_where(|state| !online(state, "carol")).await;
+    let carol = state.peers.iter().find(|peer| peer.nickname == "carol").unwrap();
+    assert!(carol.candidates.is_empty() && carol.endpoint.is_none());
+    let details = &state.networks[0].details;
+    assert_eq!(details.iter().find(|detail| detail.key == carol.key).unwrap().muted_until, MUTE_FOREVER);
+    assert!(online(&state, "alice"));
+    c.state_where(|state| !online(state, "alice") && !online(state, "bob")).await;
+
+    a.request(mute("carol", 1)).await.unwrap();
+    b.state_where(|state| !online(state, "carol")).await;
+    tokio::time::timeout(Duration::from_secs(10), b.state_where(|state| online(state, "carol"))).await.unwrap();
+    let Ok(ServerKind::State(state)) = b.ask(ClientKind::Refresh(Empty {})).await else { panic!() };
+    assert!(state.networks[0].details.iter().all(|detail| detail.muted_until == 0));
+
+    let rename = |name: &str| {
+        ClientKind::UpdateNetwork(NetworkSettings {
+            name: "lan".into(),
+            locked: None,
+            approval: None,
+            password: None,
+            rename: Some(name.into()),
+        })
+    };
+    assert_eq!(b.request(rename("party")).await, Err(ErrorCode::Forbidden));
+    a.request(rename("party")).await.unwrap();
+    b.state_where(|state| state.networks.first().is_some_and(|network| network.name == "party")).await;
+    a.request(ClientKind::CreateNetwork(credentials("other", "secret"))).await.unwrap();
+    let taken = a
+        .request(ClientKind::UpdateNetwork(NetworkSettings {
+            name: "party".into(),
+            locked: None,
+            approval: None,
+            password: None,
+            rename: Some("Other".into()),
+        }))
+        .await;
+    assert_eq!(taken, Err(ErrorCode::NetworkExists));
+
+    let png = b"\x89PNG\r\n\x1a\nimage".to_vec();
+    let avatar = |image: Vec<u8>| ClientKind::SetAvatar(Avatar { key: Vec::new(), image });
+    assert_eq!(a.request(avatar(b"not a picture".to_vec())).await, Err(ErrorCode::InvalidRequest));
+    a.request(avatar(png.clone())).await.unwrap();
+    let state = b.state_where(|state| state.peers.iter().any(|peer| !peer.avatar.is_empty())).await;
+    let alice = state.peers.iter().find(|peer| peer.nickname == "alice").unwrap();
+    assert_eq!(alice.avatar, avatar_id(&png));
+    let Ok(ServerKind::Avatar(got)) = b.ask(ClientKind::GetAvatar(PeerKey { key: alice.key.clone() })).await else {
+        panic!()
+    };
+    assert_eq!(got.image, png);
+    let mut d = Client::connect(&server, 4).await;
+    d.hello("dave").await;
+    let stranger = d.ask(ClientKind::GetAvatar(PeerKey { key: alice.key.clone() })).await;
+    assert_eq!(stranger.err(), Some(ErrorCode::MemberNotFound));
+    let mut again = Client::connect(&server, 1).await;
+    assert_eq!(again.hello("alice").await.avatar, avatar_id(&png));
+    again.request(avatar(Vec::new())).await.unwrap();
+    assert_eq!(Client::connect(&server, 1).await.hello("alice").await.avatar, "");
 }
 
 #[cfg(unix)]

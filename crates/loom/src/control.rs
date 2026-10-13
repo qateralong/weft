@@ -10,16 +10,17 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use weft_proto::control::{
-    self, Candidates, ClientKind, ClientMessage, DecodeError, DeviceInfo, DeviceList, Empty, ErrorCode, Invite,
-    InviteCode, InviteList, InviteRequest, MemberAction, NetworkCredentials, NetworkName, NetworkSettings,
-    PROTOCOL_VERSION, PeerKey, RelayPacket, Role, RoleChange, ServerKind, ServerMessage, Welcome,
+    self, Avatar, Candidates, ClientKind, ClientMessage, DecodeError, DeviceInfo, DeviceList, Empty, ErrorCode, Invite,
+    InviteCode, InviteList, InviteRequest, MAX_AVATAR_LEN, MUTE_FOREVER, MemberAction, MuteRequest, NetworkCredentials,
+    NetworkName, NetworkSettings, PROTOCOL_VERSION, PeerKey, RelayPacket, Role, RoleChange, ServerKind, ServerMessage,
+    Welcome, avatar_id,
 };
 use weft_proto::{MIN_PACKET_LEN, ObfsKey, PublicKey};
 use weft_session::StaticKeypair;
 use weft_session::stream::{self, io};
 use weft_session::tls::{RECORD_HANDSHAKE, TlsAcceptor};
 
-use crate::db::{DbError, Device, InviteRow, NetworkRow, name_key, unix_now};
+use crate::db::{DbError, Device, InviteRow, MUTED_FOREVER, NetworkRow, name_key, unix_now};
 use crate::hub::{Hub, MAX_CANDIDATES, SharedHub, lock};
 use crate::panel::Panel;
 use crate::tls::{http_reply, is_http};
@@ -31,6 +32,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_INVITES: usize = 100;
 const MAX_INVITE_LIFETIME: u64 = 365 * 24 * 3600;
 const MAX_INVITE_LEN: usize = 64;
+const MAX_MUTE: u64 = 10 * 365 * 24 * 3600;
 const INVITE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 #[derive(Debug, thiserror::Error)]
@@ -196,6 +198,7 @@ where
         match device {
             Ok(device) => {
                 let token = hub.register(key, device.address, conn, tx.clone(), kill_tx);
+                let avatar = hub.db.avatar_ids(&BTreeSet::from([key])).ok().and_then(|mut ids| ids.remove(&key));
                 ServerMessage::reply(
                     hello.id,
                     ServerKind::Welcome(Welcome {
@@ -203,6 +206,7 @@ where
                         prefix_len: u32::from(pool.prefix()),
                         discovery_token: token.to_vec(),
                         udp_port: u32::from(udp_port),
+                        avatar: avatar.unwrap_or_default(),
                     }),
                 )
             }
@@ -292,6 +296,10 @@ async fn handle(
         Some(ClientKind::SetRole(request)) => ack(set_role(&mut lock(hub), key, request)),
         Some(ClientKind::UpdateNetwork(request)) => ack(update_network(hub, key, request).await),
         Some(ClientKind::DeleteNetwork(request)) => ack(delete_network(&mut lock(hub), key, request)),
+        Some(ClientKind::Mute(request)) => ack(mute(&mut lock(hub), key, request)),
+        Some(ClientKind::Refresh(_)) => lock(hub).state_for(&key).map(ServerKind::State).map_err(internal),
+        Some(ClientKind::SetAvatar(avatar)) => ack(set_avatar(&mut lock(hub), key, avatar)),
+        Some(ClientKind::GetAvatar(target)) => get_avatar(&lock(hub), key, target),
         Some(ClientKind::Candidates(candidates)) => {
             set_candidates(hub, key, candidates);
             return None;
@@ -595,13 +603,18 @@ fn set_role(hub: &mut Hub, key: PublicKey, request: RoleChange) -> Result<(), Er
 }
 
 async fn update_network(hub: &SharedHub, key: PublicKey, request: NetworkSettings) -> Result<(), ErrorCode> {
-    if request.locked.is_none() && request.approval.is_none() && request.password.is_none() {
+    if request.locked.is_none() && request.approval.is_none() && request.password.is_none() && request.rename.is_none()
+    {
         return Err(ErrorCode::InvalidRequest);
     }
+    let rename = match &request.rename {
+        Some(name) => Some(validate::network_name(name).ok_or(ErrorCode::InvalidName)?),
+        None => None,
+    };
     let network = {
         let hub = lock(hub);
         let (network, role) = manage(&hub, &request.name, &key)?;
-        if request.password.is_some() && role != Role::Owner {
+        if (request.password.is_some() || rename.is_some()) && role != Role::Owner {
             return Err(ErrorCode::Forbidden);
         }
         network
@@ -619,10 +632,59 @@ async fn update_network(hub: &SharedHub, key: PublicKey, request: NetworkSetting
         None => None,
     };
     let mut hub = lock(hub);
+    if let Some(name) = &rename {
+        hub.db.rename_network(network.id, name).map_err(|error| match error {
+            DbError::NetworkExists => ErrorCode::NetworkExists,
+            error => internal(error),
+        })?;
+        tracing::info!(network = network.name, to = name, by = ?key, "network renamed");
+    }
     hub.db.update_network(network.id, request.locked, request.approval, hash.as_deref()).map_err(internal)?;
     tracing::info!(network = network.name, by = ?key, "settings changed");
     hub.notify_related(&key);
     Ok(())
+}
+
+fn mute(hub: &mut Hub, key: PublicKey, request: MuteRequest) -> Result<(), ErrorCode> {
+    let (network, role) = manage(hub, &request.network, &key)?;
+    let members = hub.db.members(network.id).map_err(internal)?;
+    let (target, target_role) = &members[resolve(members.iter().map(|(device, _)| device), &request.member)?];
+    if *target_role >= role {
+        return Err(ErrorCode::Forbidden);
+    }
+    let until = match request.seconds {
+        0 => 0,
+        MUTE_FOREVER => MUTED_FOREVER,
+        seconds => unix_now().saturating_add(seconds.min(MAX_MUTE) as i64),
+    };
+    hub.db.set_muted(network.id, &target.key, until).map_err(internal)?;
+    tracing::info!(network = network.name, target = ?target.key, by = ?key, until, "member muted");
+    hub.memberships_changed();
+    let members = hub.db.member_keys(network.id).map_err(internal)?;
+    hub.notify(&members);
+    Ok(())
+}
+
+fn set_avatar(hub: &mut Hub, key: PublicKey, avatar: Avatar) -> Result<(), ErrorCode> {
+    let image = avatar.image;
+    let picture = image.starts_with(b"\x89PNG\r\n\x1a\n") || image.starts_with(&[0xff, 0xd8, 0xff]);
+    if image.len() > MAX_AVATAR_LEN || !(image.is_empty() || picture) {
+        return Err(ErrorCode::InvalidRequest);
+    }
+    let id = avatar_id(&image);
+    let stored = (!image.is_empty()).then_some((image.as_slice(), id.as_str()));
+    hub.db.set_avatar(&key, stored).map_err(internal)?;
+    hub.notify_related(&key);
+    Ok(())
+}
+
+fn get_avatar(hub: &Hub, key: PublicKey, target: PeerKey) -> Result<ServerKind, ErrorCode> {
+    let target = PublicKey::from_slice(&target.key).map_err(|_| ErrorCode::InvalidRequest)?;
+    if !hub.db.related(&key).map_err(internal)?.contains(&target) {
+        return Err(ErrorCode::MemberNotFound);
+    }
+    let image = hub.db.avatar(&target).map_err(internal)?.ok_or(ErrorCode::MemberNotFound)?;
+    Ok(ServerKind::Avatar(Avatar { key: target.as_bytes().to_vec(), image }))
 }
 
 fn delete_network(hub: &mut Hub, key: PublicKey, request: NetworkName) -> Result<(), ErrorCode> {

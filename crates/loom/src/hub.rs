@@ -5,13 +5,15 @@ use std::time::{Duration, Instant};
 
 use rand::RngExt;
 use tokio::sync::{mpsc, oneshot};
-use weft_proto::control::{Endpoint, Network, Peer, PeerCandidates, Role, ServerKind, ServerMessage, State};
+use weft_proto::control::{
+    Endpoint, MUTE_FOREVER, MemberDetails, Network, Peer, PeerCandidates, Role, ServerKind, ServerMessage, State,
+};
 use weft_proto::loom::Token;
 use weft_proto::{ObfsKey, PublicKey};
 use weft_session::Tai64N;
 
 use crate::config::Config;
-use crate::db::{Db, DbError};
+use crate::db::{Db, DbError, MUTED_FOREVER, unix_now};
 use crate::limiter::Limiter;
 use crate::relay::{Bucket, Traffic};
 
@@ -56,6 +58,15 @@ pub struct Route {
 pub enum Delivery {
     Udp(SocketAddr, ObfsKey),
     Tcp(mpsc::UnboundedSender<ServerMessage>),
+}
+
+/// Checks for ended mutes every few seconds.
+pub async fn expire_mutes(hub: SharedHub) {
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        lock(&hub).expire_mutes();
+    }
 }
 
 pub fn lock(hub: &SharedHub) -> MutexGuard<'_, Hub> {
@@ -158,7 +169,7 @@ impl Hub {
         if let Some(&related) = self.relations.get(&(*a, *b)) {
             return related;
         }
-        let related = a != b && self.db.related(a).is_ok_and(|set| set.contains(b));
+        let related = a != b && self.db.reachable(a, unix_now()).is_ok_and(|set| set.contains(b));
         if self.relations.len() > 100_000 {
             self.relations.clear();
         }
@@ -237,11 +248,15 @@ impl Hub {
         true
     }
 
+    /// What `key` sees: its networks and every member, where muted ones show as offline so the
+    /// client does not try to reach them.
     pub fn state_for(&self, key: &PublicKey) -> Result<State, DbError> {
         let memberships = self.db.memberships(key)?;
         let others: BTreeSet<PublicKey> =
             memberships.iter().flat_map(|m| m.members.iter().copied()).filter(|other| other != key).collect();
         let devices = self.db.devices(&others)?;
+        let avatars = self.db.avatar_ids(&others)?;
+        let reachable = self.db.reachable(key, unix_now())?;
         let networks = memberships
             .into_iter()
             .map(|m| Network {
@@ -251,14 +266,27 @@ impl Hub {
                 locked: m.locked,
                 approval: m.approval,
                 requests: if m.role >= Role::Admin { m.requests as u32 } else { 0 },
+                details: m
+                    .details
+                    .iter()
+                    .map(|detail| MemberDetails {
+                        key: detail.key.as_bytes().to_vec(),
+                        role: detail.role as i32,
+                        muted_until: match detail.muted_until {
+                            MUTED_FOREVER => MUTE_FOREVER,
+                            until => until.max(0) as u64,
+                        },
+                    })
+                    .collect(),
             })
             .collect();
         let mut peers: Vec<Peer> = devices
             .into_values()
             .map(|device| {
-                let session = self.sessions.get(&device.key);
+                let session = self.sessions.get(&device.key).filter(|_| reachable.contains(&device.key));
                 Peer {
                     key: device.key.as_bytes().to_vec(),
+                    avatar: avatars.get(&device.key).cloned().unwrap_or_default(),
                     nickname: device.nickname,
                     address: u32::from(device.address),
                     online: session.is_some(),
@@ -281,6 +309,21 @@ impl Hub {
                 Err(error) => tracing::warn!(%error, "cannot build state"),
             }
         }
+    }
+
+    /// Lifts mutes whose time is up and tells the members of their networks.
+    pub fn expire_mutes(&mut self) {
+        let networks = match self.db.expire_mutes(unix_now()) {
+            Ok(networks) => networks,
+            Err(error) => return tracing::warn!(%error, "cannot expire mutes"),
+        };
+        if networks.is_empty() {
+            return;
+        }
+        self.memberships_changed();
+        let keys: BTreeSet<PublicKey> =
+            networks.iter().filter_map(|&network| self.db.member_keys(network).ok()).flatten().collect();
+        self.notify(&keys);
     }
 
     pub fn notify_related(&self, key: &PublicKey) {

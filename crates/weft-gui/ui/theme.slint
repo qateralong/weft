@@ -56,6 +56,9 @@ export global Theme {
         if state == "connecting" || state == "relay" {
             return warn;
         }
+        if state == "muted" {
+            return danger;
+        }
         return off;
     }
 }
@@ -78,6 +81,12 @@ export global Icons {
     out property <string> cloud: "M18 10h-1.3A7 7 0 1 0 9 19h9a5 5 0 0 0 0-9z";
     out property <string> monitor: "M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z M8 21h8 M12 17v4";
     out property <string> check: "M20 6 9 17l-5-5";
+    out property <string> refresh: "M21 12a9 9 0 1 1-2.6-6.4 M21 3v6h-6";
+    out property <string> copy: "M10 9h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1";
+    out property <string> trash: "M3 6h18 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2 M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6";
+    out property <string> bell: "M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9 M13.7 21a2 2 0 0 1-3.4 0";
+    out property <string> download: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3";
+    out property <string> image: "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z M8.5 7a1.5 1.5 0 1 0 0 3a1.5 1.5 0 1 0 0-3z M21 15l-5-5L5 21";
 
     public pure function kind(name: string) -> string {
         if name == "online" {

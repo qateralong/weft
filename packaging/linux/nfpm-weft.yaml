@@ -13,6 +13,8 @@ overrides:
     depends: [libfontconfig1, libfreetype6, libxkbcommon0, libegl1]
   rpm:
     depends: [fontconfig, freetype, libxkbcommon, libglvnd-egl]
+  archlinux:
+    depends: [gcc-libs, glibc, fontconfig, freetype2, libxkbcommon, libglvnd]
 contents:
   - src: target/release/weftd
     dst: /usr/bin/weftd
@@ -34,3 +36,6 @@ contents:
 scripts:
   postinstall: packaging/linux/weft-postinstall.sh
   preremove: packaging/linux/weft-preremove.sh
+archlinux:
+  scripts:
+    postupgrade: packaging/linux/weft-postupgrade.sh

@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "1.0.1"
+version = "1.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/qateralong/weft"
@@ -46,6 +46,9 @@ slint = { version = "1.18", default-features = false, features = ["std", "compat
 slint-build = "1.18"
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
 dirs = "7"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+ring = "0.17"
 notify-rust = "4.18"
 ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 socket2 = "0.6"

@@ -47,6 +47,7 @@ impl Server {
             tokio::spawn(control::serve(listener, hub.clone(), Arc::new(keypair), socket.clone(), tls, panel.clone())),
             tokio::spawn(udp::serve(socket, hub.clone(), own)),
             tokio::spawn(panel.sample(hub.clone())),
+            tokio::spawn(hub::expire_mutes(hub.clone())),
         ];
         Ok(Self { tcp_addr, udp_addr, public_key, hub, tasks })
     }

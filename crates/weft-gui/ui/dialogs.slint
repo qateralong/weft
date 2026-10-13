@@ -1,7 +1,7 @@
 // Dialogs over the main screen. Each one reports what the user entered through callbacks.
 
 import { Theme, I18n, Icons, Utils } from "theme.slint";
-import { Icon, IconButton, Button, DangerButton, Caption, Field, Switch, Select, MenuRow, Dot, Signal, ListBox, Separator } from "widgets.slint";
+import { Icon, IconButton, Button, DangerButton, Caption, Field, Switch, Select, MenuRow, Dot, Signal, ListBox, Separator, Avatar } from "widgets.slint";
 
 export struct Step {
     label: string,
@@ -81,7 +81,7 @@ export component DialogFrame inherits Rectangle {
     TouchArea { }
 
     card := Rectangle {
-        width: min(400px, root.width - 32px);
+        width: min(420px, root.width - 32px);
         height: min(content.preferred-height, root.height - 48px);
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2 + (shown ? 0 : 14px);
@@ -139,6 +139,8 @@ export component DialogFrame inherits Rectangle {
                     min-height: min(body.preferred-height, 60px);
                     content-height: body.preferred-height;
                     body := VerticalLayout {
+                        // The card's own width, so wrapped text knows its lines before the layout runs.
+                        width: card.width - 36px;
                         spacing: 12px;
                         @children
                     }
@@ -343,19 +345,93 @@ export component SettingsDialog inherits DialogFrame {
     in property <[string]> languages;
     in-out property <int> language;
     in property <int> servers;
-    in-out property <bool> notifications;
+    in property <string> notifications-detail;
     in-out property <bool> updates;
+    in property <image> picture;
+    in property <bool> has-picture;
+    in property <int> tone;
+    in property <string> initial;
     callback save(string);
     callback language-chosen(int);
     callback open-servers();
-    callback notifications-toggled(bool);
+    callback open-notifications();
     callback updates-toggled(bool);
+    callback pick-picture();
+    callback remove-picture();
     callback reset();
     title: I18n.t("gui-settings");
     action-text: I18n.t("gui-save");
     action => {
         root.save(nickname);
     }
+    HorizontalLayout {
+        spacing: 12px;
+        alignment: I18n.rtl ? end : start;
+        if !I18n.rtl: VerticalLayout {
+            alignment: center;
+            Avatar {
+                width: 56px;
+                height: 56px;
+                border-radius: 28px;
+                plain: true;
+                initial: root.initial;
+                tint: Theme.avatar(tone);
+                picture: picture;
+                has-picture: has-picture;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 6px;
+            Caption {
+                text: I18n.t("gui-picture");
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: I18n.rtl ? end : start;
+                if has-picture && I18n.rtl: Button {
+                    small: true;
+                    text: I18n.t("gui-picture-remove");
+                    clicked => {
+                        root.remove-picture();
+                    }
+                }
+                Button {
+                    small: true;
+                    icon: Icons.image;
+                    text: I18n.t("gui-picture-choose");
+                    enabled: !root.busy;
+                    clicked => {
+                        root.pick-picture();
+                    }
+                }
+
+                if has-picture && !I18n.rtl: Button {
+                    small: true;
+                    text: I18n.t("gui-picture-remove");
+                    clicked => {
+                        root.remove-picture();
+                    }
+                }
+            }
+        }
+
+        if I18n.rtl: VerticalLayout {
+            alignment: center;
+            Avatar {
+                width: 56px;
+                height: 56px;
+                border-radius: 28px;
+                plain: true;
+                initial: root.initial;
+                tint: Theme.avatar(tone);
+                picture: picture;
+                has-picture: has-picture;
+            }
+        }
+    }
+
     Field {
         label: I18n.t("gui-nickname");
         text <=> root.nickname;
@@ -392,11 +468,12 @@ export component SettingsDialog inherits DialogFrame {
         text: I18n.t("gui-app");
     }
 
-    Switch {
+    MenuRow {
         text: I18n.t("gui-notifications");
-        checked <=> root.notifications;
-        toggled(on) => {
-            root.notifications-toggled(on);
+        detail: notifications-detail;
+        arrow: true;
+        clicked => {
+            root.open-notifications();
         }
     }
 
@@ -420,6 +497,35 @@ export component SettingsDialog inherits DialogFrame {
         text: I18n.t("gui-reset");
         confirmed => {
             root.reset();
+        }
+    }
+}
+
+export component NotificationsDialog inherits DialogFrame {
+    in-out property <bool> enabled;
+    in property <[string]> kinds;
+    in property <[string]> labels;
+    in-out property <[bool]> wanted;
+    callback enabled-toggled(bool);
+    callback kind-toggled(string, bool);
+    title: I18n.t("gui-notifications");
+    leave-text: I18n.t("gui-back");
+    Switch {
+        text: I18n.t("gui-notifications-show");
+        checked <=> root.enabled;
+        toggled(on) => {
+            root.enabled-toggled(on);
+        }
+    }
+
+    Separator { }
+
+    for kind[i] in kinds: Switch {
+        text: labels[i];
+        checked: wanted[i];
+        enabled: root.enabled;
+        toggled(on) => {
+            root.kind-toggled(kind, on);
         }
     }
 }
@@ -689,29 +795,30 @@ export component InvitesDialog inherits DialogFrame {
         }
     }
 
-    if created != "": ListBox {
-        HorizontalLayout {
-            padding: 10px;
-            spacing: 10px;
-            Text {
-                text: created;
-                color: Theme.text;
-                font-family: "monospace";
-                font-size: 12px;
-                wrap: char-wrap;
-                horizontal-stretch: 1;
-                vertical-alignment: center;
-            }
+    if created != "": Rectangle {
+        height: 44px;
+        border-radius: 10px;
+        background: Theme.accent-soft;
+        property <length> button: 32px;
+        Text {
+            x: I18n.rtl ? 10px + button + 6px : 12px;
+            width: parent.width - 22px - button - 6px;
+            text: created;
+            color: Theme.text;
+            font-family: "monospace";
+            font-size: 12px;
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-alignment: I18n.rtl ? right : left;
+        }
 
-            VerticalLayout {
-                alignment: center;
-                Button {
-                    small: true;
-                    text: I18n.t("gui-copy");
-                    clicked => {
-                        root.copy(created);
-                    }
-                }
+        IconButton {
+            x: I18n.rtl ? 6px : parent.width - self.width - 6px;
+            icon: Icons.copy;
+            tint: Theme.accent;
+            tooltip: I18n.t("gui-copy");
+            clicked => {
+                root.copy(created);
             }
         }
     }
@@ -721,11 +828,13 @@ export component InvitesDialog inherits DialogFrame {
 
     ListBox {
         for invite in invites: VerticalLayout {
-            HorizontalLayout {
-                padding: 10px;
-                spacing: 8px;
+            Rectangle {
+                height: 52px;
+                property <length> buttons: 2 * 32px + 4px;
                 VerticalLayout {
-                    horizontal-stretch: 1;
+                    x: I18n.rtl ? 10px + buttons + 8px : 12px;
+                    width: parent.width - 22px - buttons - 8px;
+                    alignment: center;
                     spacing: 2px;
                     Text {
                         text: invite.code;
@@ -735,31 +844,44 @@ export component InvitesDialog inherits DialogFrame {
                         horizontal-alignment: I18n.rtl ? right : left;
                     }
 
-                    Paragraph {
+                    Text {
                         text: invite.details;
+                        color: Theme.muted;
                         font-size: 12px;
+                        overflow: elide;
+                        horizontal-alignment: I18n.rtl ? right : left;
                     }
                 }
 
-                VerticalLayout {
-                    alignment: center;
-                    Button {
-                        small: true;
-                        text: I18n.t("gui-copy");
+                HorizontalLayout {
+                    x: I18n.rtl ? 6px : parent.width - buttons - 6px;
+                    width: buttons;
+                    spacing: 4px;
+                    padding-top: 10px;
+                    padding-bottom: 10px;
+                    IconButton {
+                        icon: I18n.rtl ? Icons.trash : Icons.copy;
+                        tint: I18n.rtl ? Theme.danger : Theme.muted;
+                        tooltip: I18n.t(I18n.rtl ? "gui-revoke" : "gui-copy");
                         clicked => {
-                            root.copy(invite.link != "" ? invite.link : invite.code);
+                            if I18n.rtl {
+                                root.revoke(invite.code);
+                            } else {
+                                root.copy(invite.link != "" ? invite.link : invite.code);
+                            }
                         }
                     }
-                }
 
-                VerticalLayout {
-                    alignment: center;
-                    Button {
-                        small: true;
-                        danger: true;
-                        text: I18n.t("gui-revoke");
+                    IconButton {
+                        icon: I18n.rtl ? Icons.copy : Icons.trash;
+                        tint: I18n.rtl ? Theme.muted : Theme.danger;
+                        tooltip: I18n.t(I18n.rtl ? "gui-copy" : "gui-revoke");
                         clicked => {
-                            root.revoke(invite.code);
+                            if I18n.rtl {
+                                root.copy(invite.link != "" ? invite.link : invite.code);
+                            } else {
+                                root.revoke(invite.code);
+                            }
                         }
                     }
                 }
@@ -857,11 +979,33 @@ export component NetworkSettingsDialog inherits DialogFrame {
     in property <bool> owner;
     in-out property <bool> locked;
     in-out property <bool> approval;
+    in-out property <string> name;
     callback configure(string, bool);
     callback change-password(string);
+    callback rename(string);
     callback delete();
     leave-text: I18n.t("gui-close");
     title: I18n.t("gui-network-settings");
+    if owner: VerticalLayout {
+        spacing: 12px;
+        Field {
+            label: I18n.t("gui-network-name");
+            text <=> root.name;
+            accepted => {
+                root.rename(root.name);
+            }
+        }
+
+        Button {
+            text: I18n.t("gui-rename-network");
+            enabled: !root.busy;
+            clicked => {
+                root.rename(root.name);
+            }
+        }
+
+        Separator { }
+    }
     Switch {
         text: I18n.t("gui-locked");
         checked <=> root.locked;
@@ -952,8 +1096,21 @@ export component NetworkMenuDialog inherits DialogFrame {
 
 export component MemberDialog inherits DialogFrame {
     in property <string> address;
+    // Whether this device owns the network and may change roles.
     in property <bool> owner;
+    // Whether this device ranks above the member and may remove or mute them.
+    in property <bool> above;
+    in property <bool> admin;
+    in property <bool> muted;
+    in property <string> muted-text;
+    in property <[string]> durations;
+    in property <[string]> units;
     callback act(string);
+    callback mute(int, string, int);
+    property <int> duration: 0;
+    property <int> unit: 0;
+    property <string> amount;
+    property <bool> custom: duration == durations.length - 2;
     leave-text: I18n.t("gui-close");
     Text {
         text: address;
@@ -962,30 +1119,91 @@ export component MemberDialog inherits DialogFrame {
         horizontal-alignment: I18n.rtl ? right : left;
     }
 
-    if owner: Button {
+    if owner && !admin: Button {
         text: I18n.t("gui-promote");
         clicked => {
             root.act("promote");
         }
     }
-    if owner: Button {
+    if owner && admin: Button {
         text: I18n.t("gui-demote");
         clicked => {
             root.act("demote");
         }
     }
-    Button {
-        danger: true;
-        text: I18n.t("gui-kick");
+    if above: Section {
+        text: I18n.t("gui-mute");
+    }
+    if above && muted: Paragraph {
+        text: muted-text;
+        color: Theme.danger;
+    }
+    if above && muted: Button {
+        text: I18n.t("gui-unmute");
+        enabled: !root.busy;
         clicked => {
-            root.act("kick");
+            root.act("unmute");
         }
     }
+    if above && !muted: Paragraph {
+        text: I18n.t("gui-mute-hint");
+    }
+    if above && !muted: HorizontalLayout {
+        spacing: 8px;
+        if I18n.rtl: Button {
+            text: I18n.t("gui-mute-action");
+            enabled: !root.busy;
+            clicked => {
+                root.mute(duration, amount, unit);
+            }
+        }
+        Select {
+            horizontal-stretch: 1;
+            options: durations;
+            current <=> root.duration;
+        }
 
-    DangerButton {
-        text: I18n.t("gui-ban");
-        confirmed => {
-            root.act("ban");
+        if !I18n.rtl: Button {
+            text: I18n.t("gui-mute-action");
+            enabled: !root.busy;
+            clicked => {
+                root.mute(duration, amount, unit);
+            }
+        }
+    }
+    if above && !muted && custom: HorizontalLayout {
+        spacing: 10px;
+        Field {
+            horizontal-stretch: 1;
+            placeholder: "10";
+            number: true;
+            text <=> root.amount;
+        }
+
+        Select {
+            horizontal-stretch: 1;
+            options: units;
+            current <=> root.unit;
+        }
+    }
+    if above: Separator { }
+    if above: HorizontalLayout {
+        spacing: 8px;
+        Button {
+            horizontal-stretch: 1;
+            danger: true;
+            text: I18n.t("gui-kick");
+            clicked => {
+                root.act("kick");
+            }
+        }
+
+        DangerButton {
+            horizontal-stretch: 1;
+            text: I18n.t("gui-ban");
+            confirmed => {
+                root.act("ban");
+            }
         }
     }
 }
