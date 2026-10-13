@@ -36,7 +36,7 @@ async fn discover(socket: &UdpSocket, hub: &SharedHub, packet: &[u8], addr: std:
         let mut hub = lock(hub);
         if let Some(key) = hub.discovered(&token, addr, Instant::now()) {
             tracing::debug!(?key, %addr, "endpoint discovered");
-            hub.notify_related(&key);
+            hub.notify_related_later(&key);
         }
         hub.token_owner(&token)
     };

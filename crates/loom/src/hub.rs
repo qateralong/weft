@@ -329,8 +329,23 @@ impl Hub {
         Ok(State { networks, peers })
     }
 
-    /// Schedules a fresh state for these devices.
+    /// Sends these devices their state now: membership and settings changes are expected at once.
     pub fn notify(&mut self, keys: &BTreeSet<PublicKey>) {
+        for key in keys {
+            self.dirty.remove(key);
+            let Some(session) = self.sessions.get(key) else { continue };
+            match self.state_for(key) {
+                Ok(state) => {
+                    session.tx.send(ServerMessage::push(ServerKind::State(state)));
+                }
+                Err(error) => tracing::warn!(%error, "cannot build state"),
+            }
+        }
+    }
+
+    /// Schedules a fresh state for these devices, for frequent changes such as addresses and
+    /// devices coming and going, which are gathered into one state each.
+    pub fn notify_later(&mut self, keys: &BTreeSet<PublicKey>) {
         let before = self.dirty.len();
         self.dirty.extend(keys.iter().filter(|key| self.sessions.contains_key(key)));
         if self.dirty.len() > before {
@@ -380,6 +395,13 @@ impl Hub {
         self.notify(&keys);
     }
 
+    pub fn notify_related_later(&mut self, key: &PublicKey) {
+        match self.db.related(key) {
+            Ok(related) => self.notify_later(&related),
+            Err(error) => tracing::warn!(%error, "cannot load related devices"),
+        }
+    }
+
     pub fn notify_related(&mut self, key: &PublicKey) {
         match self.db.related(key) {
             Ok(related) => self.notify(&related),
@@ -420,7 +442,7 @@ mod tests {
             inboxes.push(inbox);
         }
         let started = Instant::now();
-        hub.notify(&keys.iter().copied().collect());
+        hub.notify_later(&keys.iter().copied().collect());
         while hub.send_states(STATES_PER_LOCK) {}
         let elapsed = started.elapsed();
         assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");

@@ -316,7 +316,7 @@ where
     tx.send(welcome);
     if registered {
         tracing::info!(?key, %addr, "device connected");
-        lock(&hub).notify_related(&key);
+        lock(&hub).notify_related_later(&key);
     }
 
     let writer_task = tokio::spawn(async move {
@@ -364,7 +364,7 @@ where
         let mut hub = lock(&hub);
         if hub.unregister(&key, conn) {
             tracing::info!(?key, "device disconnected");
-            hub.notify_related(&key);
+            hub.notify_related_later(&key);
         }
     }
     drop(tx);
@@ -442,7 +442,7 @@ fn set_candidates(hub: &SharedHub, key: PublicKey, candidates: Candidates) {
         candidates.endpoints.iter().filter_map(|endpoint| endpoint.to_socket_addr()).take(MAX_CANDIDATES).collect();
     let mut hub = lock(hub);
     if hub.set_candidates(&key, candidates) {
-        hub.notify_related(&key);
+        hub.notify_related_later(&key);
     }
 }
 
