@@ -37,7 +37,7 @@ pub struct Notify {
 
 impl Default for Notify {
     fn default() -> Self {
-        Self { online: true, offline: true, joined: true, requests: true, connection: true }
+        Self { online: false, offline: false, joined: true, requests: true, connection: true }
     }
 }
 
