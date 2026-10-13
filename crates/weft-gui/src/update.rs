@@ -1,4 +1,4 @@
-//! Looks for a newer release on GitHub at start and every hour, and installs it with the
+//! Looks for a newer release on GitHub at start and every six hours, and installs it with the
 //! system's own installer.
 
 use std::io::{Read, Write};
@@ -11,7 +11,7 @@ use crate::settings::{Asset, Release};
 const LATEST: &str = "https://api.github.com/repos/qateralong/weft/releases/latest";
 pub const RELEASES: &str = "https://github.com/qateralong/weft/releases/";
 const DOWNLOADS: &str = "https://github.com/qateralong/weft/releases/download/";
-pub const EVERY: Duration = Duration::from_secs(3600);
+pub const EVERY: Duration = Duration::from_secs(6 * 3600);
 
 pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs())
