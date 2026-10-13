@@ -520,9 +520,12 @@ async fn mutes_renames_and_avatars() {
     d.hello("dave").await;
     let stranger = d.ask(ClientKind::GetAvatar(PeerKey { key: alice.key.clone() })).await;
     assert_eq!(stranger.err(), Some(ErrorCode::MemberNotFound));
+    // A handshake needs a newer timestamp than the last one of the same key.
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let mut again = Client::connect(&server, 1).await;
     assert_eq!(again.hello("alice").await.avatar, avatar_id(&png));
     again.request(avatar(Vec::new())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(Client::connect(&server, 1).await.hello("alice").await.avatar, "");
 }
 
