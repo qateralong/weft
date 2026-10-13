@@ -22,7 +22,17 @@ Download a package from [Releases](https://github.com/qateralong/weft/releases/l
 | macOS | `weft-*.pkg` |
 | Debian, Ubuntu | `weft_*_amd64.deb` |
 | Fedora, openSUSE | `weft-*.x86_64.rpm` |
-| Arch | `packaging/aur/PKGBUILD` |
+| Arch | `weft-*-x86_64.pkg.tar.zst` |
+
+On Linux install it with the system's package manager, from the folder you downloaded it to:
+
+```sh
+sudo pacman -U weft-*-x86_64.pkg.tar.zst       # Arch
+sudo apt install ./weft_*_amd64.deb            # Debian, Ubuntu
+sudo dnf install ./weft-*.x86_64.rpm           # Fedora
+```
+
+Newer versions install over older ones the same way, or from the app itself.
 
 Server only: `weft-loom` packages, static `loom-*-musl` binaries or `ghcr.io/qateralong/loom` ([compose.yaml](packaging/docker/compose.yaml)).
 
