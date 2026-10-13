@@ -449,6 +449,52 @@ async fn approval_roles_and_settings() {
 }
 
 #[tokio::test]
+async fn stopping_closes_connections_and_frees_the_port() {
+    let server = start().await;
+    let address = server.tcp_addr;
+    let mut a = Client::connect(&server, 1).await;
+    a.hello("alice").await;
+    drop(server);
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if io::read_message(&mut a.reader, &mut a.receiver).await.is_err() {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the client was not disconnected");
+    let config = Config { listen: address, ..Config::default() };
+    let again = Server::start(config, StaticKeypair::from_secret(&[100; 32]), Db::open_in_memory().unwrap()).await;
+    assert_eq!(again.unwrap().tcp_addr, address);
+}
+
+#[tokio::test]
+async fn fast_clients_are_slowed_down_not_dropped() {
+    let server = start().await;
+    let mut a = Client::connect(&server, 1).await;
+    a.hello("alice").await;
+    let count = 1500;
+    let mut ids = Vec::new();
+    for _ in 0..count {
+        ids.push(a.send(ClientKind::Ping(Empty {})).await);
+    }
+    let (mut acks, mut limited) = (0, 0);
+    while acks + limited < count {
+        let message = a.recv().await;
+        match message.kind {
+            Some(ServerKind::Ack(_)) => acks += 1,
+            Some(ServerKind::Failure(failure)) if failure.code() == ErrorCode::RateLimited => limited += 1,
+            _ => continue,
+        }
+        assert!(ids.contains(&message.reply_to));
+    }
+    assert!(acks >= 1000 && limited > 0);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    a.request(ClientKind::Ping(Empty {})).await.unwrap();
+}
+
+#[tokio::test]
 async fn mutes_renames_and_avatars() {
     let server = start().await;
     let mut a = Client::connect(&server, 1).await;

@@ -24,6 +24,24 @@ pub struct Hosted {
     udp: PortMapper,
 }
 
+/// Starts the server, waiting a moment when the port is still held by a server just stopped.
+async fn start_server(dir: &Path, port: u16) -> io::Result<Server> {
+    let mut attempts = 0;
+    loop {
+        let keypair = StaticKeypair::load_or_create(&dir.join("key"))?;
+        let db = Db::open(&dir.join("loom.db")).map_err(io::Error::other)?;
+        let config =
+            Config { listen: SocketAddr::from(([0, 0, 0, 0], port)), data_dir: dir.to_path_buf(), ..Config::default() };
+        match Server::start(config, keypair, db).await {
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse && attempts < 10 => {
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 impl Hosted {
     /// Starts the server with its key and database in `dir`; `port` 0 picks one.
     pub async fn start(dir: &Path, port: u16) -> io::Result<Self> {
@@ -31,14 +49,7 @@ impl Hosted {
         let candidates = if port == 0 { PORTS.to_vec() } else { vec![port] };
         let mut last = io::Error::other("no port to listen on");
         for port in candidates {
-            let keypair = StaticKeypair::load_or_create(&dir.join("key"))?;
-            let db = Db::open(&dir.join("loom.db")).map_err(io::Error::other)?;
-            let config = Config {
-                listen: SocketAddr::from(([0, 0, 0, 0], port)),
-                data_dir: dir.to_path_buf(),
-                ..Config::default()
-            };
-            match Server::start(config, keypair, db).await {
+            match start_server(dir, port).await {
                 Ok(server) => {
                     let port = server.tcp_addr.port();
                     tracing::info!(port, key = %server.public_key, "hosting a server");

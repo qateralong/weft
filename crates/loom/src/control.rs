@@ -7,7 +7,7 @@ use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use rand::RngExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 use weft_proto::control::{
     self, Avatar, Candidates, ClientKind, ClientMessage, DecodeError, DeviceInfo, DeviceList, Empty, ErrorCode, Invite,
@@ -34,8 +34,10 @@ const MAX_INVITE_LIFETIME: u64 = 365 * 24 * 3600;
 const MAX_INVITE_LEN: usize = 64;
 const MAX_MUTE: u64 = 10 * 365 * 24 * 3600;
 /// Control messages a client may send per second over time, relayed packets aside, and in a burst.
-const MESSAGES_PER_SECOND: f64 = 50.0;
-const MESSAGE_BURST: f64 = 300.0;
+/// The burst covers a fresh connection to a full network: a CallMeMaybe and a picture request
+/// for each of its members.
+const MESSAGES_PER_SECOND: f64 = 100.0;
+const MESSAGE_BURST: f64 = 1000.0;
 const REFRESH_EVERY: Duration = Duration::from_secs(1);
 const AVATAR_EVERY: Duration = Duration::from_secs(10);
 /// Networks one device may own.
@@ -58,6 +60,8 @@ enum ConnError {
     Protocol,
     #[error("stale handshake")]
     Stale,
+    #[error("client stopped reading")]
+    Behind,
 }
 
 pub async fn serve(
@@ -67,6 +71,7 @@ pub async fn serve(
     socket: Arc<UdpSocket>,
     tls: TlsAcceptor,
     panel: Arc<Panel>,
+    stopped: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut next_conn = 0;
     let open: Arc<std::sync::Mutex<HashMap<IpAddr, usize>>> = Arc::default();
@@ -92,10 +97,16 @@ pub async fn serve(
             tracing::debug!(%addr, "too many connections from one address");
             continue;
         };
+        let mut stopped = stopped.clone();
         tokio::spawn(async move {
             let _slot = slot;
-            if let Err(error) = accept(stream, addr, shared, conn).await {
-                tracing::debug!(%addr, %error, "connection closed");
+            tokio::select! {
+                result = accept(stream, addr, shared, conn) => {
+                    if let Err(error) = result {
+                        tracing::debug!(%addr, %error, "connection closed");
+                    }
+                }
+                _ = stopped.wait_for(|stopped| *stopped) => {}
             }
         });
     }
@@ -262,7 +273,7 @@ where
         return Ok(());
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::outbox::channel();
     let (kill_tx, mut kill_rx) = oneshot::channel();
     let welcome = {
         let mut hub = lock(&hub);
@@ -302,7 +313,7 @@ where
         }
     };
     let registered = matches!(welcome.kind, Some(ServerKind::Welcome(_)));
-    let _ = tx.send(welcome);
+    tx.send(welcome);
     if registered {
         tracing::info!(?key, %addr, "device connected");
         lock(&hub).notify_related(&key);
@@ -325,6 +336,7 @@ where
     let result = loop {
         let bytes = tokio::select! {
             _ = &mut kill_rx => break Ok(()),
+            _ = tx.overflowed() => break Err(ConnError::Behind),
             read = timeout(IDLE_TIMEOUT, io::read_message(&mut reader, &mut receiver)) => match read {
                 Err(_) => break Err(ConnError::Timeout),
                 Ok(Err(error)) => break Err(error.into()),
@@ -337,13 +349,15 @@ where
         };
         let relayed = matches!(message.kind, Some(ClientKind::Relay(_)));
         if !relayed && !pace.take(Instant::now()) {
-            tracing::debug!(?key, %addr, "too many requests, closing");
-            break Err(ConnError::Protocol);
+            // Too fast: requests are told to wait, notices such as CallMeMaybe are dropped and
+            // sent again by the client later.
+            if message.id != 0 {
+                tx.send(ServerMessage::failure(message.id, ErrorCode::RateLimited));
+            }
+            continue;
         }
         let Some(reply) = handle(&hub, &socket, key, addr.ip(), message, &mut pace).await else { continue };
-        if tx.send(reply).is_err() {
-            break Ok(());
-        }
+        tx.send(reply);
     };
 
     {

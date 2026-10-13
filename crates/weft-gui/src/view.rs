@@ -152,6 +152,7 @@ pub fn servers(status: &Status) -> Vec<ServerStatus> {
                 host: "127.0.0.1".into(),
                 connection: Connection::Connecting,
                 latency_ms: None,
+                refused: None,
                 address: None,
                 networks: Vec::new(),
                 hosted: true,
@@ -167,8 +168,9 @@ pub fn server_rows(l: &Localizer, status: &Status) -> Vec<ServerRow> {
         .iter()
         .map(|server| {
             let latency = server.latency_ms.filter(|_| server.connection == Connection::Connected);
-            let note = match (&status.host, server.hosted) {
-                (Some(host), true) => reach_note(l, host),
+            let note = match (&status.host, server.hosted, server.refused) {
+                (_, _, Some(failure)) => l.tr(failure.message_id()),
+                (Some(host), true, None) => reach_note(l, host),
                 _ => String::new(),
             };
             ServerRow {
@@ -210,6 +212,7 @@ fn member_rows(
     let to_server = server.latency_ms.filter(|_| connected);
     let state = format!("state-{}", state_name(server.connection));
     let sub = match network.muted_until {
+        _ if server.refused.is_some() => server.refused.map(|failure| l.tr(failure.message_id())).unwrap_or_default(),
         Some(until) => muted_text(l, "gui-you-muted", until),
         None if several => server_name(l, server),
         None => l.tr(&state),
@@ -375,6 +378,7 @@ pub fn demo() -> Status {
             host: "141.11.211.11:8443".into(),
             connection: Connection::Connected,
             latency_ms: Some(38),
+            refused: None,
             address: Some(Ipv4Addr::new(100, 64, 0, 1)),
             hosted: false,
             public: true,

@@ -423,8 +423,18 @@ impl App {
             "connecting" => ("gui-waiting-server", None),
             _ => ("gui-off-title", Some("gui-off-hint")),
         };
-        ui.set_empty_text(self.tr(empty).into());
-        ui.set_empty_hint(hint.map(|id| self.tr(id)).unwrap_or_default().into());
+        let refused = status.servers.iter().find_map(|server| Some((server, server.refused?)));
+        match refused {
+            // A server turned this device away: say why instead of just "off".
+            Some((server, failure)) if connection != "connected" => {
+                ui.set_empty_text(self.tr(failure.message_id()).into());
+                ui.set_empty_hint(view::server_name(&self.l, server).into());
+            }
+            _ => {
+                ui.set_empty_text(self.tr(empty).into());
+                ui.set_empty_hint(hint.map(|id| self.tr(id)).unwrap_or_default().into());
+            }
+        }
         if ui.get_dialog() == "servers" {
             view::sync(&self.servers, view::server_rows(&self.l, &status));
         }

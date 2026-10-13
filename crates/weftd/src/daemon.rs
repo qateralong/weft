@@ -36,6 +36,8 @@ const IDLE_TICK: Duration = Duration::from_secs(3600);
 const DEFAULT_TTL: u32 = 64;
 const AVATAR_FILE: &str = "avatar";
 const MAX_CACHED_AVATARS: usize = 512;
+/// Pictures asked from servers at once, so a big network does not flood them.
+const MAX_FETCHING: usize = 8;
 
 pub struct Options {
     pub tun_name: String,
@@ -53,6 +55,8 @@ struct Session {
     generation: u64,
     connection: Connection,
     latency: Option<Duration>,
+    /// Why the server turned this device away last time.
+    refused: Option<Failure>,
     welcome: Option<Welcome>,
     state: State,
     candidates: Vec<SocketAddr>,
@@ -76,6 +80,7 @@ impl Session {
             generation: 0,
             connection: Connection::Disconnected,
             latency: None,
+            refused: None,
             welcome: None,
             state: State::default(),
             candidates: Vec::new(),
@@ -156,6 +161,8 @@ pub struct Daemon {
     /// Pictures of other devices by id, and the ids being fetched.
     avatars: HashMap<String, Vec<u8>>,
     fetching: HashSet<String>,
+    /// Pictures the server did not give, not asked again until its next state.
+    missing: HashSet<String>,
     sessions: Vec<Session>,
     next_server: ServerId,
     generation: u64,
@@ -243,6 +250,7 @@ impl Daemon {
             avatar,
             avatars: HashMap::new(),
             fetching: HashSet::new(),
+            missing: HashSet::new(),
             sessions: Vec::new(),
             next_server: 1,
             generation: 0,
@@ -521,8 +529,13 @@ impl Daemon {
             .peers
             .iter()
             .filter(|peer| !peer.avatar.is_empty())
-            .filter(|peer| !self.avatars.contains_key(&peer.avatar) && !self.fetching.contains(&peer.avatar))
+            .filter(|peer| {
+                !self.avatars.contains_key(&peer.avatar)
+                    && !self.fetching.contains(&peer.avatar)
+                    && !self.missing.contains(&peer.avatar)
+            })
             .map(|peer| (peer.key.clone(), peer.avatar.clone()))
+            .take(MAX_FETCHING.saturating_sub(self.fetching.len()))
             .collect();
         for (key, id) in missing {
             self.fetching.insert(id.clone());
@@ -889,7 +902,14 @@ impl Daemon {
                 tracing::warn!(server = %session.host(), ?code, "server refused the connection");
                 session.control = None;
                 session.connection = Connection::Disconnected;
+                session.refused = Some(failure(code));
                 session.fail_pending(failure(code));
+                // A ban, an old version or a bad nickname stays until the user acts: the Closed
+                // event that follows must not schedule another attempt. Busy servers are retried.
+                if !matches!(code, ErrorCode::RateLimited | ErrorCode::Internal | ErrorCode::PoolExhausted) {
+                    self.generation += 1;
+                    self.sessions[index].generation = self.generation;
+                }
             }
             ControlEvent::Message(message) => self.on_message(index, message).await,
             ControlEvent::Latency(latency) => self.sessions[index].latency = Some(latency),
@@ -927,6 +947,7 @@ impl Daemon {
         }
         let session = &mut self.sessions[index];
         session.connection = Connection::Connected;
+        session.refused = None;
         session.backoff = MIN_BACKOFF;
         if let Ok(token) = welcome.discovery_token.as_slice().try_into() {
             let udp = SocketAddr::new(server.ip(), welcome.udp_port as u16);
@@ -1012,14 +1033,18 @@ impl Daemon {
                 (Internal::Refresh, Some(ServerKind::State(state))) => self.apply_state(index, state),
                 (Internal::Avatar(id), kind) => {
                     self.fetching.remove(&id);
-                    if let Some(ServerKind::Avatar(avatar)) = kind
-                        && avatar_id(&avatar.image) == id
-                    {
-                        if self.avatars.len() >= MAX_CACHED_AVATARS {
-                            self.avatars.clear();
+                    match kind {
+                        Some(ServerKind::Avatar(avatar)) if avatar_id(&avatar.image) == id => {
+                            if self.avatars.len() >= MAX_CACHED_AVATARS {
+                                self.avatars.clear();
+                            }
+                            self.avatars.insert(id, avatar.image);
                         }
-                        self.avatars.insert(id, avatar.image);
+                        _ => {
+                            self.missing.insert(id);
+                        }
                     }
+                    self.fetch_avatars(index);
                 }
                 _ => {}
             }
@@ -1064,6 +1089,7 @@ impl Daemon {
 
     fn apply_state(&mut self, index: usize, state: State) {
         self.sessions[index].state = state;
+        self.missing.clear();
         self.refresh();
         self.fetch_avatars(index);
     }
@@ -1256,6 +1282,7 @@ impl Daemon {
                     host: link_host(&link),
                     connection: session.connection,
                     latency_ms: session.latency.map(|latency| latency.as_millis().min(u32::MAX as u128) as u32),
+                    refused: session.refused,
                     address: session.address(),
                     networks: self.networks(session),
                     hosted: self.is_hosted(index),

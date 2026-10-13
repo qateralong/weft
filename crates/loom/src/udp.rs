@@ -72,7 +72,7 @@ pub async fn forward(socket: &UdpSocket, route: Route, inner: &[u8]) {
         }
         Delivery::Tcp(tx) => {
             let packet = RelayPacket { address: u32::from(route.source), packet: inner.to_vec() };
-            let _ = tx.send(ServerMessage::push(ServerKind::Relay(packet)));
+            tx.send(ServerMessage::push(ServerKind::Relay(packet)));
         }
     }
 }

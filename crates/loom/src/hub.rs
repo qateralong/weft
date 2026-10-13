@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use rand::RngExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use weft_proto::control::{
     Endpoint, MUTE_FOREVER, MemberDetails, Network, Peer, PeerCandidates, Role, ServerKind, ServerMessage, State,
 };
@@ -15,6 +15,7 @@ use weft_session::Tai64N;
 use crate::config::Config;
 use crate::db::{Db, DbError, MUTED_FOREVER, unix_now};
 use crate::limiter::Limiter;
+use crate::outbox::Outbox;
 use crate::relay::{Bucket, Traffic};
 
 pub const MAX_CANDIDATES: usize = 16;
@@ -38,7 +39,7 @@ pub struct Hub {
 
 struct Session {
     conn: u64,
-    tx: mpsc::UnboundedSender<ServerMessage>,
+    tx: Outbox,
     token: Token,
     address: Ipv4Addr,
     obfs: ObfsKey,
@@ -57,7 +58,7 @@ pub struct Route {
 
 pub enum Delivery {
     Udp(SocketAddr, ObfsKey),
-    Tcp(mpsc::UnboundedSender<ServerMessage>),
+    Tcp(Outbox),
 }
 
 /// Devices that belong to nothing are forgotten after this long without connecting.
@@ -116,7 +117,7 @@ impl Hub {
         key: PublicKey,
         address: Ipv4Addr,
         conn: u64,
-        tx: mpsc::UnboundedSender<ServerMessage>,
+        tx: Outbox,
         kill: oneshot::Sender<()>,
     ) -> Token {
         let token: Token = rand::rng().random();
@@ -201,8 +202,8 @@ impl Hub {
                 endpoints: candidates(session),
             }))
         };
-        let _ = b.tx.send(message(from, a));
-        let _ = a.tx.send(message(to, b));
+        b.tx.send(message(from, a));
+        a.tx.send(message(to, b));
     }
 
     pub fn route(&mut self, source: &PublicKey, destination: Ipv4Addr, len: usize, now: Instant) -> Option<Route> {
@@ -314,7 +315,7 @@ impl Hub {
             let Some(session) = self.sessions.get(key) else { continue };
             match self.state_for(key) {
                 Ok(state) => {
-                    let _ = session.tx.send(ServerMessage::push(ServerKind::State(state)));
+                    session.tx.send(ServerMessage::push(ServerKind::State(state)));
                 }
                 Err(error) => tracing::warn!(%error, "cannot build state"),
             }

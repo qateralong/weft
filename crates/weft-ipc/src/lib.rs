@@ -313,6 +313,9 @@ pub struct ServerStatus {
     /// Round trip to the server over the control channel.
     #[serde(default)]
     pub latency_ms: Option<u32>,
+    /// Why the server turned this device away, until it lets it in.
+    #[serde(default)]
+    pub refused: Option<Failure>,
     pub address: Option<Ipv4Addr>,
     pub networks: Vec<NetworkStatus>,
     /// Whether this device hosts the server.

@@ -5,6 +5,7 @@ pub mod db;
 mod hashing;
 mod hub;
 mod limiter;
+mod outbox;
 pub mod panel;
 pub mod relay;
 pub mod tls;
@@ -31,6 +32,8 @@ pub struct Server {
     #[cfg_attr(not(unix), allow(dead_code))]
     hub: crate::hub::SharedHub,
     tasks: Vec<JoinHandle<()>>,
+    /// Tells every client connection to close when the server goes away.
+    stop: tokio::sync::watch::Sender<bool>,
 }
 
 impl Server {
@@ -44,13 +47,15 @@ impl Server {
         let tls = tls::acceptor(&config).map_err(io::Error::other)?;
         let panel = Arc::new(panel::Panel::new(config.data_dir.clone()));
         let hub = Arc::new(Mutex::new(Hub::new(db, config)));
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let keypair = Arc::new(keypair);
         let tasks = vec![
-            tokio::spawn(control::serve(listener, hub.clone(), Arc::new(keypair), socket.clone(), tls, panel.clone())),
+            tokio::spawn(control::serve(listener, hub.clone(), keypair, socket.clone(), tls, panel.clone(), stopped)),
             tokio::spawn(udp::serve(socket, hub.clone(), own)),
             tokio::spawn(panel.sample(hub.clone())),
             tokio::spawn(hub::housekeeping(hub.clone())),
         ];
-        Ok(Self { tcp_addr, udp_addr, public_key, hub, tasks })
+        Ok(Self { tcp_addr, udp_addr, public_key, hub, tasks, stop })
     }
 
     /// Serves `loom admin` requests on a local socket that only the owner can open.
@@ -74,6 +79,7 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
+        let _ = self.stop.send(true);
         for task in &self.tasks {
             task.abort();
         }

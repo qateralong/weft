@@ -171,6 +171,7 @@ mod tests {
                 host: "example.com:443".into(),
                 connection,
                 latency_ms: None,
+                refused: None,
                 address: Some(Ipv4Addr::new(100, 64, 0, 1)),
                 networks: vec![NetworkStatus {
                     name: "lan".into(),
