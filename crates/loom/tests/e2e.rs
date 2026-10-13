@@ -28,25 +28,31 @@ struct Client {
 
 impl Client {
     async fn connect(server: &Server, secret: u8) -> Client {
+        Self::connect_at(server, secret, SystemTime::now()).await
+    }
+
+    /// Connects with the clock showing `time`.
+    async fn connect_at(server: &Server, secret: u8, time: SystemTime) -> Client {
         let (reader, writer) = TcpStream::connect(server.tcp_addr).await.unwrap().into_split();
-        Self::handshake(server, secret, Box::new(reader), Box::new(writer)).await
+        Self::handshake(server, secret, time, Box::new(reader), Box::new(writer)).await
     }
 
     async fn connect_tls(server: &Server, secret: u8) -> Client {
         let stream = TcpStream::connect(server.tcp_addr).await.unwrap();
         let stream = tls::connector().connect(tls::server_name("127.0.0.1"), stream).await.unwrap();
         let (reader, writer) = tokio::io::split(stream);
-        Self::handshake(server, secret, Box::new(reader), Box::new(writer)).await
+        Self::handshake(server, secret, SystemTime::now(), Box::new(reader), Box::new(writer)).await
     }
 
     async fn handshake(
         server: &Server,
         secret: u8,
+        time: SystemTime,
         mut reader: Box<dyn AsyncRead + Unpin + Send>,
         mut writer: Box<dyn AsyncWrite + Unpin + Send>,
     ) -> Client {
         let keypair = StaticKeypair::from_secret(&[secret; 32]);
-        let (handshake, frame) = stream::connect(&keypair, server.public_key, SystemTime::now()).unwrap();
+        let (handshake, frame) = stream::connect(&keypair, server.public_key, time).unwrap();
         writer.write_all(&frame).await.unwrap();
         let packet = io::read_handshake(&mut reader, handshake.own_obfs()).await.unwrap();
         let (sender, receiver) = handshake.finish(&packet).unwrap().split();
@@ -251,6 +257,27 @@ async fn reconnect_replaces_old_session() {
     .await;
     assert!(closed.is_ok());
     new.request(ClientKind::Ping(control::Empty {})).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_clock_set_back_still_connects() {
+    let server = start().await;
+    let mut now = Client::connect(&server, 1).await;
+    now.hello("alice").await;
+    let earlier = SystemTime::now() - Duration::from_secs(3600);
+    // While connected, an older handshake looks like a replay and is dropped.
+    let mut stream = TcpStream::connect(server.tcp_addr).await.unwrap();
+    let keypair = StaticKeypair::from_secret(&[1; 32]);
+    let (handshake, frame) = stream::connect(&keypair, server.public_key, earlier).unwrap();
+    stream.write_all(&frame).await.unwrap();
+    let answer = tokio::time::timeout(Duration::from_secs(5), io::read_handshake(&mut stream, handshake.own_obfs()));
+    assert!(answer.await.unwrap().is_err());
+    now.request(ClientKind::Ping(Empty {})).await.unwrap();
+    drop(now);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut back = Client::connect_at(&server, 1, earlier).await;
+    back.hello("alice").await;
+    back.request(ClientKind::Ping(Empty {})).await.unwrap();
 }
 
 async fn discover(server: &Server, udp: &UdpSocket, welcome: &Welcome, own: &ObfsKey) {

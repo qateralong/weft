@@ -54,6 +54,7 @@ impl Server {
             tokio::spawn(udp::serve(socket, hub.clone(), own)),
             tokio::spawn(panel.sample(hub.clone())),
             tokio::spawn(hub::housekeeping(hub.clone())),
+            tokio::spawn(hub::send_states(hub.clone())),
         ];
         Ok(Self { tcp_addr, udp_addr, public_key, hub, tasks, stop })
     }

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use rand::RngExt;
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 use weft_proto::control::{
     Endpoint, MUTE_FOREVER, MemberDetails, Network, Peer, PeerCandidates, Role, ServerKind, ServerMessage, State,
 };
@@ -19,6 +19,10 @@ use crate::outbox::Outbox;
 use crate::relay::{Bucket, Traffic};
 
 pub const MAX_CANDIDATES: usize = 16;
+/// Changes are gathered this long before states go out, so a burst of them costs one state each.
+const STATE_DELAY: Duration = Duration::from_millis(100);
+/// States built per hold of the lock, so relaying is not held up for long.
+const STATES_PER_LOCK: usize = 32;
 const UDP_FRESH: Duration = Duration::from_secs(60);
 
 pub type SharedHub = Arc<Mutex<Hub>>;
@@ -35,6 +39,9 @@ pub struct Hub {
     relay: Traffic,
     relay_bucket: Option<Bucket>,
     started: Instant,
+    /// Devices whose state changed and is not sent yet.
+    dirty: BTreeSet<PublicKey>,
+    wake: Arc<Notify>,
 }
 
 struct Session {
@@ -61,6 +68,18 @@ pub enum Delivery {
     Tcp(Outbox),
 }
 
+/// Sends scheduled states a moment after changes, a few at a time.
+pub async fn send_states(hub: SharedHub) {
+    let wake = lock(&hub).wake.clone();
+    loop {
+        wake.notified().await;
+        tokio::time::sleep(STATE_DELAY).await;
+        while lock(&hub).send_states(STATES_PER_LOCK) {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
 /// Devices that belong to nothing are forgotten after this long without connecting.
 const STALE_DEVICE: Duration = Duration::from_secs(90 * 24 * 3600);
 const PRUNE_EVERY: u32 = 720;
@@ -68,7 +87,7 @@ const PRUNE_EVERY: u32 = 720;
 /// Lifts ended mutes every few seconds and forgets stale devices every hour.
 pub async fn housekeeping(hub: SharedHub) {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
-    let mut ticks = 0u32;
+    let mut ticks = 1u32;
     loop {
         interval.tick().await;
         let mut hub = lock(&hub);
@@ -99,17 +118,20 @@ impl Hub {
             addresses: HashMap::new(),
             timestamps: HashMap::new(),
             relations: HashMap::new(),
+            dirty: BTreeSet::new(),
+            wake: Arc::new(Notify::new()),
         }
     }
 
+    /// Whether a handshake is fresh. An older timestamp only matters while the device is
+    /// connected, where a replay could be meant to push it off; otherwise its clock went back,
+    /// as with dual boot or an NTP correction, and it must still get in.
     pub fn accept_timestamp(&mut self, key: PublicKey, timestamp: Tai64N) -> bool {
-        match self.timestamps.get(&key) {
-            Some(&last) if timestamp <= last => false,
-            _ => {
-                self.timestamps.insert(key, timestamp);
-                true
-            }
+        if self.timestamps.get(&key).is_some_and(|&last| timestamp <= last) && self.sessions.contains_key(&key) {
+            return false;
         }
+        self.timestamps.insert(key, timestamp);
+        true
     }
 
     pub fn register(
@@ -263,10 +285,7 @@ impl Hub {
     /// client does not try to reach them.
     pub fn state_for(&self, key: &PublicKey) -> Result<State, DbError> {
         let memberships = self.db.memberships(key)?;
-        let others: BTreeSet<PublicKey> =
-            memberships.iter().flat_map(|m| m.members.iter().copied()).filter(|other| other != key).collect();
-        let devices = self.db.devices(&others)?;
-        let avatars = self.db.avatar_ids(&others)?;
+        let devices = self.db.co_members(key)?;
         let reachable = self.db.reachable(key, unix_now())?;
         let networks = memberships
             .into_iter()
@@ -292,12 +311,12 @@ impl Hub {
             })
             .collect();
         let mut peers: Vec<Peer> = devices
-            .into_values()
-            .map(|device| {
+            .into_iter()
+            .map(|(device, avatar)| {
                 let session = self.sessions.get(&device.key).filter(|_| reachable.contains(&device.key));
                 Peer {
                     key: device.key.as_bytes().to_vec(),
-                    avatar: avatars.get(&device.key).cloned().unwrap_or_default(),
+                    avatar,
                     nickname: device.nickname,
                     address: u32::from(device.address),
                     online: session.is_some(),
@@ -310,8 +329,20 @@ impl Hub {
         Ok(State { networks, peers })
     }
 
-    pub fn notify(&self, keys: &BTreeSet<PublicKey>) {
-        for key in keys {
+    /// Schedules a fresh state for these devices.
+    pub fn notify(&mut self, keys: &BTreeSet<PublicKey>) {
+        let before = self.dirty.len();
+        self.dirty.extend(keys.iter().filter(|key| self.sessions.contains_key(key)));
+        if self.dirty.len() > before {
+            self.wake.notify_one();
+        }
+    }
+
+    /// Sends some of the scheduled states and tells whether more are waiting.
+    fn send_states(&mut self, limit: usize) -> bool {
+        let keys: Vec<PublicKey> = self.dirty.iter().take(limit).copied().collect();
+        for key in &keys {
+            self.dirty.remove(key);
             let Some(session) = self.sessions.get(key) else { continue };
             match self.state_for(key) {
                 Ok(state) => {
@@ -320,9 +351,12 @@ impl Hub {
                 Err(error) => tracing::warn!(%error, "cannot build state"),
             }
         }
+        !self.dirty.is_empty()
     }
 
     fn prune_devices(&mut self) {
+        let sessions = &self.sessions;
+        self.timestamps.retain(|key, _| sessions.contains_key(key));
         let online: BTreeSet<PublicKey> = self.sessions.keys().copied().collect();
         match self.db.prune_devices(unix_now() - STALE_DEVICE.as_secs() as i64, &online) {
             Ok(0) => {}
@@ -346,10 +380,52 @@ impl Hub {
         self.notify(&keys);
     }
 
-    pub fn notify_related(&self, key: &PublicKey) {
+    pub fn notify_related(&mut self, key: &PublicKey) {
         match self.db.related(key) {
             Ok(related) => self.notify(&related),
             Err(error) => tracing::warn!(%error, "cannot load related devices"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Db;
+
+    #[test]
+    fn states_for_a_full_network_are_cheap() {
+        let mut db = Db::open_in_memory().unwrap();
+        let config = Config::default();
+        let keys: Vec<PublicKey> = (0..250u16)
+            .map(|n| {
+                let mut bytes = [7; 32];
+                bytes[..2].copy_from_slice(&n.to_le_bytes());
+                PublicKey::from_bytes(bytes)
+            })
+            .collect();
+        for (n, key) in keys.iter().enumerate() {
+            db.upsert_device(key, &format!("d{n}"), &config.pool).unwrap();
+        }
+        let network = db.create_network("lan", "hash", &keys[0]).unwrap();
+        for key in &keys[1..] {
+            db.add_member(network, key, Role::Member).unwrap();
+        }
+        let mut hub = Hub::new(db, config);
+        let mut inboxes = Vec::new();
+        for (n, key) in keys.iter().enumerate() {
+            let (tx, inbox) = crate::outbox::channel();
+            let (kill, _) = oneshot::channel();
+            hub.register(*key, Ipv4Addr::from(0x6440_0000 + n as u32 + 1), n as u64, tx, kill);
+            inboxes.push(inbox);
+        }
+        let started = Instant::now();
+        hub.notify(&keys.iter().copied().collect());
+        while hub.send_states(STATES_PER_LOCK) {}
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        let state = hub.state_for(&keys[5]).unwrap();
+        assert_eq!(state.peers.len(), 249);
+        assert_eq!(state.networks[0].members.len(), 250);
     }
 }

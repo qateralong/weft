@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 const WINDOW: Duration = Duration::from_secs(60);
 const PER_IP: usize = 5;
 const PER_NETWORK: usize = 20;
-/// New devices one address may register per minute.
-const REGISTRATIONS_PER_IP: usize = 10;
+/// New devices one address may register per minute; mobile carriers put many people behind one.
+const REGISTRATIONS_PER_IP: usize = 30;
 
 #[derive(Default)]
 pub struct Limiter {
@@ -51,12 +51,18 @@ impl<K: Hash + Eq + Clone> Failures<K> {
 }
 
 impl Limiter {
+    /// Whether `ip` may try a password for `network`. While strangers guess at a network, it
+    /// still takes tries from addresses without recent failures, so its members can join.
     pub fn allowed(&mut self, ip: IpAddr, network: &str, now: Instant) -> bool {
-        self.ips.count(&ip, now) < PER_IP && self.networks.count(&network.to_string(), now) < PER_NETWORK
+        let failures = self.ips.count(&ip, now);
+        failures < PER_IP && (failures == 0 || self.networks.count(&network.to_string(), now) < PER_NETWORK)
     }
 
     pub fn failed(&mut self, ip: IpAddr, network: &str, now: Instant) {
         self.networks.record(&network.to_string(), now);
+        if self.networks.entries.len() > 10_000 {
+            self.networks.prune(now);
+        }
         self.ip_failed(ip, now);
     }
 
@@ -110,6 +116,8 @@ mod tests {
         for i in 0..PER_NETWORK {
             limiter.failed(IpAddr::from([10, 0, 0, i as u8]), "target", now);
         }
-        assert!(!limiter.allowed("198.51.100.3".parse().unwrap(), "target", now));
+        assert!(!limiter.allowed(IpAddr::from([10, 0, 0, 1]), "target", now));
+        assert!(limiter.allowed(IpAddr::from([10, 0, 0, 1]), "other", now));
+        assert!(limiter.allowed("198.51.100.3".parse().unwrap(), "target", now));
     }
 }

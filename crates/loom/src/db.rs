@@ -765,6 +765,26 @@ impl Db {
         Ok(memberships)
     }
 
+    /// Everyone who shares a network with `device`, with their picture ids, in one query.
+    pub fn co_members(&self, device: &PublicKey) -> Result<Vec<(Device, String)>, DbError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT d.key, d.nickname, d.address, d.avatar_id FROM members mine
+             JOIN members other ON other.network = mine.network JOIN devices d ON d.key = other.device
+             WHERE mine.device = ?1 AND other.device != ?1",
+        )?;
+        let rows = stmt.query_map([device.as_bytes()], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?, row.get::<_, u32>(2)?, row.get::<_, String>(3)?))
+        })?;
+        let mut devices = Vec::new();
+        for row in rows {
+            let (key, nickname, address, avatar) = row?;
+            if let Ok(key) = PublicKey::from_slice(&key) {
+                devices.push((Device { key, nickname, address: Ipv4Addr::from(address) }, avatar));
+            }
+        }
+        Ok(devices)
+    }
+
     pub fn related(&self, device: &PublicKey) -> Result<BTreeSet<PublicKey>, DbError> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT DISTINCT other.device FROM members mine JOIN members other ON other.network = mine.network

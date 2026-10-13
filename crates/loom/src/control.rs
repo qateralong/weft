@@ -43,7 +43,7 @@ const AVATAR_EVERY: Duration = Duration::from_secs(10);
 /// Networks one device may own.
 const MAX_OWNED: usize = 32;
 /// Open connections from one address, so one host cannot hold them all.
-const MAX_CONNECTIONS_PER_IP: usize = 64;
+const MAX_CONNECTIONS_PER_IP: usize = 256;
 const INVITE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 #[derive(Debug, thiserror::Error)]
