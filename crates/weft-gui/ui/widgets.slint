@@ -23,8 +23,8 @@ export component IconButton inherits Rectangle {
     in property <color> tint: Theme.muted;
     // How far the icon turns while hovered, like a gear.
     in property <angle> turn;
-    // Keeps the icon turning, while something is in progress.
-    in property <bool> spin;
+    // Keeps the icon pulsing while something is in progress. A turning icon froze the renderer.
+    in property <bool> busy;
     callback clicked();
     width: 32px;
     height: 32px;
@@ -39,17 +39,13 @@ export component IconButton inherits Rectangle {
     accessible-action-default => {
         root.clicked();
     }
-    Rectangle {
-        width: 18px;
-        height: 18px;
-        transform-rotation: spin ? Math.mod(animation-tick() / 1ms, 900) / 900 * 360deg : 0deg;
-        Icon {
-            name: icon;
-            stroke: touch.has-hover ? Theme.text : tint;
-            transform-rotation: touch.has-hover && !spin ? turn : 0deg;
-            animate stroke { duration: 150ms; }
-            animate transform-rotation { duration: 400ms; easing: ease-out; }
-        }
+    Icon {
+        name: icon;
+        stroke: busy ? Theme.accent : touch.has-hover ? Theme.text : tint;
+        opacity: busy ? 0.35 + 0.65 * Math.abs(Math.cos(animation-tick() / 1ms / 300 * 1rad)) : 1;
+        transform-rotation: touch.has-hover && !busy ? turn : 0deg;
+        animate stroke { duration: 150ms; }
+        animate transform-rotation { duration: 400ms; easing: ease-out; }
     }
 
     touch := TouchArea {

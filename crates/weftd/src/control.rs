@@ -60,6 +60,11 @@ impl Control {
         Self { commands, task }
     }
 
+    /// Measures the round trip to the server now instead of at the next regular ping.
+    pub fn measure(&self) -> bool {
+        self.send(ClientMessage { id: PING_ID, kind: Some(ClientKind::Ping(Empty {})) })
+    }
+
     pub fn send(&self, message: ClientMessage) -> bool {
         self.commands.send(message).is_ok()
     }
@@ -171,7 +176,12 @@ async fn run(
         let message = tokio::select! {
             result = &mut reader_task.0 => return result.unwrap_or(Ok(())),
             command = commands.recv() => match command {
-                Some(command) => command,
+                Some(command) => {
+                    if command.id == PING_ID {
+                        *ping_sent.lock().unwrap() = Some(Instant::now());
+                    }
+                    command
+                }
                 None => return Ok(()),
             },
             _ = ping.tick() => {

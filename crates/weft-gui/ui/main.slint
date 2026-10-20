@@ -161,12 +161,16 @@ component MemberLine inherits Rectangle {
         level: data.level;
         ping: data.ping;
         busy: pinging;
-        TouchArea {
-            mouse-cursor: pointer;
-            clicked => {
-                pinging = true;
-                root.ping();
-            }
+    }
+
+    // Over the signal, not inside it: inside its layout the area got no height and no clicks.
+    TouchArea {
+        x: place(root.width - pad - menu-width - signal-width, signal-width);
+        width: signal-width;
+        mouse-cursor: pointer;
+        clicked => {
+            pinging = true;
+            root.ping();
         }
     }
 
@@ -699,7 +703,7 @@ export component Header inherits Rectangle {
             icon: Icons.refresh;
             tooltip: I18n.t("gui-refresh");
             turn: 60deg;
-            spin: refreshing;
+            busy: refreshing;
             clicked => {
                 root.refresh();
             }
@@ -743,7 +747,7 @@ export component Header inherits Rectangle {
             icon: Icons.refresh;
             tooltip: I18n.t("gui-refresh");
             turn: 60deg;
-            spin: refreshing;
+            busy: refreshing;
             clicked => {
                 root.refresh();
             }

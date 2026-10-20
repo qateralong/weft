@@ -461,6 +461,12 @@ impl Daemon {
                 self.route(target, ClientKind::Mute(MuteRequest { network, member, seconds }), reply)
             }
             Request::Refresh { address } => {
+                // Members reached through a server show an estimate from the server's ping.
+                for session in &self.sessions {
+                    if let Some(control) = &session.control {
+                        control.measure();
+                    }
+                }
                 if address.is_none() {
                     for index in 0..self.sessions.len() {
                         self.internal(index, ClientKind::Refresh(Empty {}), Internal::Refresh);

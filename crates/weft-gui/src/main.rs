@@ -126,7 +126,23 @@ struct App {
     servers: Rc<VecModel<ServerRow>>,
 }
 
+/// Writes a crash with its backtrace next to other caches: started from a launcher, the app has no
+/// terminal for the message.
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = dirs::cache_dir().map(|dir| dir.join("weft")) {
+            let _ = std::fs::create_dir_all(&dir);
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            let report = format!("weft-gui {} at {}\n{info}\n{backtrace}\n", env!("CARGO_PKG_VERSION"), update::now());
+            let _ = std::fs::write(dir.join("gui-crash.log"), report);
+        }
+        default(info);
+    }));
+}
+
 fn main() -> Result<(), slint::PlatformError> {
+    log_panics();
     let options = options();
     if options.shot.is_some() {
         shot::install(440, 680);
