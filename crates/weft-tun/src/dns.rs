@@ -7,6 +7,26 @@ pub struct Dns {
     pub domain: String,
 }
 
+/// The zone the daemon answers, as the uninstaller must know it without the daemon.
+pub const DOMAIN: &str = "weft";
+
+/// Stops sending queries to the daemon; per-link settings on Linux go away with the link.
+#[cfg(target_os = "macos")]
+pub fn remove(dns: &Dns) {
+    let _ = std::fs::remove_file(format!("/etc/resolver/{}", dns.domain));
+}
+
+#[cfg(windows)]
+pub fn remove(dns: &Dns) {
+    crate::windows::run_script(format!(
+        "Get-DnsClientNrptRule | Where-Object {{ $_.Namespace -eq '.{}' }} | Remove-DnsClientNrptRule -Force",
+        dns.domain
+    ));
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub fn remove(_dns: &Dns) {}
+
 #[cfg(target_os = "linux")]
 pub fn apply(interface: &str, dns: &Dns) -> bool {
     let run = |args: &[&str]| match std::process::Command::new("resolvectl").args(args).output() {

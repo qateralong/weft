@@ -1,5 +1,7 @@
 use std::io;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
@@ -40,15 +42,23 @@ impl Route {
 
 impl TunConfig {
     pub fn network(&self) -> String {
-        let mask = u32::MAX.checked_shl(32 - u32::from(self.prefix)).unwrap_or(0);
-        format!("{}/{}", Ipv4Addr::from(u32::from(self.address) & mask), self.prefix)
+        network(self.address, self.prefix)
     }
+}
+
+fn network(address: Ipv4Addr, prefix: u8) -> String {
+    let mask = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
+    format!("{}/{}", Ipv4Addr::from(u32::from(address) & mask), prefix)
 }
 
 pub struct Tun {
     device: AsyncDevice,
     name: String,
-    dns_configured: bool,
+    dns: Option<Dns>,
+    dns_configured: Arc<AtomicBool>,
+    /// Address pools whose peers the Windows firewall lets in.
+    #[cfg(windows)]
+    pools: windows::Pools,
 }
 
 impl Tun {
@@ -63,17 +73,33 @@ impl Tun {
         };
         let device = builder.build_async()?;
         let name = device.name().unwrap_or_else(|_| config.name.clone());
+        let dns_configured = Arc::new(AtomicBool::new(false));
         #[cfg(windows)]
-        let dns_configured = {
-            windows::configure(&name, &config.network(), &config.routes, config.dns.as_ref());
-            config.dns.is_some()
+        let pools = {
+            let pools = windows::Pools::new(config.network());
+            windows::configure(&name, pools.clone(), &config.routes, config.dns.as_ref());
+            dns_configured.store(config.dns.is_some(), Ordering::Relaxed);
+            pools
         };
+        // Routes and the resolver are set up by external programs, which must not hold up the caller.
         #[cfg(not(windows))]
-        let dns_configured = {
-            routes::apply(&name, &config.routes);
-            config.dns.as_ref().is_some_and(|dns| dns::apply(&name, dns))
-        };
-        Ok(Self { device, name, dns_configured })
+        {
+            let (name, routes, dns, configured) =
+                (name.clone(), config.routes.clone(), config.dns.clone(), dns_configured.clone());
+            std::thread::spawn(move || {
+                routes::apply(&name, &routes);
+                let ok = dns.as_ref().is_some_and(|dns| dns::apply(&name, dns));
+                configured.store(ok, Ordering::Relaxed);
+            });
+        }
+        Ok(Self {
+            device,
+            name,
+            dns: config.dns.clone(),
+            dns_configured,
+            #[cfg(windows)]
+            pools,
+        })
     }
 
     pub fn name(&self) -> &str {
@@ -82,12 +108,25 @@ impl Tun {
 
     /// Whether the system resolver was told to send peer names to the daemon.
     pub fn dns_configured(&self) -> bool {
-        self.dns_configured
+        self.dns_configured.load(Ordering::Relaxed)
     }
 
     /// Adds an address from another server's pool.
     pub fn add_address(&self, address: Ipv4Addr, prefix: u8) -> io::Result<()> {
-        self.device.add_address_v4(address, prefix)
+        self.device.add_address_v4(address, prefix)?;
+        #[cfg(windows)]
+        windows::allow_pools(&self.name, self.pools.clone(), Some(network(address, prefix)), None);
+        Ok(())
+    }
+
+    /// Takes away the address of a server that is gone, with its route.
+    pub fn remove_address(&self, address: Ipv4Addr, prefix: u8) -> io::Result<()> {
+        self.device.remove_address(IpAddr::V4(address))?;
+        #[cfg(windows)]
+        windows::allow_pools(&self.name, self.pools.clone(), None, Some(network(address, prefix)));
+        #[cfg(not(windows))]
+        let _ = prefix;
+        Ok(())
     }
 
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
@@ -97,6 +136,22 @@ impl Tun {
     pub async fn send(&self, packet: &[u8]) -> io::Result<usize> {
         self.device.send(packet).await
     }
+}
+
+impl Drop for Tun {
+    fn drop(&mut self) {
+        if let Some(dns) = &self.dns {
+            dns::remove(dns);
+        }
+    }
+}
+
+/// Removes what Weft set up in the system outside its interface, for an uninstaller.
+pub fn cleanup() {
+    #[cfg(windows)]
+    windows::cleanup();
+    #[cfg(not(windows))]
+    dns::remove(&Dns { server: Ipv4Addr::UNSPECIFIED, domain: dns::DOMAIN.to_string() });
 }
 
 #[cfg(test)]
