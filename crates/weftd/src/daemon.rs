@@ -771,8 +771,7 @@ impl Daemon {
         if self.is_public(index) {
             self.settings.public_server = Some(false);
         }
-        self.disconnect_session(index);
-        self.sessions.remove(index);
+        self.forget_session(index);
         self.save_settings();
         self.refresh();
         let _ = reply.send(Response::Ok);
@@ -834,8 +833,7 @@ impl Daemon {
         if let Some(hosted) = self.hosted.take() {
             let link = hosted.local_link();
             if let Some(index) = self.sessions.iter().position(|session| session.link == link) {
-                self.disconnect_session(index);
-                self.sessions.remove(index);
+                self.forget_session(index);
             }
         }
         self.settings.host.enabled = false;
@@ -910,6 +908,25 @@ impl Daemon {
         ));
         session.connection = Connection::Connecting;
         session.reconnect_at = None;
+    }
+
+    /// Removes a server and the address it gave, so another server may give one in its range.
+    fn forget_session(&mut self, index: usize) {
+        let address = self.sessions[index].address();
+        self.disconnect_session(index);
+        self.sessions.remove(index);
+        let Some(address) = address else { return };
+        if self.sessions.iter().any(|session| session.address() == Some(address)) {
+            return;
+        }
+        let Some(position) = self.addresses.iter().position(|&(known, _)| known == address) else { return };
+        let (_, prefix) = self.addresses.remove(position);
+        if let Some(tun) = &self.tun
+            && let Err(error) = tun.remove_address(address, prefix)
+        {
+            tracing::warn!(%address, %error, "cannot remove an address from the tun interface");
+        }
+        self.mesh.set_locals(&self.addresses);
     }
 
     /// Closes the connection and forgets what the server said; the caller refreshes shared state.
