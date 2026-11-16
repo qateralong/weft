@@ -340,7 +340,7 @@ impl App {
         on!(app, on_invite_revoke, |code| app.revoke_invite(code.to_string()));
         on!(app, on_device_act, |command, key| app.device_action(command.to_string(), key.to_string()));
         on!(app, on_network_configure, |key, on| app.configure(key.to_string(), on));
-        on!(app, on_network_password, |password| app.change_password(password.to_string()));
+        on!(app, on_network_password, |password, repeat| app.change_password(password.to_string(), repeat.to_string()));
         on!(app, on_network_rename, |name| app.rename_network(name.to_string()));
         on!(app, on_network_delete, || app.delete_network());
         on!(app, on_network_pick, |item| app.network_pick(&item));
@@ -1577,7 +1577,10 @@ impl App {
         });
     }
 
-    fn change_password(self: &Rc<Self>, password: String) {
+    fn change_password(self: &Rc<Self>, password: String, repeat: String) {
+        if password != repeat {
+            return self.toast(&self.tr("password-mismatch"), true);
+        }
         let Some((network, server, _)) = self.network() else { return };
         let app = self.clone();
         self.run(async move {

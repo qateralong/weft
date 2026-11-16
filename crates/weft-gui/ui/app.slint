@@ -171,7 +171,7 @@ export component AppWindow inherits Window {
     callback invite-revoke(string);
     callback device-act(string, string);
     callback network-configure(string, bool);
-    callback network-password(string);
+    callback network-password(string, string);
     callback network-rename(string);
     callback network-delete();
     callback network-pick(string);
@@ -521,8 +521,8 @@ export component AppWindow inherits Window {
         configure(key, on) => {
             root.network-configure(key, on);
         }
-        change-password(password) => {
-            root.network-password(password);
+        change-password(password, repeat) => {
+            root.network-password(password, repeat);
         }
         delete => {
             root.network-delete();

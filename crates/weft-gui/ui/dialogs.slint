@@ -981,7 +981,7 @@ export component NetworkSettingsDialog inherits DialogFrame {
     in-out property <bool> approval;
     in-out property <string> name;
     callback configure(string, bool);
-    callback change-password(string);
+    callback change-password(string, string);
     callback rename(string);
     callback delete();
     leave-text: I18n.t("gui-close");
@@ -1033,11 +1033,17 @@ export component NetworkSettingsDialog inherits DialogFrame {
             password: true;
         }
 
+        repeat-password := Field {
+            label: I18n.t("gui-password-repeat");
+            password: true;
+        }
+
         Button {
             text: I18n.t("gui-change-password");
             clicked => {
-                root.change-password(new-password.text);
+                root.change-password(new-password.text, repeat-password.text);
                 new-password.text = "";
+                repeat-password.text = "";
             }
         }
 
