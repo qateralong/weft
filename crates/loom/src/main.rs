@@ -126,8 +126,36 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&config.data_dir, std::fs::Permissions::from_mode(0o700));
     }
-    let keypair = StaticKeypair::load_or_create(&config.data_dir.join("key"))?;
+    let serving = matches!(command, Command::Run);
+    let result = StaticKeypair::load_or_create(&config.data_dir.join("key"))
+        .map_err(Into::into)
+        .and_then(|keypair| run_command(command, &config, keypair));
+    // Run as root, `link` and `panel` would leave files the service user cannot read.
+    #[cfg(unix)]
+    if !serving {
+        give_back(&config.data_dir);
+    }
+    #[cfg(not(unix))]
+    let _ = serving;
+    result
+}
 
+/// Hands files in the data directory to the directory's owner.
+#[cfg(unix)]
+fn give_back(dir: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(owner) = std::fs::metadata(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if entry.metadata().is_ok_and(|meta| meta.uid() != owner.uid()) {
+            let _ = std::os::unix::fs::chown(entry.path(), Some(owner.uid()), Some(owner.gid()));
+        }
+    }
+}
+
+fn run_command(command: Command, config: &Config, keypair: StaticKeypair) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    let admin_socket = config.data_dir.join("admin.sock");
     match command {
         Command::Link { host } => {
             let host = host.or(config.public_host.clone()).ok_or("set public_host in the config or pass --host")?;
