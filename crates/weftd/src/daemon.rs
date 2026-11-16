@@ -38,6 +38,8 @@ const AVATAR_FILE: &str = "avatar";
 const MAX_CACHED_AVATARS: usize = 512;
 /// Pictures asked from servers at once, so a big network does not flood them.
 const MAX_FETCHING: usize = 8;
+/// Servers take one picture per 10 s; a quicker change is sent again after this.
+const AVATAR_RETRY: Duration = Duration::from_secs(11);
 
 pub struct Options {
     pub tun_name: String,
@@ -68,6 +70,8 @@ struct Session {
     redeem_waiters: Vec<(String, oneshot::Sender<Response>)>,
     backoff: Duration,
     reconnect_at: Option<Instant>,
+    /// When to send the picture again after the server asked to wait.
+    avatar_at: Option<Instant>,
 }
 
 impl Session {
@@ -91,6 +95,7 @@ impl Session {
             redeem_waiters: Vec::new(),
             backoff: MIN_BACKOFF,
             reconnect_at: None,
+            avatar_at: None,
         }
     }
 
@@ -130,7 +135,7 @@ impl Session {
 enum Internal {
     Refresh,
     Avatar(String),
-    Ignore,
+    SetAvatar,
 }
 
 pub struct Daemon {
@@ -358,7 +363,8 @@ impl Daemon {
 
     fn deadline(&self) -> Instant {
         let mesh = self.mesh.next_timeout().map(Instant::from_std);
-        let sessions = self.sessions.iter().flat_map(|session| [session.reconnect_at, session.candidates_at]);
+        let sessions =
+            self.sessions.iter().flat_map(|session| [session.reconnect_at, session.candidates_at, session.avatar_at]);
         [mesh].into_iter().chain(sessions).flatten().min().unwrap_or_else(|| Instant::now() + IDLE_TICK)
     }
 
@@ -516,7 +522,8 @@ impl Daemon {
 
     fn send_avatar(&mut self, index: usize) {
         let image = self.avatar.clone().unwrap_or_default();
-        self.internal(index, ClientKind::SetAvatar(Avatar { key: Vec::new(), image }), Internal::Ignore);
+        self.sessions[index].avatar_at = None;
+        self.internal(index, ClientKind::SetAvatar(Avatar { key: Vec::new(), image }), Internal::SetAvatar);
     }
 
     /// Sends a request whose reply the daemon handles itself.
@@ -915,6 +922,7 @@ impl Daemon {
         session.welcome = None;
         session.reconnect_at = None;
         session.candidates_at = None;
+        session.avatar_at = None;
         session.candidates.clear();
         session.state = State::default();
         session.fail_pending(Failure::NotConnected);
@@ -959,6 +967,7 @@ impl Daemon {
                 session.welcome = None;
                 session.latency = None;
                 session.candidates_at = None;
+                session.avatar_at = None;
                 session.candidates.clear();
                 session.fail_pending(Failure::NotConnected);
                 if session.up {
@@ -1070,6 +1079,9 @@ impl Daemon {
         {
             match (purpose, message.kind) {
                 (Internal::Refresh, Some(ServerKind::State(state))) => self.apply_state(index, state),
+                (Internal::SetAvatar, Some(ServerKind::Failure(f))) if f.code() == ErrorCode::RateLimited => {
+                    self.sessions[index].avatar_at = Some(Instant::now() + AVATAR_RETRY);
+                }
                 (Internal::Avatar(id), kind) => {
                     self.fetching.remove(&id);
                     match kind {
@@ -1143,6 +1155,9 @@ impl Daemon {
         for index in 0..self.sessions.len() {
             if self.sessions[index].reconnect_at.is_some_and(|at| now >= at) {
                 self.connect(index);
+            }
+            if self.sessions[index].avatar_at.is_some_and(|at| now >= at) {
+                self.send_avatar(index);
             }
             if self.sessions[index].candidates_at.is_some_and(|at| now >= at) {
                 self.sessions[index].candidates_at = Some(now + CANDIDATES_INTERVAL);
