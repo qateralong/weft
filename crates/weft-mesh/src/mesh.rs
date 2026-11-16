@@ -271,8 +271,12 @@ impl Mesh {
         self.public
     }
 
+    /// Our address as the servers see it, preferring a public one: a server on this machine or
+    /// in the LAN sees a local address.
     pub fn observed(&self) -> Option<SocketAddr> {
-        self.servers.values().find_map(|server| server.observed)
+        let seen =
+            || self.servers.values().filter_map(|server| server.observed).filter(|addr| !addr.ip().is_loopback());
+        seen().find(|addr| is_public(addr.ip())).or_else(|| seen().next())
     }
 
     pub fn set_server(&mut self, now: Instant, id: ServerId, udp: SocketAddr, key: PublicKey, token: Token) {
@@ -334,7 +338,10 @@ impl Mesh {
             let Some(peer) = self.peers.get_mut(&id) else { continue };
             peer.online = config.online;
             if peer.address != config.address {
-                self.by_address.remove(&peer.address);
+                // Two peers may swap addresses: keep the entry another peer already took.
+                if self.by_address.get(&peer.address) == Some(&id) {
+                    self.by_address.remove(&peer.address);
+                }
                 peer.address = config.address;
             }
             self.by_address.insert(config.address, id);
@@ -720,7 +727,7 @@ impl Mesh {
             return;
         };
         peer.pings.insert(tx, (to, now));
-        if track && (peer.paths.len() < MAX_PATHS || peer.paths.contains_key(&to)) {
+        if track && has_room(peer, to, now) {
             peer.paths.entry(to).or_default().pinged = Some(now);
         }
         self.outputs.push_back(Output::Udp { socket: to.socket, to: to.addr, datagram, ttl });
@@ -788,9 +795,8 @@ impl Mesh {
                 if let Ok(datagram) = disco::seal(&peer.disco, &self.public, &peer.obfs, &pong, padding, nonce) {
                     self.outputs.push_back(Output::Udp { socket: from.socket, to: from.addr, datagram, ttl: None });
                 }
-                let known = peer.paths.contains_key(&from);
-                if !known && peer.paths.len() < MAX_PATHS {
-                    peer.paths.insert(from, Path::default());
+                if has_room(peer, from, now) {
+                    peer.paths.entry(from).or_default();
                 }
                 let pinging =
                     peer.paths.get(&from).and_then(|path| path.pinged).is_some_and(|at| now < at + PING_TIMEOUT);
@@ -803,7 +809,10 @@ impl Mesh {
                 if addr != from {
                     return;
                 }
-                peer.observed = Some(observed);
+                // Punching sockets have their own NAT mappings, which say nothing of the main one.
+                if from.socket == 0 {
+                    peer.observed = Some(observed);
+                }
                 heard(peer, from, now, Some(now.duration_since(sent)));
             }
         }
@@ -842,8 +851,38 @@ impl Mesh {
     }
 }
 
+/// Whether `via` has a path or one can be added, forgetting stale ones when the table is full,
+/// so addresses left behind by roaming and NAT changes do not lock out new ones.
+fn has_room(peer: &mut Peer, via: Via, now: Instant) -> bool {
+    if peer.paths.contains_key(&via) || peer.paths.len() < MAX_PATHS {
+        return true;
+    }
+    let best = peer.best;
+    peer.paths.retain(|&known, path| {
+        let last = path.heard.max(path.pinged);
+        Some(known) == best || last.is_some_and(|last| now < last + PATH_STALE_AFTER)
+    });
+    peer.paths.len() < MAX_PATHS
+}
+
+fn is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64)
+        }
+        IpAddr::V6(ip) => {
+            let first = ip.segments()[0];
+            !(ip.is_loopback() || ip.is_unspecified() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80)
+        }
+    }
+}
+
 fn heard(peer: &mut Peer, from: Via, now: Instant, latency: Option<Duration>) {
-    if !peer.paths.contains_key(&from) && peer.paths.len() >= MAX_PATHS {
+    if !has_room(peer, from, now) {
         return;
     }
     let path = peer.paths.entry(from).or_default();
@@ -879,4 +918,60 @@ fn ipv4_destination(packet: &[u8]) -> Option<Ipv4Addr> {
 
 fn ipv4_source(packet: &[u8]) -> Option<Ipv4Addr> {
     (packet.len() >= 20 && packet[0] >> 4 == 4).then(|| Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mesh(now: Instant) -> Mesh {
+        Mesh::with_seed(StaticKeypair::from_secret(&[1; 32]), now, SystemTime::now(), 7)
+    }
+
+    fn config(n: u8, address: Ipv4Addr) -> PeerConfig {
+        let key = StaticKeypair::from_secret(&[n; 32]).public();
+        PeerConfig { key, address, online: true, candidates: Vec::new(), endpoint: None, server: 1 }
+    }
+
+    #[test]
+    fn peers_swap_addresses() {
+        let now = Instant::now();
+        let mut mesh = mesh(now);
+        let (a, b) = (Ipv4Addr::new(10, 0, 0, 2), Ipv4Addr::new(10, 0, 0, 3));
+        mesh.update_peers(now, vec![config(2, a), config(3, b)]);
+        mesh.update_peers(now, vec![config(2, b), config(3, a)]);
+        assert_eq!(mesh.by_address.len(), 2);
+        for (&address, id) in &mesh.by_address {
+            assert_eq!(mesh.peers[id].address, address);
+        }
+    }
+
+    #[test]
+    fn stale_paths_make_room() {
+        let now = Instant::now();
+        let mut mesh = mesh(now);
+        mesh.update_peers(now, vec![config(2, Ipv4Addr::new(10, 0, 0, 2))]);
+        let peer = mesh.peers.values_mut().next().unwrap();
+        let via = |port| Via::main(SocketAddr::from(([198, 51, 100, 1], port)));
+        for port in 0..MAX_PATHS as u16 {
+            heard(peer, via(port), now, None);
+        }
+        let later = now + PATH_STALE_AFTER * 2;
+        heard(peer, via(1000), later, Some(Duration::from_millis(5)));
+        assert_eq!(peer.best, Some(via(1000)));
+    }
+
+    #[test]
+    fn observed_prefers_public() {
+        let now = Instant::now();
+        let mut mesh = mesh(now);
+        let key = StaticKeypair::from_secret(&[9; 32]).public();
+        let token = Token::default();
+        mesh.set_server(now, 1, "127.0.0.1:1".parse().unwrap(), key, token);
+        mesh.set_server(now, 2, "203.0.113.1:1".parse().unwrap(), key, token);
+        mesh.servers.get_mut(&1).unwrap().observed = Some("127.0.0.1:5000".parse().unwrap());
+        assert_eq!(mesh.observed(), None);
+        mesh.servers.get_mut(&2).unwrap().observed = Some("198.51.100.7:6000".parse().unwrap());
+        assert_eq!(mesh.observed(), Some("198.51.100.7:6000".parse().unwrap()));
+    }
 }
