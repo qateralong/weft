@@ -1276,7 +1276,10 @@ impl Daemon {
                 Output::TcpRelay { server, to, packet } => {
                     if let Some(index) = self.session_by_id(server) {
                         let relay = RelayPacket { address: u32::from(to), packet };
-                        self.send_control(index, ClientMessage { id: 0, kind: Some(ClientKind::Relay(relay)) });
+                        let message = ClientMessage { id: 0, kind: Some(ClientKind::Relay(relay)) };
+                        if let Some(control) = &self.sessions[index].control {
+                            control.send_relay(message);
+                        }
                     }
                 }
                 Output::CallMeMaybe { server, peer } => {

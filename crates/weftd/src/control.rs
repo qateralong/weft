@@ -21,6 +21,8 @@ const PING_INTERVAL: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const HELLO_ID: u32 = u32::MAX;
 const PING_ID: u32 = u32::MAX - 1;
+/// Relayed packets waiting for a slow connection; more are dropped, as a congested link would.
+const RELAY_QUEUE: usize = 256;
 
 #[derive(Debug)]
 pub enum ControlEvent {
@@ -37,6 +39,7 @@ pub enum ControlEvent {
 
 pub struct Control {
     commands: mpsc::UnboundedSender<ClientMessage>,
+    relay: mpsc::Sender<ClientMessage>,
     task: JoinHandle<()>,
 }
 
@@ -50,14 +53,16 @@ impl Control {
         events: mpsc::UnboundedSender<(u64, ControlEvent)>,
     ) -> Self {
         let (commands, rx) = mpsc::unbounded_channel();
+        let (relay, relay_rx) = mpsc::channel(RELAY_QUEUE);
         let task = tokio::spawn(async move {
-            let reason = match run(link, transport, keypair, hello, generation, &events, rx).await {
+            let queues = Queues { commands: rx, relay: relay_rx };
+            let reason = match run(link, transport, keypair, hello, generation, &events, queues).await {
                 Ok(()) => "closed".to_string(),
                 Err(error) => error.to_string(),
             };
             let _ = events.send((generation, ControlEvent::Closed(reason)));
         });
-        Self { commands, task }
+        Self { commands, relay, task }
     }
 
     /// Measures the round trip to the server now instead of at the next regular ping.
@@ -67,6 +72,11 @@ impl Control {
 
     pub fn send(&self, message: ClientMessage) -> bool {
         self.commands.send(message).is_ok()
+    }
+
+    /// Queues a relayed packet, dropping it when the connection falls behind.
+    pub fn send_relay(&self, message: ClientMessage) -> bool {
+        self.relay.try_send(message).is_ok()
     }
 }
 
@@ -92,6 +102,12 @@ enum Error {
     Protocol,
 }
 
+/// What the daemon sends: requests in order, relayed packets in a queue that may drop.
+struct Queues {
+    commands: mpsc::UnboundedReceiver<ClientMessage>,
+    relay: mpsc::Receiver<ClientMessage>,
+}
+
 type Reader = Box<dyn AsyncRead + Unpin + Send>;
 type Writer = Box<dyn AsyncWrite + Unpin + Send>;
 
@@ -102,8 +118,9 @@ async fn run(
     hello: Hello,
     generation: u64,
     events: &mpsc::UnboundedSender<(u64, ControlEvent)>,
-    mut commands: mpsc::UnboundedReceiver<ClientMessage>,
+    queues: Queues,
 ) -> Result<(), Error> {
+    let Queues { mut commands, mut relay } = queues;
     let host = match &link.host {
         Host::Domain(name) => name.clone(),
         Host::Ipv4(ip) => ip.to_string(),
@@ -111,9 +128,20 @@ async fn run(
     };
     let mut addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), link.port)).await?.collect();
     addrs.sort_by_key(|addr| addr.is_ipv6());
-    let server = *addrs.first().ok_or(Error::Resolve)?;
-
-    let stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(server)).await.map_err(|_| Error::Timeout)??;
+    // Every address the name has is tried in turn, IPv4 first.
+    let mut last = Error::Resolve;
+    let mut connected = None;
+    for addr in addrs {
+        match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => {
+                connected = Some((addr, stream));
+                break;
+            }
+            Ok(Err(error)) => last = error.into(),
+            Err(_) => last = Error::Timeout,
+        }
+    }
+    let (server, stream) = connected.ok_or(last)?;
     stream.set_nodelay(true)?;
     let (mut reader, mut writer): (Reader, Writer) = match transport {
         Transport::Tls => {
@@ -184,6 +212,7 @@ async fn run(
                 }
                 None => return Ok(()),
             },
+            Some(packet) = relay.recv() => packet,
             _ = ping.tick() => {
                 *ping_sent.lock().unwrap() = Some(Instant::now());
                 ClientMessage { id: PING_ID, kind: Some(ClientKind::Ping(Empty {})) }
