@@ -534,7 +534,7 @@ impl App {
             if let Err(error) = app.send(Request::Refresh { address: None }, None).await {
                 app.toast(&error, true);
             }
-            daemon::background(tokio::time::sleep(REFRESH_WAIT)).await;
+            daemon::sleep(REFRESH_WAIT).await;
             app.refresh().await;
             app.ui().set_refreshing(false);
         });
@@ -554,7 +554,7 @@ impl App {
         let app = self.clone();
         self.spawn(async move {
             let _ = app.send(Request::Refresh { address: Some(address) }, None).await;
-            daemon::background(tokio::time::sleep(REFRESH_WAIT)).await;
+            daemon::sleep(REFRESH_WAIT).await;
             app.refresh().await;
         });
     }
@@ -592,7 +592,7 @@ impl App {
                 };
                 let Some(pixels) = pixels else {
                     // The daemon may still be fetching it from the server: ask again later.
-                    daemon::background(tokio::time::sleep(Duration::from_secs(5))).await;
+                    daemon::sleep(Duration::from_secs(5)).await;
                     app.fetching.borrow_mut().remove(&id);
                     return;
                 };
@@ -974,7 +974,7 @@ impl App {
             if Instant::now() > until {
                 return Err(self.tr("gui-server-unreachable"));
             }
-            daemon::background(tokio::time::sleep(Duration::from_millis(700))).await;
+            daemon::sleep(Duration::from_millis(700)).await;
         }
     }
 

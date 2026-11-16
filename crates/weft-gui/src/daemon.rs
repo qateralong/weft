@@ -15,6 +15,11 @@ pub async fn background<T: Send + 'static>(future: impl Future<Output = T> + Sen
     RUNTIME.spawn(future).await.expect("background task")
 }
 
+/// Waits on the runtime: `tokio::time::sleep` panics if created on the UI thread.
+pub async fn sleep(duration: std::time::Duration) {
+    background(async move { tokio::time::sleep(duration).await }).await
+}
+
 #[cfg(windows)]
 pub fn spawn(future: impl Future<Output = ()> + Send + 'static) {
     RUNTIME.spawn(future);
