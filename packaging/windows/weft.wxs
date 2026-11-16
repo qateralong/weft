@@ -12,8 +12,11 @@
 
     <!-- After an interactive install or an update from the app, start the new version for the user. -->
     <CustomAction Id="LaunchApp" Directory="INSTALLFOLDER" ExeCommand="&quot;[INSTALLFOLDER]weft-gui.exe&quot;" Return="asyncNoWait" />
+    <!-- On removal, take away the firewall and resolver rules weftd added. -->
+    <CustomAction Id="Cleanup" Directory="INSTALLFOLDER" ExeCommand="&quot;[INSTALLFOLDER]weftd.exe&quot; service cleanup" Execute="deferred" Impersonate="no" Return="ignore" />
     <InstallExecuteSequence>
       <Custom Action="LaunchApp" After="InstallFinalize" Condition="NOT REMOVE AND UILevel &gt; 2" />
+      <Custom Action="Cleanup" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
 
     <Feature Id="Main">
