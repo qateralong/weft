@@ -463,6 +463,8 @@ async fn approval_roles_and_settings() {
     b.request(settings(Some(true), None, None)).await.unwrap();
     let locked = c.ask(ClientKind::JoinNetwork(credentials("lan", "secret"))).await;
     assert_eq!(locked.err(), Some(ErrorCode::NetworkLocked));
+    let guessed = c.ask(ClientKind::JoinNetwork(credentials("lan", "guess"))).await;
+    assert_eq!(guessed.err(), Some(ErrorCode::WrongPassword));
 
     a.request(settings(Some(false), Some(false), Some("changed"))).await.unwrap();
     let wrong = c.ask(ClientKind::JoinNetwork(credentials("lan", "secret"))).await;

@@ -513,7 +513,7 @@ async fn join(
             hub.limiter.failed(ip, &limit_key, now);
             return Err(ErrorCode::NetworkNotFound);
         };
-        admissible(&hub, &network, &key)?;
+        // Membership, bans and limits are told only after the password, in admit().
         network
     };
     let hash = network.password_hash.clone();
