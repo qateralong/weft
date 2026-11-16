@@ -841,6 +841,10 @@ impl Daemon {
         self.refresh();
     }
 
+    fn observed_ip(&self) -> Option<IpAddr> {
+        self.mesh.observed().map(|addr| addr.ip())
+    }
+
     fn is_hosted(&self, index: usize) -> bool {
         self.hosted.as_ref().is_some_and(|hosted| self.sessions[index].link == hosted.local_link())
     }
@@ -849,7 +853,7 @@ impl Daemon {
     fn public_link(&self, index: usize) -> Link {
         match &self.hosted {
             Some(hosted) if self.is_hosted(index) => hosted
-                .share(self.settings.host.address.as_deref())
+                .share(self.settings.host.address.as_deref(), self.observed_ip())
                 .0
                 .unwrap_or_else(|| self.sessions[index].link.clone()),
             _ => self.sessions[index].link.clone(),
@@ -1366,7 +1370,7 @@ impl Daemon {
             .collect();
         let host = self.hosted.as_ref().map(|hosted| {
             let address = self.settings.host.address.clone();
-            let (link, reach) = hosted.share(address.as_deref());
+            let (link, reach) = hosted.share(address.as_deref(), self.observed_ip());
             HostStatus {
                 link: link.map(|link| link.to_string()),
                 port: hosted.port,

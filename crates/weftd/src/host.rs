@@ -22,6 +22,19 @@ pub struct Hosted {
     panel: Option<PanelAccess>,
     tcp: PortMapper,
     udp: PortMapper,
+    /// Firewall rules added for the port, taken away when hosting stops.
+    opened: std::sync::Arc<std::sync::Mutex<Vec<Rule>>>,
+}
+
+impl Drop for Hosted {
+    fn drop(&mut self) {
+        let rules = std::mem::take(&mut *self.opened.lock().unwrap());
+        // ufw rules outlive the daemon, so they go before it exits; PowerShell is too slow to wait.
+        #[cfg(windows)]
+        std::thread::spawn(move || close_firewall(rules));
+        #[cfg(not(windows))]
+        close_firewall(rules);
+    }
 }
 
 /// Starts the server, waiting a moment when the port is still held by a server just stopped.
@@ -53,8 +66,15 @@ impl Hosted {
                 Ok(server) => {
                     let port = server.tcp_addr.port();
                     tracing::info!(port, key = %server.public_key, "hosting a server");
-                    open_firewall(port);
+                    // Firewall tools are slow external programs: they run aside from the daemon.
+                    let opened: std::sync::Arc<std::sync::Mutex<Vec<Rule>>> = std::sync::Arc::default();
+                    let record = std::sync::Arc::clone(&opened);
+                    std::thread::spawn(move || {
+                        let rules = open_firewall(port);
+                        record.lock().unwrap().extend(rules);
+                    });
                     return Ok(Self {
+                        opened,
                         port,
                         key: server.public_key,
                         panel: panel(dir, port),
@@ -87,13 +107,16 @@ impl Hosted {
     }
 
     /// The link to give others and how far it reaches. A configured address wins, then the
-    /// router's public address, then this computer's address in the local network.
-    pub fn share(&self, address: Option<&str>) -> (Option<Link>, Reach) {
+    /// router's public address, then this computer's address in the local network. `observed`
+    /// is this device's address as other servers see it, for routers that forward the port
+    /// without telling their address.
+    pub fn share(&self, address: Option<&str>, observed: Option<IpAddr>) -> (Option<Link>, Reach) {
         let link = |host: &str| loom::server_link(host, self.port, &self.key).ok();
         if let Some(address) = address.map(str::trim).filter(|address| !address.is_empty()) {
             return (link(address), Reach::Public);
         }
-        let external = self.tcp.current().and(self.udp.current()).and_then(|mapped| mapped.ip);
+        let mapped = self.tcp.current().and(self.udp.current());
+        let external = mapped.as_ref().and_then(|mapped| mapped.ip).or(mapped.and(observed));
         let reach = match external {
             Some(ip) if is_public(ip) => return (link(&ip.to_string()), Reach::Public),
             Some(_) => Reach::Behind,
@@ -132,43 +155,97 @@ fn is_public(ip: IpAddr) -> bool {
     }
 }
 
+/// A firewall rule this daemon added.
+enum Rule {
+    #[cfg(target_os = "linux")]
+    Firewalld(String),
+    #[cfg(target_os = "linux")]
+    Ufw(String),
+    #[cfg(windows)]
+    Windows,
+}
+
 #[cfg(target_os = "linux")]
-fn open_firewall(port: u16) {
-    use std::process::Command;
-    let quiet = |program: &str, args: &[&str]| {
-        Command::new(program).args(args).output().is_ok_and(|output| output.status.success())
-    };
-    if quiet("firewall-cmd", &["--state"]) {
-        let ports = [format!("--add-port={port}/tcp"), format!("--add-port={port}/udp")];
-        let opened = quiet("firewall-cmd", &[&ports[0], &ports[1]]);
-        tracing::info!(port, opened, "firewalld");
+fn quiet(program: &str, args: &[&str]) -> Option<std::process::Output> {
+    std::process::Command::new(program).args(args).output().ok().filter(|output| output.status.success())
+}
+
+/// Opens the port in firewalld or ufw and returns the rules that were not there before.
+#[cfg(target_os = "linux")]
+fn open_firewall(port: u16) -> Vec<Rule> {
+    let mut rules = Vec::new();
+    let specs = [format!("{port}/tcp"), format!("{port}/udp")];
+    if quiet("firewall-cmd", &["--state"]).is_some() {
+        for spec in &specs {
+            let known = quiet("firewall-cmd", &[&format!("--query-port={spec}")]).is_some();
+            if !known && quiet("firewall-cmd", &[&format!("--add-port={spec}")]).is_some() {
+                rules.push(Rule::Firewalld(spec.clone()));
+            }
+        }
+        tracing::info!(port, added = rules.len(), "firewalld");
     }
-    let ufw = Command::new("ufw").arg("status").output().ok();
+    let ufw = quiet("ufw", &["status"]);
     if ufw.is_some_and(|output| String::from_utf8_lossy(&output.stdout).contains("Status: active")) {
-        let opened =
-            quiet("ufw", &["allow", &format!("{port}/tcp")]) && quiet("ufw", &["allow", &format!("{port}/udp")]);
-        tracing::info!(port, opened, "ufw");
+        for spec in &specs {
+            // ufw says "Skipping adding existing rule" for a rule the user already has.
+            let added = quiet("ufw", &["allow", spec])
+                .is_some_and(|output| !String::from_utf8_lossy(&output.stdout).contains("Skipping"));
+            if added {
+                rules.push(Rule::Ufw(spec.clone()));
+            }
+        }
+        tracing::info!(port, "ufw");
     }
+    rules
 }
 
 #[cfg(windows)]
-fn open_firewall(port: u16) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+fn open_firewall(port: u16) -> Vec<Rule> {
     let script = format!(
         "Remove-NetFirewallRule -DisplayName 'Weft server' -ErrorAction SilentlyContinue; \
          New-NetFirewallRule -DisplayName 'Weft server' -Direction Inbound -Action Allow -Profile Any \
-         -Protocol TCP -LocalPort {port} | Out-Null"
+         -Protocol TCP -LocalPort {port} | Out-Null; \
+         New-NetFirewallRule -DisplayName 'Weft server' -Direction Inbound -Action Allow -Profile Any \
+         -Protocol UDP -LocalPort {port} | Out-Null"
     );
-    let status = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .status();
+    let status = powershell(&script);
     tracing::info!(port, ?status, "windows firewall rule for the server");
+    vec![Rule::Windows]
+}
+
+#[cfg(windows)]
+fn powershell(script: &str) -> std::io::Result<std::process::ExitStatus> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
-fn open_firewall(_port: u16) {}
+fn open_firewall(_port: u16) -> Vec<Rule> {
+    Vec::new()
+}
+
+fn close_firewall(rules: Vec<Rule>) {
+    for rule in rules {
+        match rule {
+            #[cfg(target_os = "linux")]
+            Rule::Firewalld(spec) => {
+                quiet("firewall-cmd", &[&format!("--remove-port={spec}")]);
+            }
+            #[cfg(target_os = "linux")]
+            Rule::Ufw(spec) => {
+                quiet("ufw", &["delete", "allow", &spec]);
+            }
+            #[cfg(windows)]
+            Rule::Windows => {
+                let _ = powershell("Remove-NetFirewallRule -DisplayName 'Weft server' -ErrorAction SilentlyContinue");
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -194,7 +271,7 @@ mod tests {
             }
         };
         assert_eq!(hosted.local_link().host, Host::Ipv4(Ipv4Addr::LOCALHOST));
-        let (link, reach) = hosted.share(Some("vpn.example.com"));
+        let (link, reach) = hosted.share(Some("vpn.example.com"), None);
         assert_eq!(reach, Reach::Public);
         assert_eq!(link.unwrap(), loom::server_link("vpn.example.com", hosted.port, &hosted.key).unwrap());
         let key = hosted.key;
