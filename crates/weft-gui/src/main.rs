@@ -19,7 +19,7 @@ mod ui {
 }
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -114,6 +114,8 @@ struct App {
     /// Pictures of devices by id, and the ids being fetched.
     pictures: RefCell<view::Pictures>,
     fetching: RefCell<HashSet<String>>,
+    /// Pictures the daemon did not have yet, by how many times in a row.
+    misses: RefCell<HashMap<String, u32>>,
     context: RefCell<Context>,
     notifier: RefCell<notify::Notifier>,
     problem: Cell<DaemonState>,
@@ -182,6 +184,7 @@ fn main() -> Result<(), slint::PlatformError> {
         status: RefCell::new(None),
         pictures: RefCell::new(view::Pictures::new()),
         fetching: RefCell::new(HashSet::new()),
+        misses: RefCell::new(HashMap::new()),
         context: RefCell::new(Context::default()),
         notifier: RefCell::new(notify::Notifier::default()),
         problem: Cell::new(DaemonState::Ok),
@@ -591,11 +594,19 @@ impl App {
                     None => None,
                 };
                 let Some(pixels) = pixels else {
-                    // The daemon may still be fetching it from the server: ask again later.
-                    daemon::sleep(Duration::from_secs(5)).await;
+                    // The daemon may still be fetching it from the server: ask again later, less
+                    // often each time, as it only tries again on the server's next state.
+                    let misses = {
+                        let mut misses = app.misses.borrow_mut();
+                        let count = misses.entry(id.clone()).or_default();
+                        *count = (*count + 1).min(6);
+                        *count
+                    };
+                    daemon::sleep(Duration::from_secs(5 << misses)).await;
                     app.fetching.borrow_mut().remove(&id);
                     return;
                 };
+                app.misses.borrow_mut().remove(&id);
                 app.fetching.borrow_mut().remove(&id);
                 app.pictures.borrow_mut().insert(id, slint::Image::from_rgba8(pixels));
                 app.render();
