@@ -446,14 +446,17 @@ async fn approval_roles_and_settings() {
     let code = a.invite("lan", 0).await.unwrap();
     assert!(matches!(c.ask(ClientKind::RedeemInvite(InviteCode { code })).await, Ok(ServerKind::Pending(_))));
     a.state_where(|state| state.networks[0].requests == 2).await;
+    let Ok(ServerKind::State(state)) = c.ask(ClientKind::Refresh(Empty {})).await else { panic!() };
+    assert_eq!(state.waiting, ["lan"]);
     let Ok(ServerKind::Requests(list)) = a.ask(ClientKind::ListRequests(lan())).await else { panic!() };
     let names: Vec<&str> = list.devices.iter().map(|device| device.nickname.as_str()).collect();
     assert_eq!(names, ["bob", "carol"]);
     assert_eq!(b.ask(ClientKind::ListRequests(lan())).await.err(), Some(ErrorCode::NotMember));
 
     a.request(ClientKind::Approve(member("lan", "bob"))).await.unwrap();
-    b.state_where(|state| state.networks.len() == 1).await;
+    b.state_where(|state| state.networks.len() == 1 && state.waiting.is_empty()).await;
     a.request(ClientKind::Deny(member("lan", "carol"))).await.unwrap();
+    c.state_where(|state| state.waiting.is_empty() && state.networks.is_empty()).await;
     assert_eq!(a.request(ClientKind::Deny(member("lan", "carol"))).await, Err(ErrorCode::MemberNotFound));
 
     a.request(role("bob", Role::Admin)).await.unwrap();

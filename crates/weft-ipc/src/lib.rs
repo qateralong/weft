@@ -328,6 +328,9 @@ pub struct ServerStatus {
     /// Whether this is the public Weft server.
     #[serde(default)]
     pub public: bool,
+    /// Networks where this device asked to join and waits for approval.
+    #[serde(default)]
+    pub waiting: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

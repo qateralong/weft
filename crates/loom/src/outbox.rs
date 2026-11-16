@@ -73,7 +73,7 @@ mod tests {
         assert_eq!(accepted, 15);
         assert!(tokio::time::timeout(wait, outbox.overflowed()).await.is_err());
         let network = Network { name: "x".repeat(70_000), ..Default::default() };
-        let state = State { networks: vec![network], peers: Vec::new() };
+        let state = State { networks: vec![network], peers: Vec::new(), waiting: Vec::new() };
         assert!(!outbox.send(ServerMessage::push(ServerKind::State(state))));
         tokio::time::timeout(wait, outbox.overflowed()).await.unwrap();
         assert!(inbox.recv().await.is_some());

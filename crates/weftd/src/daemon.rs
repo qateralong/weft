@@ -1365,6 +1365,7 @@ impl Daemon {
                     networks: self.networks(session),
                     hosted: self.is_hosted(index),
                     public: self.is_public(index),
+                    waiting: session.state.waiting.clone(),
                 }
             })
             .collect();
@@ -1703,7 +1704,7 @@ mod tests {
             details: muted.iter().map(|&n| MemberDetails { key: vec![n], role: 0, muted_until: 9 }).collect(),
             ..Default::default()
         };
-        let state = |networks| State { networks, peers: Vec::new() };
+        let state = |networks| State { networks, peers: Vec::new(), waiting: Vec::new() };
         let own = [0u8];
         let alone = state(vec![network(&[0, 1, 2], &[2])]);
         assert_eq!(muted_peers(&alone, &own), HashSet::from([[2u8].as_slice()]));

@@ -157,6 +157,7 @@ pub fn servers(status: &Status) -> Vec<ServerStatus> {
                 networks: Vec::new(),
                 hosted: true,
                 public: false,
+                waiting: Vec::new(),
             },
         );
     }
@@ -382,6 +383,7 @@ pub fn demo() -> Status {
             address: Some(Ipv4Addr::new(100, 64, 0, 1)),
             hosted: false,
             public: true,
+            waiting: Vec::new(),
             networks: vec![
                 NetworkStatus {
                     name: "friends".into(),

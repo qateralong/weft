@@ -523,6 +523,9 @@ fn print_status(l: &Localizer, status: &Status) {
             println!("\n{}", l.tr("status-no-networks"));
         }
         print_networks(l, &server.networks);
+        if !server.waiting.is_empty() {
+            println!("\n{}", l.tr_args("status-waiting", &[("networks", &server.waiting.join(", "))]));
+        }
     }
 }
 

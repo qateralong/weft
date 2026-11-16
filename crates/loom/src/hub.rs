@@ -326,7 +326,8 @@ impl Hub {
             })
             .collect();
         peers.sort_by_key(|peer| peer.address);
-        Ok(State { networks, peers })
+        let waiting = self.db.waiting(key)?;
+        Ok(State { networks, peers, waiting })
     }
 
     /// Sends these devices their state now: membership and settings changes are expected at once.

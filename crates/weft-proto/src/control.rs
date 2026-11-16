@@ -339,6 +339,9 @@ pub struct State {
     pub networks: Vec<Network>,
     #[prost(message, repeated, tag = "2")]
     pub peers: Vec<Peer>,
+    /// Networks where this device's join request waits for approval.
+    #[prost(string, repeated, tag = "3")]
+    pub waiting: Vec<String>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -482,6 +485,7 @@ mod tests {
                 candidates: vec!["192.168.1.5:41000".parse::<SocketAddr>().unwrap().into()],
                 avatar: String::new(),
             }],
+            waiting: vec!["club".into()],
         };
         let message = ServerMessage::push(ServerKind::State(state));
         let decoded = decode::<ServerMessage>(&encode(&message)).unwrap();

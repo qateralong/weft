@@ -467,6 +467,15 @@ impl Db {
         self.device_list("requests", network)
     }
 
+    /// Names of the networks where the device asked to join and waits.
+    pub fn waiting(&self, device: &PublicKey) -> Result<Vec<String>, DbError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT n.name FROM requests r JOIN networks n ON n.id = r.network WHERE r.device = ?1 ORDER BY n.name",
+        )?;
+        let names = stmt.query_map([device.as_bytes()], |row| row.get(0))?;
+        Ok(names.collect::<Result<_, _>>()?)
+    }
+
     pub fn is_member(&self, network: i64, device: &PublicKey) -> Result<bool, DbError> {
         Ok(self
             .conn

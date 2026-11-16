@@ -562,6 +562,7 @@ fn admit(hub: &mut Hub, network: &NetworkRow, key: &PublicKey) -> Result<bool, E
     admissible(hub, network, key)?;
     if network.approval {
         hub.db.add_request(network.id, key).map_err(internal)?;
+        hub.notify(&BTreeSet::from([*key]));
         let admins: BTreeSet<PublicKey> = hub
             .db
             .members(network.id)
@@ -703,6 +704,8 @@ fn deny(hub: &mut Hub, key: PublicKey, request: MemberAction) -> Result<(), Erro
     let target = &requests[resolve(requests.iter(), &request.member)?];
     hub.db.remove_request(network.id, &target.key).map_err(internal)?;
     hub.notify_related(&key);
+    // The device learns from its state that it no longer waits.
+    hub.notify(&BTreeSet::from([target.key]));
     Ok(())
 }
 

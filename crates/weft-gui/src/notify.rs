@@ -10,20 +10,44 @@ use crate::settings::Notify;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    Online { nickname: String, network: String },
-    Offline { nickname: String, network: String },
-    Joined { nickname: String, network: String },
-    Request { network: String },
+    Online {
+        nickname: String,
+        network: String,
+        address: Ipv4Addr,
+    },
+    Offline {
+        nickname: String,
+        network: String,
+        address: Ipv4Addr,
+    },
+    Joined {
+        nickname: String,
+        network: String,
+        address: Ipv4Addr,
+    },
+    Request {
+        network: String,
+    },
+    /// This device's own join request was answered.
+    Approved {
+        network: String,
+    },
+    Denied {
+        network: String,
+    },
     Disconnected,
     Reconnected,
 }
 
 impl Event {
-    /// The member and whether this event says they are online.
-    fn presence(&self) -> Option<(&str, bool)> {
+    /// The member, by nickname and address so namesakes stay apart, and whether this event says
+    /// they are online.
+    fn presence(&self) -> Option<((&str, Ipv4Addr), bool)> {
         match self {
-            Event::Online { nickname, .. } | Event::Joined { nickname, .. } => Some((nickname, true)),
-            Event::Offline { nickname, .. } => Some((nickname, false)),
+            Event::Online { nickname, address, .. } | Event::Joined { nickname, address, .. } => {
+                Some(((nickname, *address), true))
+            }
+            Event::Offline { nickname, address, .. } => Some(((nickname, *address), false)),
             _ => None,
         }
     }
@@ -34,23 +58,25 @@ impl Event {
             Event::Online { .. } => "online",
             Event::Offline { .. } => "offline",
             Event::Joined { .. } => "joined",
-            Event::Request { .. } => "requests",
+            Event::Request { .. } | Event::Approved { .. } | Event::Denied { .. } => "requests",
             Event::Disconnected | Event::Reconnected => "connection",
         }
     }
 
     fn text(&self, l: &Localizer) -> String {
         match self {
-            Event::Online { nickname, network } => {
+            Event::Online { nickname, network, .. } => {
                 l.tr_args("notify-online", &[("nickname", nickname), ("network", network)])
             }
-            Event::Offline { nickname, network } => {
+            Event::Offline { nickname, network, .. } => {
                 l.tr_args("notify-offline", &[("nickname", nickname), ("network", network)])
             }
-            Event::Joined { nickname, network } => {
+            Event::Joined { nickname, network, .. } => {
                 l.tr_args("notify-joined", &[("nickname", nickname), ("network", network)])
             }
             Event::Request { network } => l.tr_args("notify-request", &[("network", network)]),
+            Event::Approved { network } => l.tr_args("notify-approved", &[("network", network)]),
+            Event::Denied { network } => l.tr_args("notify-denied", &[("network", network)]),
             Event::Disconnected => l.tr("notify-disconnected"),
             Event::Reconnected => l.tr("notify-reconnected"),
         }
@@ -85,6 +111,14 @@ pub fn events(previous: &Status, next: &Status, lost: bool) -> Vec<Event> {
         .flat_map(|(id, network)| network.members.iter().map(move |m| ((id.as_str(), m.address), m.link)))
         .collect();
     let mut events = Vec::new();
+    for server in &next.servers {
+        let Some(known) = previous.servers.iter().find(|known| known.host == server.host) else { continue };
+        for name in known.waiting.iter().filter(|name| !server.waiting.contains(name)) {
+            let joined = server.networks.iter().any(|network| network.name.eq_ignore_ascii_case(name));
+            let network = name.clone();
+            events.push(if joined { Event::Approved { network } } else { Event::Denied { network } });
+        }
+    }
     let mut reported = HashSet::new();
     for (id, network) in &new {
         let Some((_, known)) = old.iter().find(|(known, _)| known == id) else { continue };
@@ -92,11 +126,15 @@ pub fn events(previous: &Status, next: &Status, lost: bool) -> Vec<Event> {
             events.push(Event::Request { network: network.name.clone() });
         }
         for member in &network.members {
-            let (nickname, network) = (member.nickname.clone(), network.name.clone());
-            let event = match before.get(&(id.as_str(), member.address)) {
-                None => Some(Event::Joined { nickname, network }),
-                Some(&link) if !online(link) && online(member.link) => Some(Event::Online { nickname, network }),
-                Some(&link) if online(link) && !online(member.link) => Some(Event::Offline { nickname, network }),
+            let (nickname, network, address) = (member.nickname.clone(), network.name.clone(), member.address);
+            let event = match before.get(&(id.as_str(), address)) {
+                None => Some(Event::Joined { nickname, network, address }),
+                Some(&link) if !online(link) && online(member.link) => {
+                    Some(Event::Online { nickname, network, address })
+                }
+                Some(&link) if online(link) && !online(member.link) => {
+                    Some(Event::Offline { nickname, network, address })
+                }
                 Some(_) => None,
             };
             if let Some(event) = event
@@ -114,7 +152,7 @@ pub fn events(previous: &Status, next: &Status, lost: bool) -> Vec<Event> {
 pub struct Notifier {
     previous: Option<Status>,
     lost: bool,
-    announced: HashMap<String, bool>,
+    announced: HashMap<(String, Ipv4Addr), bool>,
 }
 
 impl Notifier {
@@ -124,8 +162,8 @@ impl Notifier {
             && let Some(wanted) = wanted
         {
             for event in events(previous, status, self.lost) {
-                if let Some((nickname, online)) = event.presence()
-                    && self.announced.insert(nickname.to_string(), online) == Some(online)
+                if let Some(((nickname, address), online)) = event.presence()
+                    && self.announced.insert((nickname.to_string(), address), online) == Some(online)
                 {
                     continue;
                 }
@@ -167,6 +205,7 @@ mod tests {
             servers: vec![ServerStatus {
                 hosted: false,
                 public: false,
+                waiting: Vec::new(),
                 server: "weft://example.com".into(),
                 host: "example.com:443".into(),
                 connection,
@@ -211,9 +250,9 @@ mod tests {
             events(&before, &after, true),
             [
                 Event::Request { network: lan() },
-                Event::Online { nickname: "bob".into(), network: lan() },
-                Event::Offline { nickname: "eve".into(), network: lan() },
-                Event::Joined { nickname: "ann".into(), network: lan() },
+                Event::Online { nickname: "bob".into(), network: lan(), address: Ipv4Addr::new(100, 64, 0, 2) },
+                Event::Offline { nickname: "eve".into(), network: lan(), address: Ipv4Addr::new(100, 64, 0, 3) },
+                Event::Joined { nickname: "ann".into(), network: lan(), address: Ipv4Addr::new(100, 64, 0, 4) },
             ]
         );
         assert!(events(&after, &after, true).is_empty());
@@ -243,5 +282,16 @@ mod tests {
         assert!(events(&starting, &online, false).is_empty());
         notifier.observe(&starting, None, &l);
         assert!(notifier.lost);
+    }
+
+    #[test]
+    fn answered_requests() {
+        let mut waiting = status(Connection::Connected, &[], 0);
+        waiting.servers[0].waiting = vec!["lan".into(), "club".into()];
+        let answered = status(Connection::Connected, &[], 0);
+        assert_eq!(
+            events(&waiting, &answered, false),
+            [Event::Approved { network: "lan".into() }, Event::Denied { network: "club".into() }]
+        );
     }
 }
