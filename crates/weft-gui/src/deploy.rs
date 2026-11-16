@@ -106,18 +106,22 @@ pub async fn deploy(target: &Target, step: impl Fn(&str)) -> Result<Deployed, De
     login(&mut session, target).await?;
 
     let root = target.user == "root";
-    let mut command = String::from(if root { "bash -s --" } else { "sudo -S -p '' bash -s --" });
-    for argument in [Some(&target.host), target.binary.as_ref()].into_iter().flatten() {
-        command += &format!(" '{}'", argument.replace('\'', "'\\''"));
-    }
+    let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+    let arguments: String =
+        [Some(&target.host), target.binary.as_ref()].into_iter().flatten().map(|a| format!(" {}", quote(a))).collect();
+    let (command, input) = if root {
+        (format!("bash -s --{arguments}"), SCRIPT.to_string())
+    } else {
+        // The script goes to a file first, so stdin carries only the password: sudo without a
+        // password, or a wrong one, then never runs it as commands. ROOT tells sudo let us in.
+        let file = quote(&upload(&session, SCRIPT).await?);
+        let inner = quote("echo ROOT; exec bash \"$0\" \"$@\" < /dev/null");
+        let command =
+            format!("sudo -S -p '' -- bash -c {inner} {file}{arguments}; status=$?; rm -f {file}; exit $status");
+        (command, format!("{}\n", target.password))
+    };
     let channel = session.channel_open_session().await.map_err(other)?;
     channel.exec(true, command).await.map_err(other)?;
-    let mut input = String::new();
-    if !root {
-        input.push_str(&target.password);
-        input.push('\n');
-    }
-    input.push_str(SCRIPT);
     channel.data(input.as_bytes()).await.map_err(other)?;
     channel.eof().await.map_err(other)?;
 
@@ -128,8 +132,11 @@ pub async fn deploy(target: &Target, step: impl Fn(&str)) -> Result<Deployed, De
     let mut panel_password = None;
     let mut error = None;
     let mut status = None;
+    let mut elevated = root;
     let mut handle = |line: &str| {
-        if let Some(name) = line.strip_prefix("STEP ") {
+        if line == "ROOT" {
+            elevated = true;
+        } else if let Some(name) = line.strip_prefix("STEP ") {
             step(name.trim());
         } else if let Some(found) = line.strip_prefix("LINK ") {
             link = Some(found.trim().to_string());
@@ -159,8 +166,30 @@ pub async fn deploy(target: &Target, step: impl Fn(&str)) -> Result<Deployed, De
     let panel = panel_url.zip(panel_password).map(|(url, password)| weft_ipc::PanelAccess { url, password });
     match (link, error, status) {
         (Some(link), _, _) => Ok(Deployed { link, panel }),
+        // sudo refused the password before the script started.
+        _ if !elevated => Err(DeployError::Login),
         (None, Some(code), _) => Err(DeployError::Script(code)),
         (None, None, status) => Err(DeployError::Other(format!("installer exited with {status:?}"))),
+    }
+}
+
+/// Saves the script in a private temporary file on the server and returns its path.
+async fn upload(session: &client::Handle<KnownHosts>, script: &str) -> Result<String, DeployError> {
+    let mut channel = session.channel_open_session().await.map_err(other)?;
+    channel.exec(true, "umask 077; file=$(mktemp) && cat > \"$file\" && echo \"$file\"").await.map_err(other)?;
+    channel.data(script.as_bytes()).await.map_err(other)?;
+    channel.eof().await.map_err(other)?;
+    let mut output = Vec::new();
+    while let Some(message) = channel.wait().await {
+        if let ChannelMsg::Data { data } = message {
+            output.extend_from_slice(&data);
+        }
+    }
+    let path = String::from_utf8_lossy(&output).trim().to_string();
+    if path.starts_with('/') && !path.contains('\n') {
+        Ok(path)
+    } else {
+        Err(DeployError::Other("cannot save the installer on the server".into()))
     }
 }
 
