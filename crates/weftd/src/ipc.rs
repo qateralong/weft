@@ -136,18 +136,28 @@ pub async fn serve(listener: Listener, commands: mpsc::Sender<Command>) {
     let Listener { path, mut first } = listener;
     loop {
         if let Err(error) = first.connect().await {
+            // A failed instance stays broken: replace it rather than wait on it again.
             tracing::warn!(%error, "ipc accept failed");
             tokio::time::sleep(Duration::from_millis(100)).await;
+            first = next_pipe(&path).await;
             continue;
         }
-        let next = match create_pipe(&path, false) {
-            Ok(next) => next,
+        let next = next_pipe(&path).await;
+        tokio::spawn(client(std::mem::replace(&mut first, next), commands.clone()));
+    }
+}
+
+/// A new pipe instance; the daemon keeps trying, since without one nobody can reach it.
+#[cfg(windows)]
+async fn next_pipe(path: &std::ffi::OsStr) -> tokio::net::windows::named_pipe::NamedPipeServer {
+    loop {
+        match create_pipe(path, false) {
+            Ok(pipe) => return pipe,
             Err(error) => {
                 tracing::error!(%error, "cannot create the next pipe instance");
-                return;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
-        };
-        tokio::spawn(client(std::mem::replace(&mut first, next), commands.clone()));
+        }
     }
 }
 

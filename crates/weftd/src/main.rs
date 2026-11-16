@@ -58,6 +58,9 @@ enum ServiceAction {
     Install,
     /// Stop and remove the system service
     Uninstall,
+    /// Remove firewall and resolver rules left in the system, for uninstallers
+    #[command(hide = true)]
+    Cleanup,
     #[cfg(windows)]
     #[command(hide = true)]
     Run,
@@ -79,6 +82,10 @@ fn main() -> ExitCode {
     let result = match args.command {
         Some(Command::Service { action: ServiceAction::Install }) => service::install().map_err(Into::into),
         Some(Command::Service { action: ServiceAction::Uninstall }) => service::uninstall().map_err(Into::into),
+        Some(Command::Service { action: ServiceAction::Cleanup }) => {
+            weft_tun::cleanup();
+            Ok(())
+        }
         #[cfg(windows)]
         Some(Command::Service { action: ServiceAction::Run }) => run_service(args.options),
         None => {
@@ -191,11 +198,18 @@ fn init_logging(file: Option<PathBuf>) {
     use tracing_subscriber::util::SubscriberInitExt;
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    let (writer, ansi) =
-        match file.and_then(|path| std::fs::OpenOptions::new().create(true).append(true).open(path).ok()) {
-            Some(file) => (BoxMakeWriter::new(std::sync::Mutex::new(file)), false),
-            None => (BoxMakeWriter::new(std::io::stderr), true),
-        };
+    let capped = match file {
+        Some(path) => logs::Capped::open(path).ok(),
+        // launchd points standard error at a log file that nothing else trims.
+        #[cfg(unix)]
+        None => logs::Capped::stderr(),
+        #[cfg(not(unix))]
+        None => None,
+    };
+    let (writer, ansi) = match capped {
+        Some(log) => (BoxMakeWriter::new(move || log.clone()), false),
+        None => (BoxMakeWriter::new(std::io::stderr), true),
+    };
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer().with_ansi(ansi).with_writer(writer))
