@@ -27,6 +27,10 @@ pub enum Request {
         nickname: Option<String>,
     },
     Down,
+    /// Changes the nickname, reconnecting only the servers that are on.
+    Rename {
+        nickname: String,
+    },
     /// Forgets the selected server.
     Remove,
     /// Runs a server inside the daemon; `port` 0 picks one, an empty `address` clears it.

@@ -368,6 +368,9 @@ impl Daemon {
         match request {
             Request::Up { link, nickname } => self.up(link, nickname, server, reply),
             Request::Down => self.down(server, reply),
+            Request::Rename { nickname } => {
+                let _ = reply.send(self.rename(nickname));
+            }
             Request::Remove => self.remove(server, reply),
             Request::Host { enabled, port, address } => self.host(enabled, port, address, reply).await,
             Request::Status => {
@@ -630,16 +633,14 @@ impl Daemon {
         server: Option<&str>,
         reply: oneshot::Sender<Response>,
     ) {
-        let mut renamed = false;
-        if let Some(nickname) = nickname {
-            let nickname = nickname.trim().to_string();
-            if !(1..=32).contains(&nickname.chars().count()) {
-                let _ = reply.send(Response::Error(Failure::InvalidNickname));
+        let renamed = match nickname.map(|nickname| self.set_nickname(nickname)) {
+            None => false,
+            Some(Ok(renamed)) => renamed,
+            Some(Err(failure)) => {
+                let _ = reply.send(Response::Error(failure));
                 return;
             }
-            renamed = self.settings.nickname.as_ref() != Some(&nickname);
-            self.settings.nickname = Some(nickname);
-        }
+        };
         let chosen = match (link, server) {
             (Some(link), _) => {
                 let Ok(link) = link.parse::<Link>() else {
@@ -691,6 +692,38 @@ impl Daemon {
             Some(index) => self.sessions[index].up_waiters.push(reply),
             None => {
                 let _ = reply.send(Response::Ok);
+            }
+        }
+    }
+
+    /// Takes a new nickname and tells whether it changed.
+    fn set_nickname(&mut self, nickname: String) -> Result<bool, Failure> {
+        let nickname = nickname.trim().to_string();
+        let bidi = |c: char| matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+        if !(1..=32).contains(&nickname.chars().count()) || nickname.chars().any(|c| c.is_control() || bidi(c)) {
+            return Err(Failure::InvalidNickname);
+        }
+        let renamed = self.settings.nickname.as_ref() != Some(&nickname);
+        self.settings.nickname = Some(nickname);
+        Ok(renamed)
+    }
+
+    /// Changes the nickname; servers that are on reconnect to take it, the others stay off.
+    fn rename(&mut self, nickname: String) -> Response {
+        match self.set_nickname(nickname) {
+            Err(failure) => Response::Error(failure),
+            Ok(renamed) => {
+                self.save_settings();
+                if renamed {
+                    for index in 0..self.sessions.len() {
+                        if self.sessions[index].up {
+                            self.disconnect_session(index);
+                            self.connect(index);
+                        }
+                    }
+                    self.update_names();
+                }
+                Response::Ok
             }
         }
     }

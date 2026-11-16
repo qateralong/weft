@@ -653,7 +653,7 @@ impl App {
         self.spawn(async move {
             if !name.is_empty()
                 && Some(&name) != current.as_ref()
-                && let Err(error) = app.send(Request::Up { link: None, nickname: Some(name) }, None).await
+                && let Err(error) = app.send(Request::Rename { nickname: name }, None).await
             {
                 if close {
                     app.fail(&error);
