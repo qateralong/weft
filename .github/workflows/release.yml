@@ -13,7 +13,15 @@ env:
 
 jobs:
   linux:
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: amd64
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -22,9 +30,9 @@ jobs:
       - run: cargo build --release --locked -p weftd -p weft -p weft-gui -p loom
       - name: Packages
         run: |
-          curl -fsSL -o nfpm.deb "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb"
+          curl -fsSL -o nfpm.deb "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_${{ matrix.arch }}.deb"
           sudo dpkg -i nfpm.deb
-          export VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml) ARCH=amd64
+          export VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml) ARCH=${{ matrix.arch }}
           mkdir dist
           for name in weft loom; do
             for packager in deb rpm archlinux; do
@@ -34,7 +42,7 @@ jobs:
           ls -l dist
       - name: Install and run the deb packages
         run: |
-          sudo apt-get install -y ./dist/weft_*_amd64.deb ./dist/weft-loom_*_amd64.deb
+          sudo apt-get install -y ./dist/weft_*_${{ matrix.arch }}.deb ./dist/weft-loom_*_${{ matrix.arch }}.deb
           getent group weft
           systemctl is-active weftd
           sudo weft status
@@ -45,7 +53,7 @@ jobs:
           ! systemctl is-active weftd
       - uses: actions/upload-artifact@v4
         with:
-          name: linux
+          name: linux-${{ matrix.arch }}
           path: dist/*
 
   windows:
@@ -77,6 +85,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Start-Process msiexec -ArgumentList "/x `"$msi`" /qn" -Wait
           if (Get-Service weftd -ErrorAction SilentlyContinue) { exit 1 }
+          if (Get-NetFirewallRule -DisplayName 'Weft*' -ErrorAction SilentlyContinue) { exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -87,13 +96,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked -p weftd -p weft -p weft-gui
+      - name: Universal binaries for Apple silicon and Intel
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked -p weftd -p weft -p weft-gui --target "$target"
+          done
+          mkdir -p target/universal
+          for name in weftd weft weft-gui; do
+            lipo -create -output "target/universal/$name" \
+              "target/aarch64-apple-darwin/release/$name" "target/x86_64-apple-darwin/release/$name"
+          done
+          lipo -info target/universal/weftd
       - name: Package
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
           mkdir dist
-          packaging/macos/build-pkg.sh "$version" "dist/weft-$version-$(uname -m).pkg"
+          BIN=target/universal packaging/macos/build-pkg.sh "$version" "dist/weft-$version-universal.pkg"
       - name: Install and run the package
         run: |
           sudo installer -pkg dist/*.pkg -target /
