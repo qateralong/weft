@@ -51,6 +51,7 @@ pub enum Transport {
 
 pub struct PortMapper {
     rx: watch::Receiver<Option<Mapped>>,
+    stop: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
 
@@ -63,8 +64,9 @@ impl PortMapper {
     /// With `exact`, only a mapping to the same external port counts, as servers announce their port.
     pub fn spawn_with(local_port: u16, transport: Transport, exact: bool) -> Self {
         let (tx, rx) = watch::channel(None);
-        let task = tokio::spawn(run(local_port, transport, exact, tx));
-        Self { rx, task }
+        let (stop, stopped) = watch::channel(false);
+        let task = tokio::spawn(run(local_port, transport, exact, tx, stopped));
+        Self { rx, stop, task }
     }
 
     pub fn current(&self) -> Option<Mapped> {
@@ -77,8 +79,11 @@ impl PortMapper {
 }
 
 impl Drop for PortMapper {
+    /// Asks the task to remove the mapping from the router; it ends on its own after that.
     fn drop(&mut self) {
-        self.task.abort();
+        if self.stop.send(true).is_err() {
+            self.task.abort();
+        }
     }
 }
 
@@ -92,17 +97,31 @@ enum Lease {
     },
 }
 
-async fn run(local_port: u16, transport: Transport, exact: bool, tx: watch::Sender<Option<Mapped>>) {
+async fn run(
+    local_port: u16,
+    transport: Transport,
+    exact: bool,
+    tx: watch::Sender<Option<Mapped>>,
+    mut stopped: watch::Receiver<bool>,
+) {
     let Some(local_port) = NonZeroU16::new(local_port) else { return };
     loop {
-        let result =
-            map(local_port, transport, exact).await.filter(|(_, mapped)| !exact || mapped.port == local_port.get());
+        let result = tokio::select! {
+            result = map(local_port, transport, exact) => result,
+            _ = until_stopped(&mut stopped) => return,
+        };
         match result {
             Some((mut lease, mapped)) => {
                 tracing::info!(port = mapped.port, ip = ?mapped.ip, "port mapping created");
                 tx.send_replace(Some(mapped));
                 loop {
-                    tokio::time::sleep(RENEW_AFTER).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(RENEW_AFTER) => {}
+                        _ = until_stopped(&mut stopped) => {
+                            release(lease).await;
+                            return;
+                        }
+                    }
                     if !renew(&mut lease).await {
                         tracing::info!("port mapping lost");
                         tx.send_replace(None);
@@ -113,10 +132,26 @@ async fn run(local_port: u16, transport: Transport, exact: bool, tx: watch::Send
             None => {
                 tracing::debug!("no port mapping protocol is available");
                 tx.send_replace(None);
-                tokio::time::sleep(RETRY_AFTER).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(RETRY_AFTER) => {}
+                    _ = until_stopped(&mut stopped) => return,
+                }
             }
         }
     }
+}
+
+async fn until_stopped(stopped: &mut watch::Receiver<bool>) {
+    let _ = stopped.wait_for(|stopped| *stopped).await;
+}
+
+/// Removes the mapping from the router.
+async fn release(lease: Lease) {
+    let released = match lease {
+        Lease::Pmp(mapping) => mapping.try_drop().await.is_ok(),
+        Lease::Upnp { gateway, port, protocol, .. } => gateway.remove_port(protocol, port).await.is_ok(),
+    };
+    tracing::debug!(released, "port mapping removed");
 }
 
 async fn map(local_port: NonZeroU16, transport: Transport, exact: bool) -> Option<(Lease, Mapped)> {
@@ -137,6 +172,11 @@ async fn map(local_port: NonZeroU16, transport: Transport, exact: bool) -> Optio
         };
         let result = PortMapping::new(GatewayAddress::IpV4(gateway), local.into(), protocol, local_port, options).await;
         match result {
+            // A server announces its own port, so another one is no use: give it back and try UPnP.
+            Ok(mapping) if exact && mapping.external_port() != local_port => {
+                tracing::debug!(port = mapping.external_port().get(), "the router gave another port");
+                release(Lease::Pmp(mapping)).await;
+            }
             Ok(mapping) => {
                 let (ip, protocol) = match mapping.mapping_type() {
                     PortMappingType::Pcp { external_ip, .. } => (Some(external_ip), Protocol::Pcp),
