@@ -190,7 +190,6 @@ gui-close = Закрыть
 gui-confirm = Нажмите ещё раз для подтверждения
 gui-create-network = Создать сеть
 gui-join-network = Войти в сеть
-gui-networks = Сети
 gui-network-name = Название сети
 gui-password = Пароль
 gui-password-repeat = Повторите пароль

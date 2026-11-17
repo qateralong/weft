@@ -1,4 +1,4 @@
-// The main screen: title row, status, networks with their members, notices.
+// The main screen: header, networks with their members, notices.
 
 import { Theme, I18n, Icons } from "theme.slint";
 import { Icon, IconButton, Button, Dot, Signal, Avatar, Tag, Spinner, Field, Separator } from "widgets.slint";
@@ -39,9 +39,8 @@ component MemberLine inherits Rectangle {
     callback copy(string);
     callback menu();
     callback ping();
-    in property <bool> last;
     property <bool> pinging;
-    height: 48px;
+    height: 52px;
     background: touch.has-hover ? Theme.hover : transparent;
     property <bool> shown;
     Timer {
@@ -191,9 +190,7 @@ component MemberLine inherits Rectangle {
         }
     }
 
-    if !last: Separator {
-        x: place(name-start, root.width - name-start);
-        width: root.width - name-start;
+    Separator {
         y: parent.height - 1px;
     }
 }
@@ -207,8 +204,8 @@ export component NetworkView inherits Rectangle {
     callback menu();
     callback member-menu(int);
     callback member-ping(int);
-    property <length> head-height: 50px;
-    property <length> body-height: data.members.length * 48px + 2px;
+    property <length> head-height: 58px;
+    property <length> body-height: data.members.length * 52px;
     height: head-height + (data.collapsed ? 0px : body-height);
     property <bool> shown;
     Timer {
@@ -221,11 +218,17 @@ export component NetworkView inherits Rectangle {
     opacity: shown ? 1 : 0;
     animate height { duration: 250ms; easing: ease-in-out; }
     animate opacity { duration: 200ms; }
+    background: Theme.card;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.line;
     clip: true;
 
     Rectangle {
         y: 0;
         height: head-height;
+        background: head-touch.has-hover ? Theme.hover : transparent;
+        animate background { duration: 150ms; }
         head-touch := TouchArea {
             mouse-cursor: pointer;
             clicked => {
@@ -234,9 +237,9 @@ export component NetworkView inherits Rectangle {
         }
 
         HorizontalLayout {
-            padding-left: 2px;
-            padding-right: 2px;
-            spacing: 6px;
+            padding-left: 10px;
+            padding-right: 10px;
+            spacing: 8px;
             // Children are listed in reading order and reversed for right-to-left languages.
             if !I18n.rtl: VerticalLayout {
                 alignment: center;
@@ -249,8 +252,8 @@ export component NetworkView inherits Rectangle {
             }
             if I18n.rtl: HorizontalLayout {
                 spacing: 2px;
-                padding-top: 9px;
-                padding-bottom: 9px;
+                padding-top: 13px;
+                padding-bottom: 13px;
                 IconButton {
                     icon: Icons.more;
                     tooltip: I18n.t("gui-network-settings");
@@ -266,42 +269,14 @@ export component NetworkView inherits Rectangle {
                         root.invites();
                     }
                 }
-                if data.manager && data.requests > 0: requests-rtl := Rectangle {
-                    width: 52px;
-                    border-radius: 8px;
-                    border-width: 1px;
-                    border-color: Theme.line;
-                    background: requests-rtl-touch.has-hover ? Theme.hover : transparent;
-                    HorizontalLayout {
-                        alignment: center;
-                        spacing: 4px;
-                        VerticalLayout {
-                            alignment: center;
-                            Rectangle {
-                                width: 18px;
-                                height: 18px;
-                                border-radius: 9px;
-                                background: Theme.danger;
-                                Text {
-                                    text: data.requests;
-                                    color: white;
-                                    font-size: 11px;
-                                    font-weight: 700;
-                                }
-                            }
-                        }
-
-                        VerticalLayout {
-                            alignment: center;
-                            Icon {
-                                name: Icons.users;
-                                stroke: Theme.text;
-                            }
-                        }
-                    }
-
-                    requests-rtl-touch := TouchArea {
-                        mouse-cursor: pointer;
+                if data.manager && data.requests > 0: VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    Button {
+                        small: true;
+                        horizontal-stretch: 0;
+                        max-width: self.min-width;
+                        text: I18n.t("gui-requests") + " (" + data.requests + ")";
                         clicked => {
                             root.requests();
                         }
@@ -309,16 +284,15 @@ export component NetworkView inherits Rectangle {
                 }
             }
             VerticalLayout {
-                horizontal-stretch: 1;
                 alignment: center;
-                spacing: 1px;
+                spacing: 3px;
+                horizontal-stretch: 1;
                 HorizontalLayout {
                     spacing: 8px;
                     alignment: I18n.rtl ? end : start;
                     if I18n.rtl: Text {
                         text: data.count;
                         color: Theme.muted;
-                        font-size: 13px;
                         vertical-alignment: center;
                     }
                     Text {
@@ -333,11 +307,11 @@ export component NetworkView inherits Rectangle {
                     if !I18n.rtl: Text {
                         text: data.count;
                         color: Theme.muted;
-                        font-size: 13px;
                         vertical-alignment: center;
                     }
                 }
 
+                // Plain words split by dots; the first one is the role.
                 HorizontalLayout {
                     spacing: 5px;
                     alignment: I18n.rtl ? end : start;
@@ -360,44 +334,16 @@ export component NetworkView inherits Rectangle {
 
             if !I18n.rtl: HorizontalLayout {
                 spacing: 2px;
-                padding-top: 9px;
-                padding-bottom: 9px;
-                if data.manager && data.requests > 0: requests := Rectangle {
-                    width: 52px;
-                    border-radius: 8px;
-                    border-width: 1px;
-                    border-color: Theme.line;
-                    background: requests-touch.has-hover ? Theme.hover : transparent;
-                    HorizontalLayout {
-                        alignment: center;
-                        spacing: 4px;
-                        VerticalLayout {
-                            alignment: center;
-                            Icon {
-                                name: Icons.users;
-                                stroke: Theme.text;
-                            }
-                        }
-
-                        VerticalLayout {
-                            alignment: center;
-                            Rectangle {
-                                width: 18px;
-                                height: 18px;
-                                border-radius: 9px;
-                                background: Theme.danger;
-                                Text {
-                                    text: data.requests;
-                                    color: white;
-                                    font-size: 11px;
-                                    font-weight: 700;
-                                }
-                            }
-                        }
-                    }
-
-                    requests-touch := TouchArea {
-                        mouse-cursor: pointer;
+                padding-top: 13px;
+                padding-bottom: 13px;
+                if data.manager && data.requests > 0: VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    Button {
+                        small: true;
+                        horizontal-stretch: 0;
+                        max-width: self.min-width;
+                        text: I18n.t("gui-requests") + " (" + data.requests + ")";
                         clicked => {
                             root.requests();
                         }
@@ -430,29 +376,23 @@ export component NetworkView inherits Rectangle {
         }
     }
 
-    if !data.collapsed: Rectangle {
+    Separator {
         y: head-height;
-        height: body-height;
-        background: Theme.card;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: Theme.line;
-        clip: true;
-        for member[i] in data.members: MemberLine {
-            y: 1px + i * 48px;
-            width: parent.width;
-            data: member;
-            manager: data.manager;
-            last: i == data.members.length - 1;
-            copy(text) => {
-                root.copy(text);
-            }
-            menu => {
-                root.member-menu(i);
-            }
-            ping => {
-                root.member-ping(i);
-            }
+    }
+
+    for member[i] in data.members: MemberLine {
+        y: head-height + 1px + i * 52px;
+        width: root.width;
+        data: member;
+        manager: data.manager;
+        copy(text) => {
+            root.copy(text);
+        }
+        menu => {
+            root.member-menu(i);
+        }
+        ping => {
+            root.member-ping(i);
         }
     }
 }
@@ -479,8 +419,8 @@ export component Notice inherits Rectangle {
         Text {
             text: title;
             color: Theme.text;
-            font-size: 18px;
-            font-weight: 650;
+            font-size: 16px;
+            font-weight: 600;
             horizontal-alignment: center;
             wrap: word-wrap;
         }
@@ -530,8 +470,8 @@ export component Welcome inherits Rectangle {
         Text {
             text: I18n.t("gui-welcome");
             color: Theme.text;
-            font-size: 18px;
-            font-weight: 650;
+            font-size: 16px;
+            font-weight: 600;
             horizontal-alignment: center;
         }
 
@@ -555,7 +495,6 @@ export component Welcome inherits Rectangle {
             padding-top: 6px;
             Button {
                 horizontal-stretch: 1;
-                icon: Icons.plus;
                 text: I18n.t("gui-create-network");
                 clicked => {
                     root.nickname-changed(nickname);
@@ -565,7 +504,6 @@ export component Welcome inherits Rectangle {
 
             Button {
                 horizontal-stretch: 1;
-                icon: Icons.join;
                 text: I18n.t("gui-join-network");
                 primary: true;
                 clicked => {
@@ -577,36 +515,118 @@ export component Welcome inherits Rectangle {
     }
 }
 
-// Title row: app name and tools.
 export component Header inherits Rectangle {
     in property <bool> full;
+    in property <string> nickname;
+    in property <string> connection;
+    in property <string> address;
     in property <bool> refreshing;
+    callback power();
+    callback copy(string);
     callback refresh();
     callback diagnostics();
     callback theme();
     callback settings();
-    height: 48px;
+    height: 64px;
+    background: Theme.card;
+    animate background { duration: 300ms; }
+
+    Rectangle {
+        y: root.height - 1px;
+        height: 1px;
+        background: Theme.line;
+    }
 
     property <length> tools-width: (full ? 4 : 3) * 32px + (full ? 3 : 2) * 2px;
+    property <length> power-width: full ? 40px + 12px : 0px;
+    property <length> text-width: root.width - 32px - tools-width - power-width - 12px;
 
     function place(start: length, size: length) -> length {
         return I18n.rtl ? root.width - start - size : start;
     }
 
-    Text {
-        x: place(16px, self.width);
-        text: "Weft";
-        color: Theme.text;
-        font-size: 16px;
-        font-weight: 600;
+    if full: Rectangle {
+        x: place(16px, 40px);
+        width: 40px;
+        height: 40px;
+        border-radius: 20px;
+        background: connection == "connected" ? Theme.accent : Theme.bg;
+        border-width: connection == "connected" ? 0 : 1px;
+        border-color: connection == "connecting" ? Theme.warn : power-touch.has-hover ? Theme.accent : Theme.line;
+        animate background, border-color { duration: 250ms; }
+        accessible-role: button;
+        accessible-label: I18n.t(connection == "disconnected" ? "gui-connect" : "gui-disconnect");
+        Icon {
+            width: 20px;
+            height: 20px;
+            name: Icons.power;
+            stroke: connection == "connected" ? Theme.accent-text : connection == "connecting" ? Theme.warn : Theme.muted;
+        }
+
+        power-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.power();
+            }
+        }
+    }
+
+    VerticalLayout {
+        x: place(16px + power-width, text-width);
+        width: text-width;
+        alignment: center;
+        spacing: 2px;
+        Text {
+            text: full ? nickname : "Weft";
+            color: Theme.text;
+            font-size: 16px;
+            font-weight: 600;
+            overflow: elide;
+            horizontal-alignment: I18n.rtl ? right : left;
+        }
+
+        if full: HorizontalLayout {
+            spacing: 6px;
+            alignment: I18n.rtl ? end : start;
+            if !I18n.rtl: VerticalLayout {
+                alignment: center;
+                Dot {
+                    state: connection;
+                }
+            }
+            Text {
+                text: I18n.t("state-" + connection);
+                color: Theme.muted;
+                font-size: 12px;
+            }
+
+            if address != "": address-text := Text {
+                text: address;
+                color: address-touch.has-hover ? Theme.accent : Theme.muted;
+                font-family: "monospace";
+                font-size: 12px;
+                address-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.copy(address);
+                    }
+                }
+            }
+            if I18n.rtl: VerticalLayout {
+                alignment: center;
+                Dot {
+                    state: connection;
+                }
+            }
+        }
     }
 
     HorizontalLayout {
-        x: place(root.width - 12px - tools-width, tools-width);
+        x: place(root.width - 16px - tools-width, tools-width);
         width: tools-width;
         spacing: 2px;
-        padding-top: 8px;
-        padding-bottom: 8px;
+        padding-top: 16px;
+        padding-bottom: 16px;
         if full && !I18n.rtl: IconButton {
             icon: Icons.refresh;
             tooltip: I18n.t("gui-refresh");
@@ -654,89 +674,6 @@ export component Header inherits Rectangle {
             clicked => {
                 root.refresh();
             }
-        }
-    }
-}
-
-// Who we are and whether we are connected, with the button that switches it.
-export component StatusPanel inherits Rectangle {
-    in property <string> nickname;
-    in property <string> connection;
-    in property <string> address;
-    callback power();
-    callback copy(string);
-    height: 60px;
-    background: Theme.card;
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: Theme.line;
-
-    property <length> pad: 14px;
-    property <length> button-width: power-button.preferred-width;
-    property <length> text-width: root.width - 2 * pad - button-width - 12px;
-
-    function place(start: length, size: length) -> length {
-        return I18n.rtl ? root.width - start - size : start;
-    }
-
-    VerticalLayout {
-        x: place(pad, text-width);
-        width: text-width;
-        alignment: center;
-        spacing: 3px;
-        Text {
-            text: nickname;
-            color: Theme.text;
-            font-size: 15px;
-            font-weight: 600;
-            overflow: elide;
-            horizontal-alignment: I18n.rtl ? right : left;
-        }
-
-        HorizontalLayout {
-            spacing: 6px;
-            alignment: I18n.rtl ? end : start;
-            if !I18n.rtl: VerticalLayout {
-                alignment: center;
-                Dot {
-                    state: connection;
-                }
-            }
-            Text {
-                text: I18n.t("state-" + connection);
-                color: Theme.muted;
-                font-size: 12px;
-            }
-
-            if address != "": Text {
-                text: address;
-                color: address-touch.has-hover ? Theme.accent : Theme.muted;
-                font-family: "monospace";
-                font-size: 12px;
-                address-touch := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        root.copy(address);
-                    }
-                }
-            }
-            if I18n.rtl: VerticalLayout {
-                alignment: center;
-                Dot {
-                    state: connection;
-                }
-            }
-        }
-    }
-
-    power-button := Button {
-        x: place(root.width - pad - self.width, self.width);
-        width: self.min-width;
-        icon: Icons.power;
-        text: I18n.t(connection == "disconnected" ? "gui-connect" : "gui-disconnect");
-        primary: connection == "disconnected";
-        clicked => {
-            root.power();
         }
     }
 }
@@ -815,7 +752,6 @@ export component UpdateBanner inherits Rectangle {
             Button {
                 small: true;
                 primary: true;
-                icon: Icons.download;
                 text: I18n.t("gui-update-install");
                 clicked => {
                     root.download();
@@ -839,7 +775,6 @@ export component UpdateBanner inherits Rectangle {
             Button {
                 small: true;
                 primary: true;
-                icon: Icons.download;
                 text: I18n.t("gui-update-install");
                 clicked => {
                     root.download();

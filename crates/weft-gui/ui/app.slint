@@ -2,7 +2,7 @@
 
 import { Theme, I18n, Icons, Utils } from "theme.slint";
 import { Button } from "widgets.slint";
-import { Header, StatusPanel, NetworkView, Notice, Welcome, Toast, UpdateBanner, MemberRow, NetworkCard } from "main.slint";
+import { Header, NetworkView, Notice, Welcome, Toast, UpdateBanner, MemberRow, NetworkCard } from "main.slint";
 import {
     Chooser, Step, ServerRow, InviteRow, DeviceRow, CreateDialog, JoinDialog, SettingsDialog, ServersDialog,
     ServerMenuDialog, HostDialog, AddServerDialog, InvitesDialog, DevicesDialog, NetworkSettingsDialog,
@@ -193,9 +193,18 @@ export component AppWindow inherits Window {
     VerticalLayout {
         Header {
             full: phase == "main";
+            nickname: nickname;
+            connection: connection;
+            address: address;
             refreshing: refreshing;
+            power => {
+                root.power();
+            }
             refresh => {
                 root.refresh();
+            }
+            copy(text) => {
+                root.copy(text);
             }
             diagnostics => {
                 root.open-diagnostics();
@@ -213,7 +222,7 @@ export component AppWindow inherits Window {
             content-height: content.preferred-height;
             content := VerticalLayout {
                 padding: 16px;
-                padding-top: 4px;
+                padding-top: 14px;
                 spacing: 12px;
                 alignment: start;
                 if phase == "starting": Notice {
@@ -249,65 +258,36 @@ export component AppWindow inherits Window {
                         root.download-update();
                     }
                 }
-                if phase == "main": StatusPanel {
-                    nickname: nickname;
-                    connection: connection;
-                    address: address;
-                    power => {
-                        root.power();
-                    }
-                    copy(text) => {
-                        root.copy(text);
-                    }
-                }
                 if phase == "main": HorizontalLayout {
-                    spacing: 6px;
-                    padding-top: 6px;
-                    if I18n.rtl: Button {
-                        small: true;
-                        icon: Icons.join;
-                        text: I18n.t("gui-join-network");
-                        clicked => {
-                            root.join();
-                        }
-                    }
-                    if I18n.rtl: Button {
-                        small: true;
-                        icon: Icons.plus;
-                        text: I18n.t("gui-create-network");
-                        clicked => {
-                            root.create();
-                        }
-                    }
-                    Text {
+                    spacing: 10px;
+                    Button {
                         horizontal-stretch: 1;
-                        text: I18n.t("gui-networks");
-                        color: Theme.muted;
-                        font-size: 13px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                        horizontal-alignment: I18n.rtl ? right : left;
+                        text: I18n.t(I18n.rtl ? "gui-join-network" : "gui-create-network");
+                        primary: I18n.rtl;
+                        clicked => {
+                            if I18n.rtl {
+                                root.join();
+                            } else {
+                                root.create();
+                            }
+                        }
                     }
 
-                    if !I18n.rtl: Button {
-                        small: true;
-                        icon: Icons.plus;
-                        text: I18n.t("gui-create-network");
+                    Button {
+                        horizontal-stretch: 1;
+                        text: I18n.t(I18n.rtl ? "gui-create-network" : "gui-join-network");
+                        primary: !I18n.rtl;
                         clicked => {
-                            root.create();
-                        }
-                    }
-                    if !I18n.rtl: Button {
-                        small: true;
-                        icon: Icons.join;
-                        text: I18n.t("gui-join-network");
-                        clicked => {
-                            root.join();
+                            if I18n.rtl {
+                                root.create();
+                            } else {
+                                root.join();
+                            }
                         }
                     }
                 }
                 if phase == "main": VerticalLayout {
-                    spacing: 8px;
+                    spacing: 12px;
                     for network[i] in networks: NetworkView {
                         data: network;
                         toggle => {
