@@ -115,9 +115,11 @@ jobs:
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
           mkdir dist
           BIN=target/universal packaging/macos/build-pkg.sh "$version" "dist/weft-$version-universal.pkg"
+          # The updater of 1.1.10 and older looks for the arm64 name.
+          cp "dist/weft-$version-universal.pkg" "dist/weft-$version-arm64.pkg"
       - name: Install and run the package
         run: |
-          sudo installer -pkg dist/*.pkg -target /
+          sudo installer -pkg dist/*-universal.pkg -target /
           sleep 5
           dseditgroup -o read weft > /dev/null
           sudo launchctl print system/org.weft.weftd | grep -q 'state = running'

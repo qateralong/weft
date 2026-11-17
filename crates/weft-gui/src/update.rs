@@ -90,7 +90,10 @@ pub fn plan(release: &Release) -> Option<Plan> {
     let arch = std::env::consts::ARCH;
     let wanted = |name: &str| match installer {
         Installer::Msi => arch == "x86_64" && name.ends_with("-x64.msi"),
-        Installer::Pkg => name.ends_with(&format!("-{}.pkg", if arch == "aarch64" { "arm64" } else { arch })),
+        Installer::Pkg => {
+            name.ends_with("-universal.pkg")
+                || name.ends_with(&format!("-{}.pkg", if arch == "aarch64" { "arm64" } else { arch }))
+        }
         Installer::Pacman => is_app(name, "weft-") && name.ends_with(&format!("-{arch}.pkg.tar.zst")),
         Installer::Apt => {
             is_app(name, "weft_") && name.ends_with(if arch == "aarch64" { "_arm64.deb" } else { "_amd64.deb" })
@@ -220,7 +223,7 @@ mod tests {
                 "weft-loom-9.0.0-1.x86_64.rpm",
                 "weft-9.0.0-1.x86_64.rpm",
                 "weft-9.0.0-x64.msi",
-                "weft-9.0.0-arm64.pkg",
+                "weft-9.0.0-universal.pkg",
             ]
             .map(asset)
             .to_vec(),

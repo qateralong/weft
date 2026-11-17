@@ -19,10 +19,10 @@ Download a package from [Releases](https://github.com/qateralong/weft/releases/l
 | System | Package |
 |---|---|
 | Windows | `weft-*-x64.msi` |
-| macOS | `weft-*.pkg` |
-| Debian, Ubuntu | `weft_*_amd64.deb` |
-| Fedora, openSUSE | `weft-*.x86_64.rpm` |
-| Arch | `weft-*-x86_64.pkg.tar.zst` |
+| macOS (Apple silicon and Intel) | `weft-*-universal.pkg` |
+| Debian, Ubuntu | `weft_*_amd64.deb`, `weft_*_arm64.deb` |
+| Fedora, openSUSE | `weft-*.x86_64.rpm`, `weft-*.aarch64.rpm` |
+| Arch | `weft-*-x86_64.pkg.tar.zst`, `weft-*-aarch64.pkg.tar.zst` |
 
 On Linux install it with the system's package manager, from the folder you downloaded it to:
 
