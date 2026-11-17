@@ -230,6 +230,9 @@ gui-tray-quit = Quit
 gui-error-permission = No access to weftd ({ $path }). Add your user to the “weft” group and log in again.
 gui-theme-light = Light theme
 gui-theme-dark = Dark theme
+gui-menu-network = Network
+gui-menu-view = View
+gui-menu-tools = Tools
 
 cmd-netcheck = Check the connection and show what prevents direct links
 arg-logs = Also print the recent daemon log
