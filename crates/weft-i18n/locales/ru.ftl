@@ -230,9 +230,6 @@ gui-tray-quit = Выход
 gui-error-permission = Нет доступа к weftd ({ $path }). Добавьте пользователя в группу «weft» и войдите в систему заново.
 gui-theme-light = Светлая тема
 gui-theme-dark = Тёмная тема
-gui-menu-network = Сеть
-gui-menu-view = Вид
-gui-menu-tools = Сервис
 
 cmd-netcheck = Проверить подключение и показать, что мешает прямой связи
 arg-logs = Добавить последние записи журнала weftd

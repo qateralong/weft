@@ -230,9 +230,6 @@ gui-tray-quit = Salir
 gui-error-permission = Sin acceso a weftd ({ $path }). Añada su usuario al grupo «weft» y vuelva a iniciar sesión.
 gui-theme-light = Tema claro
 gui-theme-dark = Tema oscuro
-gui-menu-network = Red
-gui-menu-view = Ver
-gui-menu-tools = Herramientas
 
 cmd-netcheck = Comprobar la conexión y mostrar qué impide los enlaces directos
 arg-logs = Mostrar también el registro reciente del servicio

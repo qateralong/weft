@@ -45,44 +45,16 @@ export global Chooser {
     out property <bool> ssh: index >= 0 && index < needs-ssh.length && needs-ssh[index];
 }
 
-// A bold heading over a group of controls, with a line running to the far side.
-component Section inherits HorizontalLayout {
-    in property <string> text;
-    spacing: 6px;
-    padding-top: 4px;
-    if I18n.rtl: VerticalLayout {
-        alignment: center;
-        Rectangle {
-            height: 1px;
-            background: Theme.line;
-        }
-    }
-    Text {
-        text: root.text;
-        color: Theme.text;
-        font-size: 12px;
-        font-weight: 700;
-        horizontal-stretch: 0;
-    }
-
-    if !I18n.rtl: VerticalLayout {
-        alignment: center;
-        Rectangle {
-            height: 1px;
-            background: Theme.line;
-        }
-    }
-}
-
-// Keeps buttons at their own width on the reading side.
-component Row inherits HorizontalLayout {
-    alignment: I18n.rtl ? end : start;
-    spacing: 6px;
+component Section inherits Text {
+    color: Theme.muted;
+    font-size: 12px;
+    font-weight: 650;
+    horizontal-alignment: I18n.rtl ? right : left;
 }
 
 component Paragraph inherits Text {
     color: Theme.muted;
-    font-size: 12px;
+    font-size: 13px;
     wrap: word-wrap;
     horizontal-alignment: I18n.rtl ? right : left;
 }
@@ -95,28 +67,36 @@ export component DialogFrame inherits Rectangle {
     in property <string> action-text;
     callback leave();
     callback action();
-    background: Theme.backdrop;
+    property <bool> shown;
+    Timer {
+        interval: 16ms;
+        running: !shown;
+        triggered => {
+            shown = true;
+        }
+    }
+    background: shown ? Theme.backdrop : transparent;
+    animate background { duration: 200ms; }
 
     TouchArea { }
 
     card := Rectangle {
-        width: min(400px, root.width - 24px);
-        height: min(content.preferred-height + 2px, root.height - 24px);
+        width: min(420px, root.width - 32px);
+        height: min(content.preferred-height, root.height - 48px);
         x: (root.width - self.width) / 2;
-        y: (root.height - self.height) / 2;
+        y: (root.height - self.height) / 2 + (shown ? 0 : 6px);
+        opacity: shown ? 1 : 0;
+        animate y, opacity { duration: 180ms; easing: ease-out; }
         background: Theme.card;
-        border-radius: 6px;
+        border-radius: 12px;
         border-width: 1px;
         border-color: Theme.line;
-        drop-shadow-blur: 20px;
+        drop-shadow-blur: 24px;
         drop-shadow-offset-y: 6px;
-        drop-shadow-color: Theme.shadow;
+        drop-shadow-color: #00000033;
+        clip: true;
 
         keys := FocusScope {
-            x: 1px;
-            y: 1px;
-            width: parent.width - 2px;
-            height: parent.height - 2px;
             key-pressed(event) => {
                 if event.text == Key.Escape {
                     root.leave();
@@ -126,85 +106,68 @@ export component DialogFrame inherits Rectangle {
             }
 
             content := VerticalLayout {
-                Rectangle {
-                    height: 40px;
-                    Text {
-                        x: I18n.rtl ? 40px : 14px;
-                        width: parent.width - 54px;
-                        text: title != "" ? title : "Weft";
-                        color: Theme.text;
-                        font-size: 14px;
-                        font-weight: 600;
-                        overflow: elide;
+                padding: 18px;
+                padding-bottom: 16px;
+                spacing: 12px;
+                Text {
+                    text: title;
+                    color: Theme.text;
+                    font-size: 17px;
+                    font-weight: 650;
+                    wrap: word-wrap;
+                    horizontal-alignment: I18n.rtl ? right : left;
+                }
+
+                if error != "": Rectangle {
+                    background: Theme.danger-soft;
+                    border-radius: 8px;
+                    height: error-text.preferred-height + 16px;
+                    error-text := Text {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        text: error;
+                        color: Theme.danger;
+                        wrap: word-wrap;
                         horizontal-alignment: I18n.rtl ? right : left;
                     }
+                }
 
-                    IconButton {
-                        x: I18n.rtl ? 8px : parent.width - self.width - 8px;
-                        icon: "M6 6l12 12 M18 6L6 18";
-                        tooltip: leave-text;
+                Flickable {
+                    preferred-height: body.preferred-height;
+                    min-height: min(body.preferred-height, 60px);
+                    content-height: body.preferred-height;
+                    body := VerticalLayout {
+                        // The card's own width, so wrapped text knows its lines before the layout runs.
+                        width: card.width - 36px;
+                        spacing: 12px;
+                        @children
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: I18n.rtl ? start : end;
+                    spacing: 8px;
+                    if I18n.rtl && action-text != "": Button {
+                        text: action-text;
+                        primary: true;
+                        enabled: !root.busy;
+                        clicked => {
+                            root.action();
+                        }
+                    }
+                    Button {
+                        text: leave-text;
                         clicked => {
                             root.leave();
                         }
                     }
-                }
 
-                VerticalLayout {
-                    padding: 14px;
-                    padding-top: 0;
-                    spacing: 10px;
-                    if error != "": Rectangle {
-                        background: Theme.danger-soft;
-                        border-radius: 4px;
-                        border-width: 1px;
-                        border-color: Theme.danger;
-                        height: error-text.preferred-height + 10px;
-                        error-text := Text {
-                            x: 6px;
-                            width: parent.width - 12px;
-                            text: error;
-                            color: Theme.danger;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                            horizontal-alignment: I18n.rtl ? right : left;
-                        }
-                    }
-
-                    Flickable {
-                        preferred-height: body.preferred-height;
-                        min-height: min(body.preferred-height, 60px);
-                        content-height: body.preferred-height;
-                        body := VerticalLayout {
-                            // The card's own width, so wrapped text knows its lines before the layout runs.
-                            width: card.width - 30px;
-                            spacing: 10px;
-                            @children
-                        }
-                    }
-
-                    HorizontalLayout {
-                        alignment: I18n.rtl ? start : end;
-                        spacing: 6px;
-                        padding-top: 4px;
-                        if I18n.rtl: Button {
-                            text: leave-text;
-                            clicked => {
-                                root.leave();
-                            }
-                        }
-                        if action-text != "": Button {
-                            text: action-text;
-                            primary: true;
-                            enabled: !root.busy;
-                            clicked => {
-                                root.action();
-                            }
-                        }
-                        if !I18n.rtl: Button {
-                            text: leave-text;
-                            clicked => {
-                                root.leave();
-                            }
+                    if !I18n.rtl && action-text != "": Button {
+                        text: action-text;
+                        primary: true;
+                        enabled: !root.busy;
+                        clicked => {
+                            root.action();
                         }
                     }
                 }
@@ -224,18 +187,19 @@ component StepLine inherits HorizontalLayout {
     VerticalLayout {
         alignment: center;
         Rectangle {
-            width: 13px;
-            height: 13px;
-            border-width: 1px;
+            width: 16px;
+            height: 16px;
+            border-radius: 8px;
+            border-width: step.state == "done" || step.state == "failed" ? 0 : 2px;
             border-color: step.state == "active" ? Theme.accent : Theme.line;
-            background: step.state == "done" ? Theme.ok : step.state == "failed" ? Theme.danger
-                : step.state == "active" ? Theme.accent-soft : Theme.field;
+            background: step.state == "done" ? Theme.ok : step.state == "failed" ? Theme.danger : transparent;
+            opacity: step.state == "active" ? 0.4 + 0.6 * Math.abs(Math.sin(animation-tick() / 1ms / 300 * 1rad)) : 1;
             if step.state == "done": Icon {
-                width: 11px;
-                height: 11px;
+                width: 12px;
+                height: 12px;
                 name: Icons.check;
                 stroke: white;
-                stroke-width: 3.5px;
+                stroke-width: 3px;
             }
         }
     }
@@ -294,13 +258,14 @@ export component ServerChooser inherits VerticalLayout {
         }
     }
     if Chooser.show-steps: Rectangle {
+        border-radius: 10px;
         border-width: 1px;
         border-color: Theme.line;
-        background: Theme.card;
+        background: Theme.bg;
         height: steps.preferred-height;
         steps := VerticalLayout {
-            padding: 8px;
-            spacing: 5px;
+            padding: 12px;
+            spacing: 8px;
             for step in Chooser.steps: StepLine {
                 step: step;
             }
@@ -403,8 +368,10 @@ export component SettingsDialog inherits DialogFrame {
         if !I18n.rtl: VerticalLayout {
             alignment: center;
             Avatar {
-                width: 48px;
-                height: 48px;
+                width: 56px;
+                height: 56px;
+                border-radius: 28px;
+                plain: true;
                 initial: root.initial;
                 tint: Theme.avatar(tone);
                 picture: picture;
@@ -430,7 +397,8 @@ export component SettingsDialog inherits DialogFrame {
                 }
                 Button {
                     small: true;
-                    text: I18n.t("gui-picture-choose") + "…";
+                    icon: Icons.image;
+                    text: I18n.t("gui-picture-choose");
                     enabled: !root.busy;
                     clicked => {
                         root.pick-picture();
@@ -450,8 +418,10 @@ export component SettingsDialog inherits DialogFrame {
         if I18n.rtl: VerticalLayout {
             alignment: center;
             Avatar {
-                width: 48px;
-                height: 48px;
+                width: 56px;
+                height: 56px;
+                border-radius: 28px;
+                plain: true;
                 initial: root.initial;
                 tint: Theme.avatar(tone);
                 picture: picture;
@@ -521,12 +491,10 @@ export component SettingsDialog inherits DialogFrame {
         text: I18n.t("gui-reset-hint");
     }
 
-    Row {
-        DangerButton {
-            text: I18n.t("gui-reset");
-            confirmed => {
-                root.reset();
-            }
+    DangerButton {
+        text: I18n.t("gui-reset");
+        confirmed => {
+            root.reset();
         }
     }
 }
@@ -564,37 +532,46 @@ component ServerLine inherits Rectangle {
     in property <ServerRow> data;
     callback menu();
     height: line.preferred-height;
-    property <length> pad: 6px;
-    property <length> button-width: 26px;
-    property <length> signal-width: 72px;
-    property <length> text-width: self.width - 2 * pad - button-width - signal-width - 12px;
+    property <length> text-width: self.width - 24px - 36px - 12px - 52px - 32px - 16px;
 
-    // Positions inside the padded row.
     function place(start: length, size: length) -> length {
-        return I18n.rtl ? root.width - 2 * pad - start - size : start;
+        return I18n.rtl ? root.width - start - size : start;
     }
 
     line := VerticalLayout {
-        padding: pad;
-        spacing: 4px;
+        padding: 10px;
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
         Rectangle {
-            height: 46px;
+            height: 52px;
+            Rectangle {
+                x: place(0, 36px);
+                width: 36px;
+                height: 36px;
+                border-radius: 11px;
+                background: Theme.accent-soft;
+                Icon {
+                    name: Icons.kind(data.kind);
+                    stroke: Theme.accent;
+                }
+            }
+
             VerticalLayout {
-                x: place(0, text-width);
+                x: place(48px, text-width);
                 width: text-width;
                 alignment: center;
-                spacing: 1px;
+                spacing: 2px;
                 Text {
                     text: data.name;
                     color: Theme.text;
-                    font-size: 13px;
-                    font-weight: 700;
+                    font-weight: 650;
                     overflow: elide;
                     horizontal-alignment: I18n.rtl ? right : left;
                 }
 
                 HorizontalLayout {
-                    spacing: 5px;
+                    spacing: 6px;
                     alignment: I18n.rtl ? end : start;
                     if !I18n.rtl: VerticalLayout {
                         alignment: center;
@@ -604,7 +581,7 @@ component ServerLine inherits Rectangle {
                     }
                     Text {
                         text: I18n.t("state-" + data.state);
-                        color: Theme.text;
+                        color: Theme.muted;
                         font-size: 12px;
                     }
 
@@ -627,14 +604,14 @@ component ServerLine inherits Rectangle {
             }
 
             Signal {
-                x: place(root.width - 2 * pad - button-width - 6px - signal-width, signal-width);
+                x: place(root.width - 24px - 32px - 52px - 4px, 52px);
                 level: data.level;
                 ping: data.ping;
             }
 
             IconButton {
-                x: place(root.width - 2 * pad - button-width, button-width);
-                width: button-width;
+                x: place(root.width - 24px - 32px, 32px);
+                y: 10px;
                 icon: Icons.more;
                 tooltip: I18n.t("gui-settings");
                 clicked => {
@@ -645,6 +622,7 @@ component ServerLine inherits Rectangle {
 
         if data.note != "": Paragraph {
             text: data.note;
+            font-size: 12px;
         }
     }
 
@@ -677,12 +655,11 @@ export component ServersDialog inherits DialogFrame {
         }
     }
 
-    Row {
-        Button {
-            text: I18n.t("gui-add-server");
-            clicked => {
-                root.add();
-            }
+    Button {
+        icon: Icons.plus;
+        text: I18n.t("gui-add-server");
+        clicked => {
+            root.add();
         }
     }
 }
@@ -723,12 +700,10 @@ export component ServerMenuDialog inherits DialogFrame {
             root.copy-link();
         }
     }
-    Row {
-        DangerButton {
-            text: I18n.t(local ? "gui-host-stop" : "gui-server-remove");
-            confirmed => {
-                root.remove();
-            }
+    DangerButton {
+        text: I18n.t(local ? "gui-host-stop" : "gui-server-remove");
+        confirmed => {
+            root.remove();
         }
     }
 }
@@ -809,48 +784,37 @@ export component InvitesDialog inherits DialogFrame {
         }
     }
 
-    HorizontalLayout {
-        alignment: I18n.rtl ? end : start;
-        Button {
-            text: I18n.t("gui-create");
-            enabled: !root.busy;
-            clicked => {
-                root.create(limited ? uses : "", expiry);
-            }
+    Button {
+        primary: true;
+        text: I18n.t("gui-create");
+        enabled: !root.busy;
+        clicked => {
+            root.create(limited ? uses : "", expiry);
         }
     }
 
-    if created != "": HorizontalLayout {
-        spacing: 4px;
-        if I18n.rtl: Button {
-            text: I18n.t("gui-copy");
-            clicked => {
-                root.copy(created);
-            }
-        }
-        Rectangle {
-            horizontal-stretch: 1;
-            height: 25px;
-            background: Theme.bg;
-            border-width: 1px;
-            border-color: Theme.line;
-            TextInput {
-                x: 5px;
-                width: parent.width - 10px;
-                text: created;
-                read-only: true;
-                single-line: true;
-                color: Theme.text;
-                font-family: "monospace";
-                font-size: 12px;
-                vertical-alignment: center;
-                selection-background-color: Theme.accent;
-                selection-foreground-color: Theme.accent-text;
-            }
+    if created != "": Rectangle {
+        height: 44px;
+        border-radius: 10px;
+        background: Theme.accent-soft;
+        property <length> button: 32px;
+        Text {
+            x: I18n.rtl ? 10px + button + 6px : 12px;
+            width: parent.width - 22px - button - 6px;
+            text: created;
+            color: Theme.text;
+            font-family: "monospace";
+            font-size: 12px;
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-alignment: I18n.rtl ? right : left;
         }
 
-        if !I18n.rtl: Button {
-            text: I18n.t("gui-copy");
+        IconButton {
+            x: I18n.rtl ? 6px : parent.width - self.width - 6px;
+            icon: Icons.copy;
+            tint: Theme.accent;
+            tooltip: I18n.t("gui-copy");
             clicked => {
                 root.copy(created);
             }
@@ -862,70 +826,60 @@ export component InvitesDialog inherits DialogFrame {
 
     ListBox {
         for invite in invites: VerticalLayout {
-            HorizontalLayout {
-                padding: 5px;
-                spacing: 4px;
-                if I18n.rtl: VerticalLayout {
-                    alignment: center;
-                    Button {
-                        small: true;
-                        danger: true;
-                        text: I18n.t("gui-revoke");
-                        clicked => {
-                            root.revoke(invite.code);
-                        }
-                    }
-                }
-                if I18n.rtl: VerticalLayout {
-                    alignment: center;
-                    Button {
-                        small: true;
-                        text: I18n.t("gui-copy");
-                        clicked => {
-                            root.copy(invite.link != "" ? invite.link : invite.code);
-                        }
-                    }
-                }
+            Rectangle {
+                height: 52px;
+                property <length> buttons: 2 * 32px + 4px;
                 VerticalLayout {
-                    horizontal-stretch: 1;
+                    x: I18n.rtl ? 10px + buttons + 8px : 12px;
+                    width: parent.width - 22px - buttons - 8px;
                     alignment: center;
-                    spacing: 1px;
+                    spacing: 2px;
                     Text {
                         text: invite.code;
                         color: Theme.text;
                         font-family: "monospace";
                         font-size: 12px;
-                        overflow: elide;
                         horizontal-alignment: I18n.rtl ? right : left;
                     }
 
                     Text {
                         text: invite.details;
                         color: Theme.muted;
-                        font-size: 11px;
+                        font-size: 12px;
                         overflow: elide;
                         horizontal-alignment: I18n.rtl ? right : left;
                     }
                 }
 
-                if !I18n.rtl: VerticalLayout {
-                    alignment: center;
-                    Button {
-                        small: true;
-                        text: I18n.t("gui-copy");
+                HorizontalLayout {
+                    x: I18n.rtl ? 6px : parent.width - buttons - 6px;
+                    width: buttons;
+                    spacing: 4px;
+                    padding-top: 10px;
+                    padding-bottom: 10px;
+                    IconButton {
+                        icon: I18n.rtl ? Icons.trash : Icons.copy;
+                        tint: I18n.rtl ? Theme.danger : Theme.muted;
+                        tooltip: I18n.t(I18n.rtl ? "gui-revoke" : "gui-copy");
                         clicked => {
-                            root.copy(invite.link != "" ? invite.link : invite.code);
+                            if I18n.rtl {
+                                root.revoke(invite.code);
+                            } else {
+                                root.copy(invite.link != "" ? invite.link : invite.code);
+                            }
                         }
                     }
-                }
-                if !I18n.rtl: VerticalLayout {
-                    alignment: center;
-                    Button {
-                        small: true;
-                        danger: true;
-                        text: I18n.t("gui-revoke");
+
+                    IconButton {
+                        icon: I18n.rtl ? Icons.copy : Icons.trash;
+                        tint: I18n.rtl ? Theme.muted : Theme.danger;
+                        tooltip: I18n.t(I18n.rtl ? "gui-copy" : "gui-revoke");
                         clicked => {
-                            root.revoke(invite.code);
+                            if I18n.rtl {
+                                root.copy(invite.link != "" ? invite.link : invite.code);
+                            } else {
+                                root.revoke(invite.code);
+                            }
                         }
                     }
                 }
@@ -1040,13 +994,11 @@ export component NetworkSettingsDialog inherits DialogFrame {
             }
         }
 
-        Row {
-            Button {
-                text: I18n.t("gui-rename-network");
-                enabled: !root.busy;
-                clicked => {
-                    root.rename(root.name);
-                }
+        Button {
+            text: I18n.t("gui-rename-network");
+            enabled: !root.busy;
+            clicked => {
+                root.rename(root.name);
             }
         }
 
@@ -1084,14 +1036,12 @@ export component NetworkSettingsDialog inherits DialogFrame {
             password: true;
         }
 
-        Row {
-            Button {
-                text: I18n.t("gui-change-password");
-                clicked => {
-                    root.change-password(new-password.text, repeat-password.text);
-                    new-password.text = "";
-                    repeat-password.text = "";
-                }
+        Button {
+            text: I18n.t("gui-change-password");
+            clicked => {
+                root.change-password(new-password.text, repeat-password.text);
+                new-password.text = "";
+                repeat-password.text = "";
             }
         }
 
@@ -1099,12 +1049,10 @@ export component NetworkSettingsDialog inherits DialogFrame {
             text: I18n.t("gui-delete-network");
         }
 
-        Row {
-            DangerButton {
-                text: I18n.t("gui-delete-network");
-                confirmed => {
-                    root.delete();
-                }
+        DangerButton {
+            text: I18n.t("gui-delete-network");
+            confirmed => {
+                root.delete();
             }
         }
     }
@@ -1142,12 +1090,10 @@ export component NetworkMenuDialog inherits DialogFrame {
             root.pick("settings");
         }
     }
-    Row {
-        DangerButton {
-            text: I18n.t("gui-leave");
-            confirmed => {
-                root.pick("leave");
-            }
+    DangerButton {
+        text: I18n.t("gui-leave");
+        confirmed => {
+            root.pick("leave");
         }
     }
 }
@@ -1177,20 +1123,16 @@ export component MemberDialog inherits DialogFrame {
         horizontal-alignment: I18n.rtl ? right : left;
     }
 
-    if owner && !admin: Row {
-        Button {
-            text: I18n.t("gui-promote");
-            clicked => {
-                root.act("promote");
-            }
+    if owner && !admin: Button {
+        text: I18n.t("gui-promote");
+        clicked => {
+            root.act("promote");
         }
     }
-    if owner && admin: Row {
-        Button {
-            text: I18n.t("gui-demote");
-            clicked => {
-                root.act("demote");
-            }
+    if owner && admin: Button {
+        text: I18n.t("gui-demote");
+        clicked => {
+            root.act("demote");
         }
     }
     if above: Section {
@@ -1200,13 +1142,11 @@ export component MemberDialog inherits DialogFrame {
         text: muted-text;
         color: Theme.danger;
     }
-    if above && muted: Row {
-        Button {
-            text: I18n.t("gui-unmute");
-            enabled: !root.busy;
-            clicked => {
-                root.act("unmute");
-            }
+    if above && muted: Button {
+        text: I18n.t("gui-unmute");
+        enabled: !root.busy;
+        clicked => {
+            root.act("unmute");
         }
     }
     if above && !muted: Paragraph {
@@ -1280,15 +1220,16 @@ export component DiagnosticsDialog inherits DialogFrame {
     leave-text: I18n.t("gui-close");
     title: I18n.t("gui-diagnostics");
     Rectangle {
-        height: min(report-text.preferred-height + 12px, 360px);
+        height: min(report-text.preferred-height + 20px, 360px);
+        border-radius: 10px;
         border-width: 1px;
         border-color: Theme.line;
-        background: Theme.card;
+        background: Theme.bg;
         Flickable {
-            x: 6px;
-            y: 6px;
-            width: parent.width - 12px;
-            height: parent.height - 12px;
+            x: 10px;
+            y: 10px;
+            width: parent.width - 20px;
+            height: parent.height - 20px;
             content-height: report-text.preferred-height;
             report-text := TextInput {
                 width: parent.width;
@@ -1299,14 +1240,16 @@ export component DiagnosticsDialog inherits DialogFrame {
                 color: Theme.text;
                 font-family: "monospace";
                 font-size: 12px;
-                selection-background-color: Theme.accent;
-                selection-foreground-color: Theme.accent-text;
+                selection-background-color: Theme.accent-soft;
             }
         }
     }
 
-    Row {
+    HorizontalLayout {
+        spacing: 8px;
         Button {
+            horizontal-stretch: 1;
+            small: true;
             text: I18n.t("gui-refresh");
             enabled: !root.busy;
             clicked => {
@@ -1315,6 +1258,8 @@ export component DiagnosticsDialog inherits DialogFrame {
         }
 
         Button {
+            horizontal-stretch: 1;
+            small: true;
             text: I18n.t("gui-copy");
             clicked => {
                 root.copy();
@@ -1322,7 +1267,10 @@ export component DiagnosticsDialog inherits DialogFrame {
         }
 
         Button {
-            text: I18n.t("gui-save-report") + "…";
+            horizontal-stretch: 1;
+            small: true;
+            primary: true;
+            text: I18n.t("gui-save-report");
             clicked => {
                 root.save();
             }

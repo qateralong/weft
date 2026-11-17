@@ -1,9 +1,8 @@
 // The Weft window and its tray icon.
 
-import { Palette } from "std-widgets.slint";
 import { Theme, I18n, Icons, Utils } from "theme.slint";
-import { Button, Dot } from "widgets.slint";
-import { NetworkView, Notice, Welcome, Toast, UpdateBanner, MemberRow, NetworkCard } from "main.slint";
+import { Button } from "widgets.slint";
+import { Header, NetworkView, Notice, Welcome, Toast, UpdateBanner, MemberRow, NetworkCard } from "main.slint";
 import {
     Chooser, Step, ServerRow, InviteRow, DeviceRow, CreateDialog, JoinDialog, SettingsDialog, ServersDialog,
     ServerMenuDialog, HostDialog, AddServerDialog, InvitesDialog, DevicesDialog, NetworkSettingsDialog,
@@ -183,267 +182,156 @@ export component AppWindow inherits Window {
 
     title: "Weft";
     icon: @image-url("../icons/icon.png");
-    preferred-width: 460px;
-    preferred-height: 640px;
-    min-width: 400px;
-    min-height: 420px;
+    preferred-width: 440px;
+    preferred-height: 680px;
+    min-width: 380px;
+    min-height: 480px;
     background: Theme.bg;
-    default-font-size: 13px;
-
-    // The menu bar is drawn by the toolkit, so its palette follows the app's theme.
-    property <bool> dark: Theme.dark;
-    changed dark => {
-        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
-    }
-    init => {
-        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
-    }
-
-    MenuBar {
-        Menu {
-            title: I18n.t("gui-menu-network");
-            MenuItem {
-                title: I18n.t(connection == "disconnected" ? "gui-connect" : "gui-disconnect");
-                enabled: phase == "main";
-                activated => {
-                    root.power();
-                }
-            }
-
-            MenuItem {
-                title: I18n.t("gui-refresh");
-                enabled: phase == "main";
-                activated => {
-                    root.refresh();
-                }
-            }
-
-            MenuSeparator { }
-
-            MenuItem {
-                title: I18n.t("gui-create-network") + "…";
-                activated => {
-                    root.create();
-                }
-            }
-
-            MenuItem {
-                title: I18n.t("gui-join-network") + "…";
-                activated => {
-                    root.join();
-                }
-            }
-        }
-
-        Menu {
-            title: I18n.t("gui-menu-view");
-            MenuItem {
-                title: I18n.t(Theme.dark ? "gui-theme-light" : "gui-theme-dark");
-                activated => {
-                    root.toggle-theme();
-                }
-            }
-        }
-
-        Menu {
-            title: I18n.t("gui-menu-tools");
-            MenuItem {
-                title: I18n.t("gui-settings") + "…";
-                activated => {
-                    root.open-settings();
-                }
-            }
-
-            MenuItem {
-                title: I18n.t("gui-diagnostics") + "…";
-                activated => {
-                    root.open-diagnostics();
-                }
-            }
-        }
-    }
+    animate background { duration: 300ms; }
+    default-font-size: 14px;
 
     VerticalLayout {
-        padding: 8px;
-        padding-bottom: 0;
-        spacing: 8px;
-        if phase == "main" && update-version != "": UpdateBanner {
-            version: update-version;
-            stage: update-stage;
-            progress: update-progress;
-            download => {
-                root.download-update();
+        Header {
+            full: phase == "main";
+            nickname: nickname;
+            connection: connection;
+            address: address;
+            refreshing: refreshing;
+            power => {
+                root.power();
+            }
+            refresh => {
+                root.refresh();
+            }
+            copy(text) => {
+                root.copy(text);
+            }
+            diagnostics => {
+                root.open-diagnostics();
+            }
+            theme => {
+                root.toggle-theme();
+            }
+            settings => {
+                root.open-settings();
             }
         }
 
-        // Buttons are listed in reading order and reversed for right-to-left languages.
-        if phase == "main": HorizontalLayout {
-            spacing: 6px;
-            alignment: I18n.rtl ? end : start;
-            if I18n.rtl: Button {
-                text: I18n.t("gui-join-network") + "…";
-                clicked => {
-                    root.join();
-                }
-            }
-            if I18n.rtl: Button {
-                text: I18n.t("gui-create-network") + "…";
-                clicked => {
-                    root.create();
-                }
-            }
-            Button {
-                text: I18n.t(connection == "disconnected" ? "gui-connect" : "gui-disconnect");
-                enabled: connection != "connecting";
-                clicked => {
-                    root.power();
-                }
-            }
-
-            if !I18n.rtl: Button {
-                text: I18n.t("gui-create-network") + "…";
-                clicked => {
-                    root.create();
-                }
-            }
-            if !I18n.rtl: Button {
-                text: I18n.t("gui-join-network") + "…";
-                clicked => {
-                    root.join();
-                }
-            }
-        }
-
-        Rectangle {
+        Flickable {
             vertical-stretch: 1;
-            background: Theme.card;
-            border-radius: 4px;
-            clip: true;
-            border-width: 1px;
-            border-color: Theme.line;
-            Flickable {
-                x: 1px;
-                y: 1px;
-                width: parent.width - 2px;
-                height: parent.height - 2px;
-                content-height: content.preferred-height;
-                content := VerticalLayout {
-                    alignment: start;
-                    if phase == "starting": Notice {
-                        title: I18n.t("gui-starting");
-                        busy: true;
+            content-height: content.preferred-height;
+            content := VerticalLayout {
+                padding: 16px;
+                padding-top: 14px;
+                spacing: 12px;
+                alignment: start;
+                if phase == "starting": Notice {
+                    title: I18n.t("gui-starting");
+                    busy: true;
+                }
+                if phase == "problem": Notice {
+                    title: problem-title;
+                    text: problem-text;
+                    action: problem-action;
+                    action-busy: problem-busy;
+                    act => {
+                        root.fix-problem();
                     }
-                    if phase == "problem": Notice {
-                        title: problem-title;
-                        text: problem-text;
-                        action: problem-action;
-                        action-busy: problem-busy;
-                        act => {
-                            root.fix-problem();
-                        }
+                }
+                if phase == "welcome": Welcome {
+                    nickname <=> root.welcome-nickname;
+                    nickname-changed(name) => {
+                        root.nickname-changed(name);
                     }
-                    if phase == "welcome": Welcome {
-                        nickname <=> root.welcome-nickname;
-                        nickname-changed(name) => {
-                            root.nickname-changed(name);
-                        }
-                        create => {
-                            root.create();
-                        }
-                        join => {
-                            root.join();
-                        }
+                    create => {
+                        root.create();
                     }
-                    if phase == "main": VerticalLayout {
-                        for network[i] in networks: NetworkView {
-                            data: network;
-                            toggle => {
-                                root.toggle-network(i);
-                            }
-                            copy(text) => {
-                                root.copy(text);
-                            }
-                            invites => {
-                                root.network-invites(i);
-                            }
-                            requests => {
-                                root.network-requests(i);
-                            }
-                            menu => {
-                                root.network-menu(i);
-                            }
-                            member-menu(member) => {
-                                root.member-menu(i, member);
-                            }
-                            member-ping(member) => {
-                                root.member-ping(i, member);
+                    join => {
+                        root.join();
+                    }
+                }
+                if phase == "main" && update-version != "": UpdateBanner {
+                    version: update-version;
+                    stage: update-stage;
+                    progress: update-progress;
+                    download => {
+                        root.download-update();
+                    }
+                }
+                if phase == "main": HorizontalLayout {
+                    spacing: 10px;
+                    Button {
+                        horizontal-stretch: 1;
+                        icon: I18n.rtl ? Icons.join : Icons.plus;
+                        text: I18n.t(I18n.rtl ? "gui-join-network" : "gui-create-network");
+                        primary: I18n.rtl;
+                        clicked => {
+                            if I18n.rtl {
+                                root.join();
+                            } else {
+                                root.create();
                             }
                         }
                     }
-                    if phase == "main" && networks.length == 0: Notice {
-                        title: empty-text;
-                        text: empty-hint;
-                        action: connection == "disconnected" ? I18n.t("gui-connect") : "";
-                        act => {
-                            root.power();
+
+                    Button {
+                        horizontal-stretch: 1;
+                        icon: I18n.rtl ? Icons.plus : Icons.join;
+                        text: I18n.t(I18n.rtl ? "gui-create-network" : "gui-join-network");
+                        primary: !I18n.rtl;
+                        clicked => {
+                            if I18n.rtl {
+                                root.create();
+                            } else {
+                                root.join();
+                            }
                         }
                     }
                 }
-            }
-        }
-
-        // Status bar: connection state and address on the reading side, the nickname on the other.
-        status := Rectangle {
-            height: 22px;
-            property <length> state-width: state-text.preferred-width + 14px;
-            function place(start: length, size: length) -> length {
-                return I18n.rtl ? self.width - start - size : start;
-            }
-            Rectangle {
-                y: 0;
-                height: 1px;
-                background: Theme.line-soft;
-            }
-
-            if phase == "main": Dot {
-                x: status.place(2px, 8px);
-                state: connection;
-            }
-            state-text := Text {
-                x: status.place(phase == "main" ? 14px : 2px, self.width);
-                text: phase == "main" ? I18n.t("state-" + connection) : phase == "starting" ? I18n.t("gui-starting") : "Weft";
-                color: Theme.text;
-                font-size: 12px;
-            }
-
-            if phase == "main" && address != "": Text {
-                x: status.place(state-width + 10px, self.width);
-                text: address;
-                color: address-touch.has-hover ? Theme.accent : Theme.muted;
-                font-family: "monospace";
-                font-size: 12px;
-                address-touch := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        root.copy(address);
+                if phase == "main": VerticalLayout {
+                    spacing: 12px;
+                    for network[i] in networks: NetworkView {
+                        data: network;
+                        toggle => {
+                            root.toggle-network(i);
+                        }
+                        copy(text) => {
+                            root.copy(text);
+                        }
+                        invites => {
+                            root.network-invites(i);
+                        }
+                        requests => {
+                            root.network-requests(i);
+                        }
+                        menu => {
+                            root.network-menu(i);
+                        }
+                        member-menu(member) => {
+                            root.member-menu(i, member);
+                        }
+                        member-ping(member) => {
+                            root.member-ping(i, member);
+                        }
                     }
                 }
-            }
-            if phase == "main": Text {
-                x: I18n.rtl ? 2px : parent.width - self.width - 2px;
-                width: min(self.preferred-width, parent.width / 3);
-                text: nickname;
-                color: Theme.muted;
-                font-size: 12px;
-                overflow: elide;
+                if phase == "main" && networks.length == 0: Notice {
+                    title: empty-text;
+                    text: empty-hint;
+                    action: connection == "disconnected" ? I18n.t("gui-connect") : "";
+                    act => {
+                        root.power();
+                    }
+                }
             }
         }
     }
 
     Toast {
-        width: min(self.preferred-width, root.width - 40px);
+        width: min(self.preferred-width, root.width - 32px);
         x: (root.width - self.width) / 2;
-        y: root.height - self.height - 30px;
+        y: root.height - self.height - (toast-shown ? 20px : 0px);
+        animate y { duration: 250ms; easing: ease-out; }
         text: toast-text;
         error: toast-error;
         shown: toast-shown;
