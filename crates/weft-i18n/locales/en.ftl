@@ -190,6 +190,7 @@ gui-close = Close
 gui-confirm = Click again to confirm
 gui-create-network = Create network
 gui-join-network = Join network
+gui-networks = Networks
 gui-network-name = Network name
 gui-password = Password
 gui-password-repeat = Repeat password

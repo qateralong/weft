@@ -1,4 +1,4 @@
-// The main screen: header, networks with their members, notices.
+// The main screen: title row, status, networks with their members, notices.
 
 import { Theme, I18n, Icons } from "theme.slint";
 import { Icon, IconButton, Button, Dot, Signal, Avatar, Tag, Spinner, Field, Separator } from "widgets.slint";
@@ -39,9 +39,10 @@ component MemberLine inherits Rectangle {
     callback copy(string);
     callback menu();
     callback ping();
+    in property <bool> last;
     property <bool> pinging;
-    height: 52px;
-    background: data.me ? Theme.accent-soft : touch.has-hover ? Theme.hover : transparent;
+    height: 48px;
+    background: touch.has-hover ? Theme.hover : transparent;
     property <bool> shown;
     Timer {
         interval: 16ms;
@@ -190,7 +191,9 @@ component MemberLine inherits Rectangle {
         }
     }
 
-    Separator {
+    if !last: Separator {
+        x: place(name-start, root.width - name-start);
+        width: root.width - name-start;
         y: parent.height - 1px;
     }
 }
@@ -204,8 +207,8 @@ export component NetworkView inherits Rectangle {
     callback menu();
     callback member-menu(int);
     callback member-ping(int);
-    property <length> head-height: 58px;
-    property <length> body-height: data.members.length * 52px;
+    property <length> head-height: 50px;
+    property <length> body-height: data.members.length * 48px + 2px;
     height: head-height + (data.collapsed ? 0px : body-height);
     property <bool> shown;
     Timer {
@@ -218,17 +221,11 @@ export component NetworkView inherits Rectangle {
     opacity: shown ? 1 : 0;
     animate height { duration: 250ms; easing: ease-in-out; }
     animate opacity { duration: 200ms; }
-    background: Theme.card;
-    border-radius: 10px;
-    border-width: 1px;
-    border-color: Theme.line;
     clip: true;
 
     Rectangle {
         y: 0;
         height: head-height;
-        background: head-touch.has-hover ? Theme.hover : transparent;
-        animate background { duration: 150ms; }
         head-touch := TouchArea {
             mouse-cursor: pointer;
             clicked => {
@@ -237,9 +234,9 @@ export component NetworkView inherits Rectangle {
         }
 
         HorizontalLayout {
-            padding-left: 10px;
-            padding-right: 10px;
-            spacing: 8px;
+            padding-left: 2px;
+            padding-right: 2px;
+            spacing: 6px;
             // Children are listed in reading order and reversed for right-to-left languages.
             if !I18n.rtl: VerticalLayout {
                 alignment: center;
@@ -252,8 +249,8 @@ export component NetworkView inherits Rectangle {
             }
             if I18n.rtl: HorizontalLayout {
                 spacing: 2px;
-                padding-top: 13px;
-                padding-bottom: 13px;
+                padding-top: 9px;
+                padding-bottom: 9px;
                 IconButton {
                     icon: Icons.more;
                     tooltip: I18n.t("gui-network-settings");
@@ -285,14 +282,6 @@ export component NetworkView inherits Rectangle {
                                 height: 18px;
                                 border-radius: 9px;
                                 background: Theme.danger;
-                                property <bool> popped;
-                                Timer {
-                                    interval: 16ms;
-                                    running: !popped;
-                                    triggered => {
-                                        popped = true;
-                                    }
-                                }
                                 Text {
                                     text: data.requests;
                                     color: white;
@@ -320,32 +309,59 @@ export component NetworkView inherits Rectangle {
                 }
             }
             VerticalLayout {
-                alignment: center;
-                spacing: 3px;
                 horizontal-stretch: 1;
-                Text {
-                    text: data.name + "  " + data.count;
-                    color: Theme.text;
-                    font-size: 15px;
-                    font-weight: 650;
-                    overflow: elide;
-                    horizontal-alignment: I18n.rtl ? right : left;
+                alignment: center;
+                spacing: 1px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: I18n.rtl ? end : start;
+                    if I18n.rtl: Text {
+                        text: data.count;
+                        color: Theme.muted;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: data.name;
+                        color: Theme.text;
+                        font-size: 15px;
+                        font-weight: 600;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+
+                    if !I18n.rtl: Text {
+                        text: data.count;
+                        color: Theme.muted;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
                 }
 
                 HorizontalLayout {
-                    spacing: 6px;
+                    spacing: 5px;
                     alignment: I18n.rtl ? end : start;
-                    for tag[i] in data.tags: Tag {
-                        text: tag;
-                        strong: I18n.rtl ? i == data.tags.length - 1 : i == 0;
+                    for tag[i] in data.tags: HorizontalLayout {
+                        spacing: 5px;
+                        if i > 0: Text {
+                            text: "·";
+                            color: Theme.muted;
+                            font-size: 12px;
+                        }
+                        Text {
+                            text: tag;
+                            color: (I18n.rtl ? i == data.tags.length - 1 : i == 0) ? Theme.accent : Theme.muted;
+                            font-size: 12px;
+                            overflow: elide;
+                        }
                     }
                 }
             }
 
             if !I18n.rtl: HorizontalLayout {
                 spacing: 2px;
-                padding-top: 13px;
-                padding-bottom: 13px;
+                padding-top: 9px;
+                padding-bottom: 9px;
                 if data.manager && data.requests > 0: requests := Rectangle {
                     width: 52px;
                     border-radius: 8px;
@@ -370,14 +386,6 @@ export component NetworkView inherits Rectangle {
                                 height: 18px;
                                 border-radius: 9px;
                                 background: Theme.danger;
-                                property <bool> popped;
-                                Timer {
-                                    interval: 16ms;
-                                    running: !popped;
-                                    triggered => {
-                                        popped = true;
-                                    }
-                                }
                                 Text {
                                     text: data.requests;
                                     color: white;
@@ -422,23 +430,29 @@ export component NetworkView inherits Rectangle {
         }
     }
 
-    Separator {
+    if !data.collapsed: Rectangle {
         y: head-height;
-    }
-
-    for member[i] in data.members: MemberLine {
-        y: head-height + 1px + i * 52px;
-        width: root.width;
-        data: member;
-        manager: data.manager;
-        copy(text) => {
-            root.copy(text);
-        }
-        menu => {
-            root.member-menu(i);
-        }
-        ping => {
-            root.member-ping(i);
+        height: body-height;
+        background: Theme.card;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.line;
+        clip: true;
+        for member[i] in data.members: MemberLine {
+            y: 1px + i * 48px;
+            width: parent.width;
+            data: member;
+            manager: data.manager;
+            last: i == data.members.length - 1;
+            copy(text) => {
+                root.copy(text);
+            }
+            menu => {
+                root.member-menu(i);
+            }
+            ping => {
+                root.member-ping(i);
+            }
         }
     }
 }
@@ -451,7 +465,7 @@ export component Notice inherits Rectangle {
     in property <bool> action-busy;
     callback act();
     background: Theme.card;
-    border-radius: 10px;
+    border-radius: 8px;
     border-width: 1px;
     border-color: Theme.line;
     VerticalLayout {
@@ -497,7 +511,7 @@ export component Welcome inherits Rectangle {
     callback create();
     callback join();
     background: Theme.card;
-    border-radius: 10px;
+    border-radius: 8px;
     border-width: 1px;
     border-color: Theme.line;
     VerticalLayout {
@@ -563,118 +577,36 @@ export component Welcome inherits Rectangle {
     }
 }
 
+// Title row: app name and tools.
 export component Header inherits Rectangle {
     in property <bool> full;
-    in property <string> nickname;
-    in property <string> connection;
-    in property <string> address;
     in property <bool> refreshing;
-    callback power();
-    callback copy(string);
     callback refresh();
     callback diagnostics();
     callback theme();
     callback settings();
-    height: 74px;
-    background: Theme.card;
-    animate background { duration: 300ms; }
-
-    Rectangle {
-        y: root.height - 1px;
-        height: 1px;
-        background: Theme.line;
-    }
+    height: 48px;
 
     property <length> tools-width: (full ? 4 : 3) * 32px + (full ? 3 : 2) * 2px;
-    property <length> power-width: full ? 46px + 12px : 0px;
-    property <length> text-width: root.width - 32px - tools-width - power-width - 12px;
 
     function place(start: length, size: length) -> length {
         return I18n.rtl ? root.width - start - size : start;
     }
 
-    if full: Rectangle {
-        x: place(16px, 46px);
-        width: 46px;
-        height: 46px;
-        border-radius: 23px;
-        background: connection == "connected" ? Theme.accent : Theme.bg;
-        border-width: connection == "connected" ? 0 : 2px;
-        border-color: connection == "connecting" ? Theme.warn : power-touch.has-hover ? Theme.accent : Theme.line;
-        animate background, border-color { duration: 250ms; }
-        accessible-role: button;
-        accessible-label: I18n.t(connection == "disconnected" ? "gui-connect" : "gui-disconnect");
-        Icon {
-            width: 22px;
-            height: 22px;
-            name: Icons.power;
-            stroke: connection == "connected" ? Theme.accent-text : connection == "connecting" ? Theme.warn : Theme.muted;
-        }
-
-        power-touch := TouchArea {
-            mouse-cursor: pointer;
-            clicked => {
-                root.power();
-            }
-        }
-    }
-
-    VerticalLayout {
-        x: place(16px + power-width, text-width);
-        width: text-width;
-        alignment: center;
-        spacing: 2px;
-        Text {
-            text: full ? nickname : "Weft";
-            color: Theme.text;
-            font-size: 16px;
-            font-weight: 650;
-            overflow: elide;
-            horizontal-alignment: I18n.rtl ? right : left;
-        }
-
-        if full: HorizontalLayout {
-            spacing: 6px;
-            alignment: I18n.rtl ? end : start;
-            if !I18n.rtl: VerticalLayout {
-                alignment: center;
-                Dot {
-                    state: connection;
-                }
-            }
-            Text {
-                text: I18n.t("state-" + connection);
-                color: Theme.muted;
-                font-size: 12px;
-            }
-
-            if address != "": address-text := Text {
-                text: address;
-                color: address-touch.has-hover ? Theme.accent : Theme.muted;
-                font-family: "monospace";
-                font-size: 12px;
-                address-touch := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        root.copy(address);
-                    }
-                }
-            }
-            if I18n.rtl: VerticalLayout {
-                alignment: center;
-                Dot {
-                    state: connection;
-                }
-            }
-        }
+    Text {
+        x: place(16px, self.width);
+        text: "Weft";
+        color: Theme.text;
+        font-size: 16px;
+        font-weight: 600;
     }
 
     HorizontalLayout {
-        x: place(root.width - 16px - tools-width, tools-width);
+        x: place(root.width - 12px - tools-width, tools-width);
         width: tools-width;
         spacing: 2px;
-        padding-top: 21px;
-        padding-bottom: 21px;
+        padding-top: 8px;
+        padding-bottom: 8px;
         if full && !I18n.rtl: IconButton {
             icon: Icons.refresh;
             tooltip: I18n.t("gui-refresh");
@@ -722,6 +654,89 @@ export component Header inherits Rectangle {
             clicked => {
                 root.refresh();
             }
+        }
+    }
+}
+
+// Who we are and whether we are connected, with the button that switches it.
+export component StatusPanel inherits Rectangle {
+    in property <string> nickname;
+    in property <string> connection;
+    in property <string> address;
+    callback power();
+    callback copy(string);
+    height: 60px;
+    background: Theme.card;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.line;
+
+    property <length> pad: 14px;
+    property <length> button-width: power-button.preferred-width;
+    property <length> text-width: root.width - 2 * pad - button-width - 12px;
+
+    function place(start: length, size: length) -> length {
+        return I18n.rtl ? root.width - start - size : start;
+    }
+
+    VerticalLayout {
+        x: place(pad, text-width);
+        width: text-width;
+        alignment: center;
+        spacing: 3px;
+        Text {
+            text: nickname;
+            color: Theme.text;
+            font-size: 15px;
+            font-weight: 600;
+            overflow: elide;
+            horizontal-alignment: I18n.rtl ? right : left;
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: I18n.rtl ? end : start;
+            if !I18n.rtl: VerticalLayout {
+                alignment: center;
+                Dot {
+                    state: connection;
+                }
+            }
+            Text {
+                text: I18n.t("state-" + connection);
+                color: Theme.muted;
+                font-size: 12px;
+            }
+
+            if address != "": Text {
+                text: address;
+                color: address-touch.has-hover ? Theme.accent : Theme.muted;
+                font-family: "monospace";
+                font-size: 12px;
+                address-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.copy(address);
+                    }
+                }
+            }
+            if I18n.rtl: VerticalLayout {
+                alignment: center;
+                Dot {
+                    state: connection;
+                }
+            }
+        }
+    }
+
+    power-button := Button {
+        x: place(root.width - pad - self.width, self.width);
+        width: self.min-width;
+        icon: Icons.power;
+        text: I18n.t(connection == "disconnected" ? "gui-connect" : "gui-disconnect");
+        primary: connection == "disconnected";
+        clicked => {
+            root.power();
         }
     }
 }
@@ -782,7 +797,7 @@ export component UpdateBanner inherits Rectangle {
     in property <int> progress;
     callback download();
     height: 48px;
-    border-radius: 10px;
+    border-radius: 8px;
     background: Theme.accent-soft;
     clip: true;
     if stage == "downloading": Rectangle {

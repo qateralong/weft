@@ -57,9 +57,9 @@ export component Button inherits Rectangle {
     in property <bool> small;
     in property <bool> enabled: true;
     callback clicked();
-    height: small ? 28px : 40px;
+    height: small ? 30px : 36px;
     min-width: content.preferred-width + (small ? 18px : 26px);
-    border-radius: small ? 6px : 8px;
+    border-radius: 6px;
     opacity: enabled ? 1 : 0.5;
     background: primary ? (touch.has-hover && enabled ? Theme.accent.brighter(0.08) : Theme.accent)
         : danger && touch.has-hover && enabled ? Theme.danger-soft
@@ -88,7 +88,7 @@ export component Button inherits Rectangle {
             text: root.text;
             color: primary ? Theme.accent-text : danger ? Theme.danger : Theme.text;
             font-weight: primary ? 600 : 400;
-            font-size: small ? 12px : 14px;
+            font-size: small ? 13px : 14px;
             vertical-alignment: center;
         }
 
@@ -118,9 +118,9 @@ export component DangerButton inherits Rectangle {
     in property <bool> small;
     callback confirmed();
     property <bool> armed;
-    height: small ? 28px : 40px;
+    height: small ? 30px : 36px;
     min-width: label.preferred-width + 26px;
-    border-radius: small ? 6px : 8px;
+    border-radius: 6px;
     background: armed ? Theme.danger : touch.has-hover ? Theme.danger-soft : Theme.card;
     border-width: 1px;
     border-color: armed || touch.has-hover ? Theme.danger : Theme.line;
@@ -128,7 +128,7 @@ export component DangerButton inherits Rectangle {
     label := Text {
         text: armed ? I18n.t("gui-confirm") : root.text;
         color: armed ? white : Theme.danger;
-        font-size: small ? 12px : 14px;
+        font-size: small ? 13px : 14px;
         font-weight: armed ? 600 : 400;
     }
 
@@ -174,8 +174,8 @@ export component Field inherits VerticalLayout {
         text: label;
     }
     Rectangle {
-        height: 38px;
-        border-radius: 8px;
+        height: 36px;
+        border-radius: 6px;
         background: Theme.field;
         border-width: 1px;
         border-color: input.has-focus ? Theme.accent : Theme.line;
@@ -492,13 +492,11 @@ export component Tag inherits Rectangle {
     in property <string> text;
     in property <bool> strong;
     height: 18px;
-    border-radius: 8px;
+    border-radius: 4px;
     background: strong ? Theme.accent-soft : Theme.bg;
-    border-width: strong ? 0 : 1px;
-    border-color: Theme.line;
     HorizontalLayout {
-        padding-left: 7px;
-        padding-right: 7px;
+        padding-left: 6px;
+        padding-right: 6px;
         Text {
             text: root.text;
             color: strong ? Theme.accent : Theme.muted;

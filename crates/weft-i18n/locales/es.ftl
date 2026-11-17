@@ -190,6 +190,7 @@ gui-close = Cerrar
 gui-confirm = Pulse otra vez para confirmar
 gui-create-network = Crear red
 gui-join-network = Unirse a una red
+gui-networks = Redes
 gui-network-name = Nombre de la red
 gui-password = Contraseña
 gui-password-repeat = Repita la contraseña
