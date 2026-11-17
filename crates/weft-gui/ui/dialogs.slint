@@ -1,7 +1,7 @@
 // Dialogs over the main screen. Each one reports what the user entered through callbacks.
 
 import { Theme, I18n, Icons, Utils } from "theme.slint";
-import { Icon, Button, DangerButton, Caption, Field, Switch, Select, MenuRow, Dot, Signal, ListBox, Separator, Avatar } from "widgets.slint";
+import { Icon, IconButton, Button, DangerButton, Caption, Field, Switch, Select, MenuRow, Dot, Signal, ListBox, Separator, Avatar } from "widgets.slint";
 
 export struct Step {
     label: string,
@@ -104,10 +104,13 @@ export component DialogFrame inherits Rectangle {
         height: min(content.preferred-height + 2px, root.height - 24px);
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
-        background: Theme.bg;
+        background: Theme.card;
+        border-radius: 6px;
         border-width: 1px;
-        border-color: Theme.text.with-alpha(0.6);
-        clip: true;
+        border-color: Theme.line;
+        drop-shadow-blur: 20px;
+        drop-shadow-offset-y: 6px;
+        drop-shadow-color: Theme.shadow;
 
         keys := FocusScope {
             x: 1px;
@@ -124,49 +127,35 @@ export component DialogFrame inherits Rectangle {
 
             content := VerticalLayout {
                 Rectangle {
-                    height: 22px;
-                    background: Theme.accent;
+                    height: 40px;
                     Text {
-                        x: I18n.rtl ? 26px : 6px;
-                        width: parent.width - 32px;
+                        x: I18n.rtl ? 40px : 14px;
+                        width: parent.width - 54px;
                         text: title != "" ? title : "Weft";
-                        color: Theme.accent-text;
-                        font-size: 12px;
-                        font-weight: 700;
+                        color: Theme.text;
+                        font-size: 14px;
+                        font-weight: 600;
                         overflow: elide;
                         horizontal-alignment: I18n.rtl ? right : left;
                     }
 
-                    close := Rectangle {
-                        x: I18n.rtl ? 3px : parent.width - self.width - 3px;
-                        width: 18px;
-                        height: 16px;
-                        border-width: 1px;
-                        border-color: Theme.line;
-                        background: close-touch.pressed ? Theme.button-pressed : @linear-gradient(180deg, Theme.button-top 0%, Theme.button-bottom 100%);
-                        accessible-role: button;
-                        accessible-label: leave-text;
-                        Path {
-                            width: 8px;
-                            height: 8px;
-                            commands: "M0 0 L8 8 M8 0 L0 8";
-                            stroke: Theme.text;
-                            stroke-width: 1.5px;
-                        }
-
-                        close-touch := TouchArea {
-                            clicked => {
-                                root.leave();
-                            }
+                    IconButton {
+                        x: I18n.rtl ? 8px : parent.width - self.width - 8px;
+                        icon: "M6 6l12 12 M18 6L6 18";
+                        tooltip: leave-text;
+                        clicked => {
+                            root.leave();
                         }
                     }
                 }
 
                 VerticalLayout {
-                    padding: 10px;
-                    spacing: 8px;
+                    padding: 14px;
+                    padding-top: 0;
+                    spacing: 10px;
                     if error != "": Rectangle {
                         background: Theme.danger-soft;
+                        border-radius: 4px;
                         border-width: 1px;
                         border-color: Theme.danger;
                         height: error-text.preferred-height + 10px;
@@ -187,8 +176,8 @@ export component DialogFrame inherits Rectangle {
                         content-height: body.preferred-height;
                         body := VerticalLayout {
                             // The card's own width, so wrapped text knows its lines before the layout runs.
-                            width: card.width - 22px;
-                            spacing: 8px;
+                            width: card.width - 30px;
+                            spacing: 10px;
                             @children
                         }
                     }
@@ -576,7 +565,7 @@ component ServerLine inherits Rectangle {
     callback menu();
     height: line.preferred-height;
     property <length> pad: 6px;
-    property <length> button-width: 24px;
+    property <length> button-width: 26px;
     property <length> signal-width: 72px;
     property <length> text-width: self.width - 2 * pad - button-width - signal-width - 12px;
 
@@ -643,13 +632,11 @@ component ServerLine inherits Rectangle {
                 ping: data.ping;
             }
 
-            Button {
+            IconButton {
                 x: place(root.width - 2 * pad - button-width, button-width);
                 width: button-width;
-                min-width: button-width;
-                height: 20px;
-                small: true;
-                text: "…";
+                icon: Icons.more;
+                tooltip: I18n.t("gui-settings");
                 clicked => {
                     root.menu();
                 }

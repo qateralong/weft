@@ -1,5 +1,6 @@
 // The Weft window and its tray icon.
 
+import { Palette } from "std-widgets.slint";
 import { Theme, I18n, Icons, Utils } from "theme.slint";
 import { Button, Dot } from "widgets.slint";
 import { NetworkView, Notice, Welcome, Toast, UpdateBanner, MemberRow, NetworkCard } from "main.slint";
@@ -189,6 +190,15 @@ export component AppWindow inherits Window {
     background: Theme.bg;
     default-font-size: 13px;
 
+    // The menu bar is drawn by the toolkit, so its palette follows the app's theme.
+    property <bool> dark: Theme.dark;
+    changed dark => {
+        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+    }
+    init => {
+        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+    }
+
     MenuBar {
         Menu {
             title: I18n.t("gui-menu-network");
@@ -254,9 +264,9 @@ export component AppWindow inherits Window {
     }
 
     VerticalLayout {
-        padding: 6px;
+        padding: 8px;
         padding-bottom: 0;
-        spacing: 6px;
+        spacing: 8px;
         if phase == "main" && update-version != "": UpdateBanner {
             version: update-version;
             stage: update-stage;
@@ -268,7 +278,7 @@ export component AppWindow inherits Window {
 
         // Buttons are listed in reading order and reversed for right-to-left languages.
         if phase == "main": HorizontalLayout {
-            spacing: 4px;
+            spacing: 6px;
             alignment: I18n.rtl ? end : start;
             if I18n.rtl: Button {
                 text: I18n.t("gui-join-network") + "…";
@@ -307,6 +317,8 @@ export component AppWindow inherits Window {
         Rectangle {
             vertical-stretch: 1;
             background: Theme.card;
+            border-radius: 4px;
+            clip: true;
             border-width: 1px;
             border-color: Theme.line;
             Flickable {

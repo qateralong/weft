@@ -24,33 +24,33 @@ export global Utils {
 export global Theme {
     in-out property <bool> dark;
     // Window face, list and field backgrounds.
-    out property <color> bg: dark ? #2d2d2d : #e4e4e4;
-    out property <color> card: dark ? #1e1e1e : #ffffff;
-    out property <color> hover: dark ? #2c3a50 : #e8f0fb;
-    out property <color> field: dark ? #1e1e1e : #ffffff;
+    out property <color> bg: dark ? #202020 : #f3f3f3;
+    out property <color> card: dark ? #2b2b2b : #ffffff;
+    out property <color> hover: dark ? #333a44 : #eef4fc;
+    out property <color> field: dark ? #1d1d1d : #ffffff;
     // Group rows in lists.
-    out property <color> group: dark ? #353535 : #eeeeee;
-    out property <color> text: dark ? #dcdcdc : #000000;
-    out property <color> muted: dark ? #9a9a9a : #5a5a5a;
+    out property <color> group: dark ? #313131 : #f7f7f7;
+    out property <color> text: dark ? #e4e4e4 : #1b1b1b;
+    out property <color> muted: dark ? #9c9c9c : #6b6b6b;
     // Frames of buttons, fields and lists; rows inside lists use the lighter one.
-    out property <color> line: dark ? #5c5c5c : #8c8c8c;
-    out property <color> line-soft: dark ? #3a3a3a : #dcdcdc;
-    out property <color> button-top: dark ? #4a4a4a : #fbfbfb;
-    out property <color> button-bottom: dark ? #3a3a3a : #dadada;
-    out property <color> button-pressed: dark ? #303030 : #c8c8c8;
-    out property <color> accent: dark ? #4d7cc0 : #24579a;
-    out property <color> accent-soft: dark ? #2e4a72 : #c5d8f1;
+    out property <color> line: dark ? #474747 : #cfcfcf;
+    out property <color> line-soft: dark ? #363636 : #ebebeb;
+    out property <color> button: dark ? #363636 : #fdfdfd;
+    out property <color> button-hover: dark ? #3f3f3f : #f2f2f2;
+    out property <color> button-pressed: dark ? #2e2e2e : #e6e6e6;
+    out property <color> accent: dark ? #4a8fe0 : #2468c8;
+    out property <color> accent-soft: dark ? #2a3d57 : #dce8f8;
     out property <color> accent-text: #ffffff;
-    out property <color> danger: dark ? #e06464 : #b31b1b;
-    out property <color> danger-soft: dark ? #4a2828 : #f8dede;
-    out property <color> ok: dark ? #52b85e : #23862f;
-    out property <color> warn: dark ? #d9a032 : #b97c00;
-    out property <color> off: dark ? #6a6a6a : #a0a0a0;
-    // Yellow notes, like tooltips: update offers and short messages.
-    out property <color> note: dark ? #3d3a26 : #ffffe1;
-    out property <color> note-line: dark ? #77704a : #a09a60;
-    out property <color> shadow: transparent;
-    out property <color> backdrop: #00000038;
+    out property <color> danger: dark ? #e86a6a : #c42b2b;
+    out property <color> danger-soft: dark ? #4a2828 : #fbe5e5;
+    out property <color> ok: dark ? #52b85e : #2a9038;
+    out property <color> warn: dark ? #d9a032 : #c08400;
+    out property <color> off: dark ? #6a6a6a : #b0b0b0;
+    // Soft yellow notes: update offers and short messages.
+    out property <color> note: dark ? #3a3624 : #fff7d6;
+    out property <color> note-line: dark ? #6b6238 : #e8d68a;
+    out property <color> shadow: dark ? #00000066 : #00000026;
+    out property <color> backdrop: #00000040;
 
     out property <[color]> avatars-light: [#a85a3c, #977226, #61733a, #3b7166, #4f648a, #74548d, #965067, #6f5741];
     out property <[color]> avatars-dark: [#b86848, #a8873a, #5f8f52, #3f8c84, #4a78a8, #7563aa, #a35a8a, #86705a];

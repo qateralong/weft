@@ -1,20 +1,47 @@
-// Plain widgets in the look of an ordinary desktop toolkit: square frames, gray buttons, no motion.
+// Plain widgets in the look of an ordinary desktop toolkit: flat buttons, thin frames, no motion.
 
 import { Theme, I18n, Icons } from "theme.slint";
 
 export component Icon inherits Path {
     in property <string> name;
     commands: name;
-    width: 14px;
-    height: 14px;
+    width: 16px;
+    height: 16px;
     viewbox-x: 0;
     viewbox-y: 0;
     viewbox-width: 24;
     viewbox-height: 24;
     fill: transparent;
     stroke-width: 2px;
-    stroke-line-cap: square;
-    stroke-line-join: miter;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+}
+
+// A flat button with only an icon; it shows its background while hovered.
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> tooltip;
+    in property <color> tint: Theme.muted;
+    callback clicked();
+    width: 26px;
+    height: 24px;
+    border-radius: 4px;
+    background: touch.pressed ? Theme.button-pressed : touch.has-hover ? Theme.button-hover : transparent;
+    accessible-role: button;
+    accessible-label: tooltip;
+    accessible-action-default => {
+        root.clicked();
+    }
+    Icon {
+        name: icon;
+        stroke: touch.has-hover ? Theme.text : tint;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
 }
 
 export component Button inherits Rectangle {
@@ -24,33 +51,24 @@ export component Button inherits Rectangle {
     in property <bool> small;
     in property <bool> enabled: true;
     callback clicked();
-    height: small ? 22px : 25px;
-    min-width: max(small ? 0px : 80px, label.preferred-width + (small ? 14px : 20px));
+    height: small ? 24px : 28px;
+    min-width: max(small ? 0px : 80px, label.preferred-width + (small ? 16px : 24px));
     horizontal-stretch: 0;
-    border-radius: 2px;
-    border-width: 1px;
-    border-color: !enabled ? Theme.line-soft : primary || touch.has-hover ? Theme.accent : Theme.line;
-    background: touch.pressed && enabled ? Theme.button-pressed
-        : @linear-gradient(180deg, Theme.button-top 0%, Theme.button-bottom 100%);
+    border-radius: 4px;
+    border-width: primary && enabled ? 0 : 1px;
+    border-color: Theme.line;
+    opacity: enabled ? 1 : 0.55;
+    background: primary ? (touch.pressed ? Theme.accent.darker(0.15) : touch.has-hover && enabled ? Theme.accent.brighter(0.08) : Theme.accent)
+        : touch.pressed && enabled ? Theme.button-pressed
+        : touch.has-hover && enabled ? Theme.button-hover : Theme.button;
     accessible-role: button;
     accessible-label: text;
     accessible-action-default => {
         root.clicked();
     }
-    // The default button of a dialog gets a second frame line.
-    if primary && enabled: Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: parent.height - 2px;
-        border-width: 1px;
-        border-color: Theme.accent.with-alpha(0.35);
-    }
     label := Text {
-        x: (parent.width - self.width) / 2 + (touch.pressed && enabled ? 1px : 0px);
-        y: (parent.height - self.height) / 2 + (touch.pressed && enabled ? 1px : 0px);
         text: root.text;
-        color: !enabled ? Theme.muted : danger ? Theme.danger : Theme.text;
+        color: primary ? Theme.accent-text : danger ? Theme.danger : Theme.text;
         font-size: small ? 12px : 13px;
     }
 
@@ -68,22 +86,21 @@ export component DangerButton inherits Rectangle {
     in property <bool> small;
     callback confirmed();
     property <bool> armed;
-    height: small ? 22px : 25px;
-    min-width: max(80px, label.preferred-width + 20px);
+    height: small ? 24px : 28px;
+    min-width: max(80px, label.preferred-width + 24px);
     horizontal-stretch: 0;
-    border-radius: 2px;
-    border-width: 1px;
-    border-color: armed || touch.has-hover ? Theme.danger : Theme.line;
+    border-radius: 4px;
+    border-width: armed ? 0 : 1px;
+    border-color: touch.has-hover ? Theme.danger : Theme.line;
     background: armed ? Theme.danger
         : touch.pressed ? Theme.button-pressed
-        : @linear-gradient(180deg, Theme.button-top 0%, Theme.button-bottom 100%);
+        : touch.has-hover ? Theme.danger-soft : Theme.button;
     accessible-role: button;
     accessible-label: label.text;
     label := Text {
         text: armed ? I18n.t("gui-confirm") : root.text;
         color: armed ? white : Theme.danger;
         font-size: small ? 12px : 13px;
-        font-weight: armed ? 700 : 400;
     }
 
     touch := TouchArea {
@@ -122,27 +139,28 @@ export component Field inherits VerticalLayout {
     callback accepted();
     callback edited(string);
     forward-focus: input;
-    spacing: 3px;
+    spacing: 4px;
     if label != "": Caption {
         text: label;
     }
     Rectangle {
-        height: 24px;
+        height: 28px;
+        border-radius: 4px;
         background: enabled ? Theme.field : Theme.bg;
         border-width: 1px;
         border-color: input.has-focus ? Theme.accent : Theme.line;
         clip: true;
         if text == "" && !input.has-focus: Text {
-            x: 5px;
-            width: parent.width - 10px;
+            x: 7px;
+            width: parent.width - 14px;
             text: placeholder;
             color: Theme.muted;
             font-size: 13px;
             horizontal-alignment: I18n.rtl ? right : left;
         }
         input := TextInput {
-            x: 5px;
-            width: parent.width - 10px;
+            x: 7px;
+            width: parent.width - 14px;
             text <=> root.text;
             enabled: root.enabled;
             color: Theme.text;
@@ -169,7 +187,7 @@ export component Switch inherits Rectangle {
     in-out property <bool> checked;
     in property <bool> enabled: true;
     callback toggled(bool);
-    height: max(18px, label.preferred-height);
+    height: max(22px, label.preferred-height);
     accessible-role: checkbox;
     accessible-checkable: true;
     accessible-checked: checked;
@@ -179,25 +197,27 @@ export component Switch inherits Rectangle {
         root.toggled(checked);
     }
     box := Rectangle {
-        x: I18n.rtl ? parent.width - 13px : 0;
-        y: (parent.height - 13px) / 2;
-        width: 13px;
-        height: 13px;
-        background: enabled ? (touch.pressed ? Theme.button-pressed : Theme.field) : Theme.bg;
-        border-width: 1px;
-        border-color: touch.has-hover && enabled ? Theme.accent : Theme.line;
+        x: I18n.rtl ? parent.width - 16px : 0;
+        y: (parent.height - 16px) / 2;
+        width: 16px;
+        height: 16px;
+        border-radius: 3px;
+        opacity: enabled ? 1 : 0.5;
+        background: checked ? Theme.accent : Theme.field;
+        border-width: checked ? 0 : 1px;
+        border-color: touch.has-hover && enabled ? Theme.accent : Theme.line.darker(0.15);
         if checked: Icon {
-            width: 11px;
-            height: 11px;
+            width: 12px;
+            height: 12px;
             name: Icons.check;
-            stroke: enabled ? Theme.text : Theme.muted;
-            stroke-width: 3.5px;
+            stroke: Theme.accent-text;
+            stroke-width: 3px;
         }
     }
 
     label := Text {
-        x: I18n.rtl ? 0 : 20px;
-        width: parent.width - 20px;
+        x: I18n.rtl ? 0 : 24px;
+        width: parent.width - 24px;
         text: root.text;
         color: enabled ? Theme.text : Theme.muted;
         font-size: 13px;
@@ -214,27 +234,20 @@ export component Switch inherits Rectangle {
     }
 }
 
-// A small arrow pointing down, drawn rather than taken from a font.
-component Arrow inherits Path {
-    width: 7px;
-    height: 4px;
-    commands: "M0 0 L7 0 L3.5 4 Z";
-    stroke-width: 0;
-}
-
 export component Select inherits Rectangle {
     in property <[string]> options;
     in-out property <int> current;
     callback selected(int);
-    height: 24px;
-    background: Theme.field;
+    height: 28px;
+    border-radius: 4px;
+    background: touch.pressed ? Theme.button-pressed : touch.has-hover ? Theme.button-hover : Theme.button;
     border-width: 1px;
-    border-color: touch.has-hover ? Theme.accent : Theme.line;
+    border-color: Theme.line;
     accessible-role: combobox;
     accessible-value: current >= 0 && current < options.length ? options[current] : "";
     Text {
-        x: I18n.rtl ? 22px : 5px;
-        width: parent.width - 28px;
+        x: I18n.rtl ? 28px : 8px;
+        width: parent.width - 36px;
         text: current >= 0 && current < options.length ? options[current] : "";
         color: Theme.text;
         font-size: 13px;
@@ -242,21 +255,12 @@ export component Select inherits Rectangle {
         horizontal-alignment: I18n.rtl ? right : left;
     }
 
-    Rectangle {
-        x: I18n.rtl ? 1px : parent.width - 18px;
-        y: 1px;
-        width: 17px;
-        height: parent.height - 2px;
-        background: touch.pressed ? Theme.button-pressed : @linear-gradient(180deg, Theme.button-top 0%, Theme.button-bottom 100%);
-        Rectangle {
-            x: I18n.rtl ? parent.width - 1px : 0;
-            width: 1px;
-            background: Theme.line-soft;
-        }
-
-        Arrow {
-            fill: Theme.text;
-        }
+    Icon {
+        x: I18n.rtl ? 8px : parent.width - 22px;
+        width: 14px;
+        height: 14px;
+        name: Icons.chevron;
+        stroke: Theme.muted;
     }
 
     touch := TouchArea {
@@ -267,20 +271,25 @@ export component Select inherits Rectangle {
 
     popup := PopupWindow {
         x: 0;
-        y: root.height - 1px;
+        y: root.height + 2px;
         width: root.width;
         Rectangle {
-            background: Theme.field;
+            background: Theme.card;
+            border-radius: 4px;
             border-width: 1px;
-            border-color: Theme.text.with-alpha(0.7);
+            border-color: Theme.line;
+            drop-shadow-blur: 8px;
+            drop-shadow-offset-y: 2px;
+            drop-shadow-color: Theme.shadow;
             VerticalLayout {
-                padding: 1px;
+                padding: 3px;
                 for option[i] in options: Rectangle {
-                    height: 20px;
+                    height: 24px;
+                    border-radius: 3px;
                     background: option-touch.has-hover ? Theme.accent : i == current ? Theme.accent-soft : transparent;
                     Text {
-                        x: 5px;
-                        width: parent.width - 10px;
+                        x: 6px;
+                        width: parent.width - 12px;
                         text: option;
                         font-size: 13px;
                         color: option-touch.has-hover ? Theme.accent-text : Theme.text;
@@ -299,34 +308,54 @@ export component Select inherits Rectangle {
     }
 }
 
-// A button that opens another dialog; the dots say so, as in menus.
+// A full-width row that opens another dialog, like a submenu.
 export component MenuRow inherits Rectangle {
     in property <string> text;
     in property <string> detail;
     in property <bool> danger;
     in property <bool> arrow;
     callback clicked();
-    height: 25px;
-    border-radius: 2px;
+    height: 30px;
+    border-radius: 4px;
     border-width: 1px;
-    border-color: touch.has-hover ? (danger ? Theme.danger : Theme.accent) : Theme.line;
-    background: touch.pressed ? Theme.button-pressed : @linear-gradient(180deg, Theme.button-top 0%, Theme.button-bottom 100%);
+    border-color: Theme.line;
+    background: touch.pressed ? Theme.button-pressed : touch.has-hover ? Theme.button-hover : Theme.button;
     accessible-role: button;
     accessible-label: text;
     Text {
-        x: 8px;
-        width: parent.width - 16px;
-        text: root.text + (arrow ? "…" : "");
+        x: 10px;
+        width: parent.width - 20px;
+        text: root.text;
         color: danger ? Theme.danger : Theme.text;
         font-size: 13px;
         horizontal-alignment: I18n.rtl ? right : left;
     }
 
-    if detail != "": Text {
+    if detail != "" || arrow: HorizontalLayout {
         x: I18n.rtl ? 8px : parent.width - self.width - 8px;
-        text: detail;
-        color: Theme.muted;
-        font-size: 12px;
+        width: self.preferred-width;
+        spacing: 4px;
+        if detail != "" && !I18n.rtl: Text {
+            text: detail;
+            color: Theme.muted;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+        if arrow: VerticalLayout {
+            alignment: center;
+            Icon {
+                width: 14px;
+                height: 14px;
+                name: I18n.rtl ? Icons.chevron-back : Icons.chevron-forward;
+                stroke: Theme.muted;
+            }
+        }
+        if detail != "" && I18n.rtl: Text {
+            text: detail;
+            color: Theme.muted;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
     }
 
     touch := TouchArea {
@@ -342,8 +371,6 @@ export component Dot inherits Rectangle {
     height: 8px;
     border-radius: self.width / 2;
     background: Theme.state-color(state);
-    border-width: 1px;
-    border-color: Theme.state-color(state).darker(0.3);
 }
 
 // Four bars and the round trip next to them; the bars grow from left to right in every language.
@@ -362,7 +389,8 @@ export component Signal inherits Rectangle {
         y: parent.height - 3px - bar * 3px;
         width: 3px;
         height: 3px + bar * 3px;
-        background: bar > level ? Theme.line-soft : level >= 3 ? Theme.ok : level == 2 ? Theme.warn : Theme.danger;
+        border-radius: 1px;
+        background: bar > level ? Theme.line : level >= 3 ? Theme.ok : level == 2 ? Theme.warn : Theme.danger;
     }
     Text {
         x: 20px;
@@ -382,24 +410,25 @@ export component Avatar inherits Rectangle {
     in property <bool> has-picture;
     // Kept for callers that used to hide the presence mark.
     in property <bool> plain;
-    width: 20px;
-    height: 20px;
+    width: 22px;
+    height: 22px;
+    border-radius: self.width / 2;
     background: tint;
-    border-width: 1px;
-    border-color: Theme.line;
     if !has-picture: Text {
         text: initial;
         color: white;
-        font-weight: 700;
-        font-size: root.height * 0.55;
+        font-weight: 600;
+        font-size: root.height * 0.5;
     }
-    if has-picture: Image {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: parent.height - 2px;
-        source: picture;
-        image-fit: cover;
+    if has-picture: Rectangle {
+        border-radius: self.width / 2;
+        clip: true;
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: picture;
+            image-fit: cover;
+        }
     }
 }
 
@@ -413,8 +442,9 @@ export component Tag inherits Text {
 // An endless progress bar for work of unknown length.
 export component Spinner inherits Rectangle {
     width: 140px;
-    height: 12px;
-    background: Theme.field;
+    height: 8px;
+    border-radius: 4px;
+    background: Theme.line-soft;
     border-width: 1px;
     border-color: Theme.line;
     clip: true;
@@ -422,31 +452,32 @@ export component Spinner inherits Rectangle {
     property <float> span: root.width / 1px + 40;
     for i in [0, 1, 2, 3]: Rectangle {
         x: (Math.mod(phase * span + i * 9, span) - 40) * 1px;
-        y: 2px;
+        y: 0;
         width: 7px;
-        height: parent.height - 4px;
+        height: parent.height;
+        border-radius: 3px;
         background: Theme.accent;
     }
 }
 
 export component ProgressBar inherits Rectangle {
     in property <int> progress;
-    height: 14px;
-    background: Theme.field;
-    border-width: 1px;
-    border-color: Theme.line;
+    height: 8px;
+    border-radius: 4px;
+    background: Theme.line-soft;
     Rectangle {
-        x: I18n.rtl ? parent.width - self.width - 2px : 2px;
-        y: 2px;
-        width: (parent.width - 4px) * max(0, min(100, progress)) / 100;
-        height: parent.height - 4px;
+        x: I18n.rtl ? parent.width - self.width : 0;
+        width: parent.width * max(0, min(100, progress)) / 100;
+        border-radius: 4px;
         background: Theme.accent;
     }
 }
 
-// A white list in a sunken frame.
+// A white list in a thin frame.
 export component ListBox inherits Rectangle {
     background: Theme.card;
+    border-radius: 4px;
+    clip: true;
     border-width: 1px;
     border-color: Theme.line;
     VerticalLayout {

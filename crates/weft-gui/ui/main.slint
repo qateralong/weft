@@ -1,7 +1,7 @@
 // The main screen: networks with their members as a tree, notices, the update note and short messages.
 
 import { Theme, I18n, Icons } from "theme.slint";
-import { Button, Dot, Signal, Avatar, Tag, Spinner, ProgressBar, Field, Separator } from "widgets.slint";
+import { Icon, IconButton, Button, Dot, Signal, Avatar, Tag, Spinner, ProgressBar, Field, Separator } from "widgets.slint";
 
 export struct MemberRow {
     nickname: string,
@@ -43,7 +43,7 @@ component MemberLine inherits Rectangle {
     height: 34px;
     background: touch.has-hover ? Theme.hover : transparent;
     property <length> pad: 6px;
-    property <length> menu-width: 24px;
+    property <length> menu-width: 26px;
     property <length> signal-width: 72px;
     property <length> address-width: 96px;
     property <length> name-start: 22px + 20px + 8px;
@@ -158,13 +158,10 @@ component MemberLine inherits Rectangle {
         }
     }
 
-    if data.manageable: Button {
+    if data.manageable: IconButton {
         x: place(root.width - pad - menu-width, menu-width);
         width: menu-width;
-        min-width: menu-width;
-        small: true;
-        height: 20px;
-        text: "…";
+        icon: Icons.more;
         clicked => {
             root.menu();
         }
@@ -175,25 +172,14 @@ component MemberLine inherits Rectangle {
     }
 }
 
-// The square with a plus or a minus that opens and closes a branch of a tree.
-component Expander inherits Rectangle {
+// The arrow that opens and closes a network.
+component Expander inherits Icon {
     in property <bool> collapsed;
-    width: 9px;
-    height: 9px;
-    background: Theme.field;
-    border-width: 1px;
-    border-color: Theme.line;
-    Rectangle {
-        width: 5px;
-        height: 1px;
-        background: Theme.text;
-    }
-
-    if collapsed: Rectangle {
-        width: 1px;
-        height: 5px;
-        background: Theme.text;
-    }
+    width: 14px;
+    height: 14px;
+    name: Icons.chevron;
+    stroke: Theme.muted;
+    transform-rotation: collapsed ? (I18n.rtl ? 90deg : -90deg) : 0deg;
 }
 
 component NetworkTitle inherits HorizontalLayout {
@@ -248,7 +234,7 @@ export component NetworkView inherits Rectangle {
     callback menu();
     callback member-menu(int);
     callback member-ping(int);
-    property <length> head-height: 26px;
+    property <length> head-height: 30px;
     property <length> row-height: 34px;
     height: head-height + (data.collapsed ? 0px : data.members.length * row-height);
     clip: true;
@@ -276,12 +262,11 @@ export component NetworkView inherits Rectangle {
             }
             if I18n.rtl: HorizontalLayout {
                 spacing: 4px;
-                padding-top: 2px;
-                padding-bottom: 2px;
-                Button {
-                    small: true;
-                    text: "…";
-                    min-width: 24px;
+                padding-top: 3px;
+                padding-bottom: 3px;
+                IconButton {
+                    icon: Icons.more;
+                    tooltip: I18n.t("gui-network-settings");
                     clicked => {
                         root.menu();
                     }
@@ -302,8 +287,8 @@ export component NetworkView inherits Rectangle {
 
             if !I18n.rtl: HorizontalLayout {
                 spacing: 4px;
-                padding-top: 2px;
-                padding-bottom: 2px;
+                padding-top: 3px;
+                padding-bottom: 3px;
                 if data.manager && data.requests > 0: Button {
                     small: true;
                     text: I18n.t("gui-requests") + " (" + data.requests + ")";
@@ -311,10 +296,9 @@ export component NetworkView inherits Rectangle {
                         root.requests();
                     }
                 }
-                Button {
-                    small: true;
-                    text: "…";
-                    min-width: 24px;
+                IconButton {
+                    icon: Icons.more;
+                    tooltip: I18n.t("gui-network-settings");
                     clicked => {
                         root.menu();
                     }
@@ -483,7 +467,8 @@ export component Toast inherits Rectangle {
     in property <bool> error;
     in property <bool> shown;
     visible: shown;
-    height: label.preferred-height + 10px;
+    height: label.preferred-height + 12px;
+    border-radius: 4px;
     background: error ? Theme.danger-soft : Theme.note;
     border-width: 1px;
     border-color: error ? Theme.danger : Theme.note-line;
@@ -504,7 +489,8 @@ export component UpdateBanner inherits Rectangle {
     in property <string> stage;
     in property <int> progress;
     callback download();
-    height: 30px;
+    height: 34px;
+    border-radius: 4px;
     background: Theme.note;
     border-width: 1px;
     border-color: Theme.note-line;
