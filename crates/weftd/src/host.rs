@@ -228,6 +228,8 @@ fn open_firewall(_port: u16) -> Vec<Rule> {
     Vec::new()
 }
 
+// Elsewhere Rule has no variants, so the loop body never runs.
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(clippy::never_loop))]
 fn close_firewall(rules: Vec<Rule>) {
     for rule in rules {
         match rule {
